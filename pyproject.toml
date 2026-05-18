@@ -1,0 +1,89 @@
+[project]
+name = "dectl"
+version = "0.1.0"
+description = "Data engineering control CLI for managing AWS pipelines"
+authors = [{ name = "Chris Birch", email = "datapointchris@gmail.com" }]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "typer>=0.15.0",
+    "rich>=13.0.0",
+    "boto3>=1.35.0",
+    "pydantic>=2.6.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+dectl = "dectl.main:app"
+
+[dependency-groups]
+dev = [
+    "bandit>=1.7.8",
+    "mypy>=1.10.0",
+    "pre-commit>=4.3.0",
+    "pytest>=8.0.0",
+    "ruff>=0.7.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.13,<1.0.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "dectl"
+module-root = "src"
+
+[tool.ruff]
+line-length = 140
+exclude = [".git", "__pycache__", ".mypy_cache", ".ruff_cache", ".vscode", ".venv", "build", "dist"]
+
+[tool.ruff.format]
+quote-style = "single"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["SIM108"]
+
+[tool.ruff.lint.isort]
+force-single-line = true
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.mypy]
+pretty = true
+ignore_missing_imports = true
+check_untyped_defs = false
+warn_return_any = false
+
+[tool.pytest.ini_options]
+addopts = "-vv"
+minversion = "8.0"
+testpaths = ["tests"]
+
+[tool.bandit]
+exclude_dirs = [".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".venv", "tests"]
+skips = ["B311", "B404", "B603"]
+
+[tool.codespell]
+skip = '*.lock'
+check-filenames = true
+
+[tool.refurb]
+enable_all = true
+ignore = ["FURB184"]
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+branch = "main"
+commit_message = "build(release): {version}"
+build_command = """
+    pip install uv
+    uv lock --upgrade-package dectl
+    git add uv.lock
+"""
