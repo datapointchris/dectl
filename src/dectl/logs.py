@@ -52,16 +52,45 @@ def tail_glue_run(logs_client, run_id: str, follow: bool = True) -> None:
     output_stream = wait_for_log_stream(logs_client, GLUE_OUTPUT_LOG_GROUP, run_id)
     error_stream = wait_for_log_stream(logs_client, GLUE_ERROR_LOG_GROUP, run_id)
 
-    if output_stream:
-        info(f'tailing {GLUE_OUTPUT_LOG_GROUP}/{output_stream}')
-        tail_log_stream(logs_client, GLUE_OUTPUT_LOG_GROUP, output_stream, follow=follow)
-
-    if error_stream:
-        info(f'tailing {GLUE_ERROR_LOG_GROUP}/{error_stream}')
-        tail_log_stream(logs_client, GLUE_ERROR_LOG_GROUP, error_stream, follow=follow)
-
     if not output_stream and not error_stream:
         console.print('[yellow]no log streams found[/yellow]')
+        return
+
+    streams = []
+    if output_stream:
+        info(f'tailing {GLUE_OUTPUT_LOG_GROUP}/{output_stream}')
+        streams.append((GLUE_OUTPUT_LOG_GROUP, output_stream))
+    if error_stream:
+        info(f'tailing {GLUE_ERROR_LOG_GROUP}/{error_stream}')
+        streams.append((GLUE_ERROR_LOG_GROUP, error_stream))
+
+    tokens = {s: None for s in streams}
+
+    while True:
+        got_events = False
+        for log_group, stream_name in streams:
+            kwargs: dict = {
+                'logGroupName': log_group,
+                'logStreamName': stream_name,
+                'startFromHead': True,
+            }
+            token = tokens[(log_group, stream_name)]
+            if token:
+                kwargs['nextToken'] = token
+                kwargs.pop('startFromHead', None)
+
+            resp = logs_client.get_log_events(**kwargs)
+            for event in resp.get('events', []):
+                prefix = '[red]ERROR[/red] ' if log_group == GLUE_ERROR_LOG_GROUP else ''
+                console.print(f'{prefix}{event["message"].rstrip()}')
+                got_events = True
+
+            tokens[(log_group, stream_name)] = resp.get('nextForwardToken')
+
+        if not got_events:
+            if not follow:
+                break
+            time.sleep(2)
 
 
 def tail_lambda_logs(logs_client, function_name: str, follow: bool = True) -> None:
