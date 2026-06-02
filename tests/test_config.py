@@ -21,7 +21,6 @@ defaults:
   region: us-west-2
 pipelines:
   foo:
-    type: glue
     glue_jobs:
       bar:
         name: foo-bar-job
@@ -45,10 +44,10 @@ def test_validation_rejects_missing_account_id():
         DectlConfig.model_validate(raw)
 
 
-def test_validation_rejects_invalid_pipeline_type():
+def test_validation_rejects_invalid_glue_job():
     raw = {
         'defaults': {'account_id': '111', 'region': 'us-east-1'},
-        'pipelines': {'bad': {'type': 'unknown'}},
+        'pipelines': {'bad': {'glue_jobs': {'j': {'scripts': ['s.py']}}}},
     }
     with pytest.raises(ValidationError):
         DectlConfig.model_validate(raw)
@@ -59,7 +58,6 @@ def test_glue_job_arguments_parsed_as_dict():
         'defaults': {'account_id': '111', 'region': 'us-east-1'},
         'pipelines': {
             'p': {
-                'type': 'glue',
                 'glue_jobs': {
                     'j': {
                         'name': 'j',

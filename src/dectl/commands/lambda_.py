@@ -18,7 +18,8 @@ from dectl.output import success
 def zip_lambda(source_dir: str) -> Path:
     source = Path(source_dir)
     if not source.exists():
-        raise typer.Exit(f'source directory not found: {source_dir}')
+        error(f'source directory not found: {source_dir}')
+        raise typer.Exit(1)
 
     zip_path = Path(tempfile.mkdtemp()) / 'lambda.zip'
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:

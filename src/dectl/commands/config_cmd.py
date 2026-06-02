@@ -34,7 +34,12 @@ def config_show() -> None:
     console.print()
 
     for name, pipeline in cfg.pipelines.items():
-        console.print(f'[bold]{name}[/bold] ({pipeline.type})')
+        types = []
+        if pipeline.glue_jobs:
+            types.append('glue')
+        if pipeline.lambdas:
+            types.append('lambda')
+        console.print(f'[bold]{name}[/bold] ({", ".join(types)})')
         for alias, job in pipeline.glue_jobs.items():
             console.print(f'  glue/{alias}: {job.name}')
         for alias, fn in pipeline.lambdas.items():
