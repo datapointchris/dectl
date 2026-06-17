@@ -29,6 +29,11 @@ def update_glue_job(session: boto3.Session, glue_job: GlueJobConfig) -> None:
     script_key = f'{glue_job.script_prefix}/{glue_job.scripts[0]}'
     command['ScriptLocation'] = f's3://{glue_job.script_bucket}/{script_key}'
 
+    connections = existing.get('Connections', {'Connections': []})
+    for connection in glue_job.connections:
+        if connection not in connections['Connections']:
+            connections['Connections'].append(connection)
+
     default_args = {'--JOB_NAME': glue_job.name}
     if len(glue_job.scripts) > 1:
         extra_files = ','.join(f's3://{glue_job.script_bucket}/{glue_job.script_prefix}/{s}' for s in glue_job.scripts[1:])
@@ -42,6 +47,7 @@ def update_glue_job(session: boto3.Session, glue_job: GlueJobConfig) -> None:
         JobUpdate={
             'Role': glue_job.role,
             'Command': command,
+            'Connections': connections,
             'DefaultArguments': default_args,
         },
     )

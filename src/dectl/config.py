@@ -59,6 +59,7 @@ class GlueJobConfig(BaseModel):
     script_prefix: str = 'scripts'
     scripts: list[str]
     role: str
+    connections: list[str] = []
     arguments: dict[str, str] = {}
 
 
