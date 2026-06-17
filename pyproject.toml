@@ -1,6 +1,6 @@
 [project]
 name = "dectl"
-version = "0.1.0"
+version = "0.2.0"
 description = "Data engineering control CLI for managing AWS pipelines"
 authors = [{ name = "Chris Birch", email = "datapointchris@gmail.com" }]
 license = { text = "MIT" }
@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 dectl = "dectl.main:app"
+
 
 [dependency-groups]
 dev = [
