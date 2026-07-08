@@ -30,6 +30,7 @@ pipelines:
       my-function:
         name: my-dev-lambda-function
         source_dir: modules/lambda/my_function/code
+        alias: live
     buckets:
       raw: my-dev-raw-data-bucket
 """
@@ -66,6 +67,7 @@ class GlueJobConfig(BaseModel):
 class LambdaConfig(BaseModel):
     name: str
     source_dir: str
+    alias: str | None = None
 
 
 class BucketConfig(BaseModel):
