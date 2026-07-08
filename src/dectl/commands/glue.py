@@ -75,8 +75,15 @@ def start_and_tail(session: boto3.Session, glue_job: GlueJobConfig) -> None:
 
 
 def make_glue_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Typer:
-    glue_app = typer.Typer(help=f'Glue pipeline: {pipeline_name}')
     glue_jobs = pipeline.glue_jobs
+    alias_list = ', '.join(glue_jobs.keys()) or '(none configured)'
+    example = next(iter(glue_jobs), 'JOB')
+    job_arg_help = f'Glue job alias from config. Available: {alias_list}'
+
+    glue_app = typer.Typer(
+        no_args_is_help=True,
+        help=(f'Deploy scripts, run, and tail Glue jobs in [bold]{pipeline_name}[/bold].\n\nJobs: {alias_list}'),
+    )
 
     def resolve_job(job_name: str) -> GlueJobConfig:
         if job_name not in glue_jobs:
@@ -85,11 +92,16 @@ def make_glue_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Ty
             raise typer.Exit(1)
         return glue_jobs[job_name]
 
-    @glue_app.command()
+    @glue_app.command(
+        epilog=f'Example:\n\ndectl {pipeline_name} glue deploy {example}',
+    )
     def deploy(
-        job: Annotated[str, typer.Argument(help='Glue job alias from config')],
+        job: Annotated[str, typer.Argument(help=job_arg_help)],
     ) -> None:
-        """Upload scripts to S3 and update the Glue job."""
+        """Upload the job's scripts to S3 and point the Glue job at them.
+
+        Does not start the job — run it separately with the [bold]run[/bold] command.
+        """
         from dectl.session import make_session
 
         glue_job = resolve_job(job)
@@ -97,23 +109,31 @@ def make_glue_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Ty
         upload_scripts(session, glue_job)
         update_glue_job(session, glue_job)
 
-    @glue_app.command()
+    @glue_app.command(
+        epilog=f'Example:\n\ndectl {pipeline_name} glue run {example}',
+    )
     def run(
-        job: Annotated[str, typer.Argument(help='Glue job alias from config')],
+        job: Annotated[str, typer.Argument(help=job_arg_help)],
     ) -> None:
-        """Start the Glue job and tail logs."""
+        """Start the Glue job and stream its output and error logs until it finishes."""
         from dectl.session import make_session
 
         glue_job = resolve_job(job)
         session = make_session(config)
         start_and_tail(session, glue_job)
 
-    @glue_app.command()
+    @glue_app.command(
+        epilog=(
+            'Examples:\n\n'
+            f'dectl {pipeline_name} glue logs {example} — tail the most recent run\n\n'
+            f'dectl {pipeline_name} glue logs {example} jr_abc123 — tail a specific run'
+        ),
+    )
     def logs(
-        job: Annotated[str, typer.Argument(help='Glue job alias from config')],
-        run_id: Annotated[str | None, typer.Argument(help='Glue job run ID to tail')] = None,
+        job: Annotated[str, typer.Argument(help=job_arg_help)],
+        run_id: Annotated[str | None, typer.Argument(help='Run ID to tail. Defaults to the most recent run.')] = None,
     ) -> None:
-        """Tail CloudWatch logs for a Glue job run."""
+        """Tail CloudWatch output and error logs for a Glue job run (defaults to the latest run)."""
         from dectl.session import make_session
 
         glue_job = resolve_job(job)

@@ -40,15 +40,34 @@ def jenkins_request(config: DectlConfig, method: str, path: str, **kwargs):
 
 
 def make_deploy_app(pipeline_name: str, job_config: JenkinsJobConfig, config: DectlConfig) -> typer.Typer:
-    deploy_app = typer.Typer(help=f'Jenkins deploy: {pipeline_name}')
+    deploy_app = typer.Typer(
+        help=(
+            f'Run the Jenkins Terraform deploy for [bold]{pipeline_name}[/bold] (the production path).\n\n'
+            'Running this with no subcommand triggers a deploy build. Use "status" and "logs" '
+            'to inspect the last build without starting a new one.'
+        ),
+    )
 
-    @deploy_app.callback(invoke_without_command=True)
+    @deploy_app.callback(
+        invoke_without_command=True,
+        epilog=(
+            'Examples:\n\n'
+            f'dectl {pipeline_name} deploy — trigger a deploy and stream the console\n\n'
+            f'dectl {pipeline_name} deploy --dry-run — run terraform plan only\n\n'
+            f'dectl {pipeline_name} deploy status — show the last build result'
+        ),
+    )
     def deploy(
         ctx: typer.Context,
-        dry_run: Annotated[bool, typer.Option('--dry-run', help='Run terraform plan only')] = False,
+        dry_run: Annotated[bool, typer.Option('--dry-run', help='Run terraform plan only, do not apply')] = False,
         follow: Annotated[bool, typer.Option('--follow', '-f', help='Stream console output after triggering')] = True,
     ) -> None:
-        """Trigger a Jenkins deploy build."""
+        """Trigger a Jenkins Terraform deploy build for this pipeline.
+
+        This is the canonical release path: it publishes the real function
+        versions and moves aliases through Terraform. Use "dectl PIPELINE lambda
+        deploy --publish" for fast local iteration between releases.
+        """
         if ctx.invoked_subcommand is not None:
             return
 
@@ -73,7 +92,7 @@ def make_deploy_app(pipeline_name: str, job_config: JenkinsJobConfig, config: De
 
     @deploy_app.command()
     def status() -> None:
-        """Show the last build status."""
+        """Show the result of the most recent Jenkins build for this pipeline."""
         job_path = job_config.job_path.replace('/', '/job/')
         resp = jenkins_request(config, 'GET', f'/job/{job_path}/lastBuild/api/json')
 
@@ -96,9 +115,9 @@ def make_deploy_app(pipeline_name: str, job_config: JenkinsJobConfig, config: De
 
     @deploy_app.command()
     def logs(
-        follow: Annotated[bool, typer.Option('--follow', '-f', help='Tail logs if build is running')] = False,
+        follow: Annotated[bool, typer.Option('--follow', '-f', help='Keep tailing while the build is still running')] = False,
     ) -> None:
-        """Show console output from the last build."""
+        """Show (and optionally tail) console output from the most recent build."""
         stream_console(config, job_config, follow=follow)
 
     def strip_jenkins_noise(text: str) -> str:
@@ -126,7 +145,7 @@ def make_deploy_app(pipeline_name: str, job_config: JenkinsJobConfig, config: De
 
             if not more_data or not follow:
                 if not follow and more_data:
-                    info('\n[dim](build still running, use --follow to tail)[/dim]')
+                    info('\n[yellow](build still running — use --follow to tail)[/yellow]')
                 break
 
             offset = new_offset

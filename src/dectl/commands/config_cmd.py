@@ -8,12 +8,15 @@ from dectl.output import error
 from dectl.output import info
 from dectl.output import success
 
-config_app = typer.Typer(help='Manage dectl configuration')
+config_app = typer.Typer(
+    no_args_is_help=True,
+    help='Manage dectl configuration at ~/.config/dectl/config.yaml.',
+)
 
 
 @config_app.command('init')
 def config_init() -> None:
-    """Create a template config file."""
+    """Create a starter config file (fails if one already exists)."""
     if CONFIG_PATH.exists():
         error(f'config already exists at {CONFIG_PATH}')
         raise typer.Exit(1)
@@ -23,14 +26,14 @@ def config_init() -> None:
 
 @config_app.command('show')
 def config_show() -> None:
-    """Display the current config."""
+    """Display the loaded pipelines and their resources (alias → AWS name)."""
     cfg = load_config()
     if cfg is None:
         error(f'no config found at {CONFIG_PATH}')
         info('run "dectl config init" to create one')
         raise typer.Exit(1)
 
-    console.print(f'[dim]config: {CONFIG_PATH}[/dim]')
+    console.print(f'[bold]config:[/bold] {CONFIG_PATH}')
     console.print()
 
     for name, pipeline in cfg.pipelines.items():
