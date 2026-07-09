@@ -1,6 +1,31 @@
 # CHANGELOG
 
 
+## v0.4.0 (2026-07-09)
+
+### Features
+
+- **logs**: Pretty-print structured json log events
+  ([`1178791`](https://github.com/datapointchris/dectl/commit/1178791a297d5726228a688d2bed8e1d12b3c030))
+
+Structured loggers (durable functions, python-json-logger) emit each event as one dense JSON line
+  with any traceback collapsed into a single \n-escaped field, which is unreadable when tailed
+  verbatim. render_event detects when the whole message is a JSON object, lifts timestamp/level/
+  message into a colored header, lists remaining fields, and re-expands traceback fields into
+  syntax-highlighted frames via rich Syntax. Values are escaped so log text containing brackets is
+  not parsed as Rich markup. Non-JSON lines print verbatim -- no partial parsing of half-structured
+  input. Wired into both the Glue and Lambda tail loops.
+
+- **logs**: Tag glue events with source stream
+  ([`b4f2212`](https://github.com/datapointchris/dectl/commit/b4f22122ab51d274651621122a4065a257cfc73b))
+
+Both the output and error log groups are tailed, but only the error group was tagged, and its
+  [ERROR] label conflated the error stream with error-level logs -- misleading on Glue where INFO
+  records land in the error group. Tag every event with its source stream (out/err) via a testable
+  stream_prefix helper, so a line duplicated across both groups by a propagating logger in the job
+  is obvious at a glance.
+
+
 ## v0.3.0 (2026-07-08)
 
 ### Documentation
