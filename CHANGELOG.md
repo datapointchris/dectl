@@ -1,6 +1,42 @@
 # CHANGELOG
 
 
+## v0.4.1 (2026-07-09)
+
+### Bug Fixes
+
+- **glue**: Preserve existing job definition on deploy
+  ([`92b9ea8`](https://github.com/datapointchris/dectl/commit/92b9ea8bc7d20818e31b5e5e0ad9f88401d6f752))
+
+update_glue_job built a minimal JobUpdate from scratch, which broke deploys in three ways, since
+  Glue's UpdateJob replaces the whole definition rather than patching it:
+
+- Empty Connections: get_job omits the Connections key for jobs with none, so the old default
+  produced {'Connections': []}, which UpdateJob rejects with "empty connections list is not allowed
+  when Connections is specified". - Field reset: omitted fields (Timeout, GlueVersion, WorkerType,
+  MaxRetries, ExecutionProperty, ...) and default arguments set outside dectl silently reverted to
+  defaults on every deploy. - Capacity conflict: Spark jobs report a derived MaxCapacity alongside
+  WorkerType/NumberOfWorkers, and echoing both back is rejected with "do not set Max Capacity if
+  using Worker Type and Number of Workers".
+
+Now start from the existing definition, strip the read-only keys UpdateJob rejects (Name, CreatedOn,
+  LastModifiedOn, ProfileName, AllocatedCapacity), drop MaxCapacity when the worker-based model is
+  in use, merge connections and default arguments additively, and override only Role and
+  ScriptLocation.
+
+Add unit tests for the payload logic plus an opt-in live AWS round-trip test (--run-integration)
+  that creates a throwaway role and job of each type, deploys, asserts the definition survives, and
+  tears everything down.
+
+- **lambda**: Surface function errors from invoke
+  ([`f76540f`](https://github.com/datapointchris/dectl/commit/f76540fc32e146958df0f41362c205f35b4c2154))
+
+A handled or unhandled exception in a Lambda still returns HTTP 200 with an error payload;
+  FunctionError is the only signal it failed. invoke printed that payload as though it were a
+  successful result and exited zero. Check FunctionError, label the output as an error, and exit
+  non-zero so failures are visible and scriptable.
+
+
 ## v0.4.0 (2026-07-09)
 
 ### Features
