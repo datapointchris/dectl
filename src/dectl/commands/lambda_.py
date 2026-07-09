@@ -139,6 +139,13 @@ def make_lambda_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.
             Payload=payload.encode(),
         )
         result = json.loads(resp['Payload'].read())
+        # A handled/unhandled exception in the function still returns 200 with the error
+        # payload; FunctionError is the only signal it failed. Without this the stack trace
+        # prints as though it were a successful result.
+        if resp.get('FunctionError'):
+            error(f'function returned an error ({resp["FunctionError"]}):')
+            console.print_json(json.dumps(result, indent=2))
+            raise typer.Exit(1)
         console.print_json(json.dumps(result, indent=2))
 
     @lambda_app.command(
