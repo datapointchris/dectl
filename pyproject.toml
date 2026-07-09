@@ -67,6 +67,9 @@ warn_return_any = false
 addopts = "-vv"
 minversion = "8.0"
 testpaths = ["tests"]
+markers = [
+    "integration: live AWS integration tests; opt-in via --run-integration, creates and deletes real resources",
+]
 
 [tool.bandit]
 exclude_dirs = [".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".venv", "tests"]

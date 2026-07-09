@@ -25,32 +25,51 @@ def update_glue_job(session: boto3.Session, glue_job: GlueJobConfig) -> None:
     resp = glue.get_job(JobName=glue_job.name)
     existing = resp['Job']
 
-    command = existing.get('Command', {})
+    # UpdateJob replaces the whole job definition rather than patching it, so start from
+    # the existing definition and override only what dectl manages. Otherwise every deploy
+    # silently resets omitted fields (Timeout, GlueVersion, WorkerType, MaxRetries, ...) to
+    # their defaults. Name/CreatedOn/LastModifiedOn/ProfileName are read-only and rejected by
+    # UpdateJob; AllocatedCapacity is a deprecated server-derived mirror of MaxCapacity that
+    # conflicts with WorkerType if echoed back, so drop all five.
+    read_only_keys = ('Name', 'CreatedOn', 'LastModifiedOn', 'ProfileName', 'AllocatedCapacity')
+    job_update = {key: value for key, value in existing.items() if key not in read_only_keys}
+
+    # Spark jobs (glueetl) report a derived MaxCapacity alongside WorkerType/NumberOfWorkers, but
+    # UpdateJob rejects setting both. Drop MaxCapacity when the job uses the worker-based model.
+    if 'WorkerType' in job_update or 'NumberOfWorkers' in job_update:
+        job_update.pop('MaxCapacity', None)
+
+    job_update['Role'] = glue_job.role
+
+    command = job_update.get('Command', {})
     script_key = f'{glue_job.script_prefix}/{glue_job.scripts[0]}'
     command['ScriptLocation'] = f's3://{glue_job.script_bucket}/{script_key}'
+    job_update['Command'] = command
 
-    connections = existing.get('Connections', {'Connections': []})
+    connections = list(existing.get('Connections', {}).get('Connections', []))
     for connection in glue_job.connections:
-        if connection not in connections['Connections']:
-            connections['Connections'].append(connection)
+        if connection not in connections:
+            connections.append(connection)
+    # Glue rejects UpdateJob when Connections is present but its list is empty, so only
+    # include it when the job actually has connections.
+    if connections:
+        job_update['Connections'] = {'Connections': connections}
+    else:
+        job_update.pop('Connections', None)
 
-    default_args = {'--JOB_NAME': glue_job.name}
+    # Merge onto the existing default arguments so args set outside dectl (--TempDir,
+    # --additional-python-modules, ...) survive the deploy instead of being wiped.
+    default_args = dict(existing.get('DefaultArguments', {}))
+    default_args['--JOB_NAME'] = glue_job.name
     if len(glue_job.scripts) > 1:
         extra_files = ','.join(f's3://{glue_job.script_bucket}/{glue_job.script_prefix}/{s}' for s in glue_job.scripts[1:])
         default_args['--extra-py-files'] = extra_files
     for key, value in glue_job.arguments.items():
         arg_key = key if key.startswith('--') else f'--{key}'
         default_args[arg_key] = value
+    job_update['DefaultArguments'] = default_args
 
-    glue.update_job(
-        JobName=glue_job.name,
-        JobUpdate={
-            'Role': glue_job.role,
-            'Command': command,
-            'Connections': connections,
-            'DefaultArguments': default_args,
-        },
-    )
+    glue.update_job(JobName=glue_job.name, JobUpdate=job_update)
     success(f'updated job {glue_job.name}')
 
 
