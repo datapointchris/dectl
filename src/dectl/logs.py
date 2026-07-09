@@ -7,6 +7,14 @@ GLUE_OUTPUT_LOG_GROUP = '/aws-glue/python-jobs/output'
 GLUE_ERROR_LOG_GROUP = '/aws-glue/python-jobs/error'
 
 
+def stream_prefix(log_group: str) -> str:
+    """Tag each event with its source stream so a line duplicated across the
+    output and error groups (a propagating logger in the job) is obvious."""
+    if log_group == GLUE_ERROR_LOG_GROUP:
+        return '[red]err[/red] '
+    return '[cyan]out[/cyan] '
+
+
 def wait_for_log_stream(logs_client, log_group: str, stream_prefix: str, timeout: int = 120) -> str | None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -81,8 +89,7 @@ def tail_glue_run(logs_client, run_id: str, follow: bool = True) -> None:
 
             resp = logs_client.get_log_events(**kwargs)
             for event in resp.get('events', []):
-                prefix = '[red]ERROR[/red] ' if log_group == GLUE_ERROR_LOG_GROUP else ''
-                console.print(f'{prefix}{event["message"].rstrip()}')
+                console.print(f'{stream_prefix(log_group)}{event["message"].rstrip()}')
                 got_events = True
 
             tokens[(log_group, stream_name)] = resp.get('nextForwardToken')
