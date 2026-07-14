@@ -10,6 +10,8 @@ TEMPLATE_CONFIG = """\
 defaults:
   account_id: ""
   region: us-east-2
+  # Default environment when neither --env nor DECTL_ENV is given. The {env} token in any
+  # name below is replaced with the active environment (dev/staging/prod/...).
   environment: dev
   aws_profile: ""
 
@@ -17,27 +19,27 @@ pipelines:
   example-pipeline:
     glue_jobs:
       source-copy:
-        name: my-dev-source-copy-job
+        name: my-{env}-source-copy-job
         script_bucket: my-script-bucket
         script_prefix: scripts
         scripts:
           - my-source-copy.py
-        role: "arn:aws:iam::123456789012:role/my-glue-role"
+        role: "arn:aws:iam::123456789012:role/my-{env}-glue-role"
         arguments:
-          SOURCE_BUCKET: my-source-bucket
+          SOURCE_BUCKET: my-{env}-source-bucket
           SOURCE_PREFIX: incoming
     lambdas:
       my-function:
-        name: my-dev-lambda-function
+        name: my-{env}-lambda-function
         source_dir: modules/lambda/my_function/code
         alias: live
     step_functions:
       my-flow:
-        name: my-dev-state-machine
-        log_group: /aws/vendedlogs/states/my-dev-state-machine
+        name: my-{env}-state-machine
+        log_group: /aws/vendedlogs/states/my-{env}-state-machine
     buckets:
-      raw: my-dev-raw-data-bucket
-      curated: my-dev-curated-data-bucket
+      raw: my-{env}-raw-data-bucket
+      curated: my-{env}-curated-data-bucket
     monitor:
       lambdas:
         - my-function

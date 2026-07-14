@@ -22,6 +22,33 @@ dectl uslegal list                 # alias -> real AWS name mapping
 dectl uslegal lambda --help        # functions and their actions
 ```
 
+## Environments
+
+Resource names in config carry an `{env}` placeholder, so one config drives dev / staging / prod:
+
+```yaml
+lambdas:
+  do-thing:
+    name: salesdata-{env}-ds-do-thing-lambda
+```
+
+```bash
+dectl salesdata list                 # dev (the default)
+dectl --env prod salesdata list      # -> salesdata-prod-ds-do-thing-lambda
+DECTL_ENV=staging dectl salesdata s3 export
+```
+
+Resolution priority is `--env` > `DECTL_ENV` > `defaults.environment` in config > `dev`. This
+assumes one AWS account across environments — only the names change.
+
+To see which environment you're pointed at (and why), run `dectl env`, or just `dectl` — the
+active env is printed as a banner above the help:
+
+```bash
+dectl env
+# environment: prod  (from DECTL_ENV)
+```
+
 ## Lambda dev loop vs release
 
 `ALIAS` values are the short config keys, not the full AWS names.

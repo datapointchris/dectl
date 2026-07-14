@@ -1,5 +1,6 @@
 from dectl.commands.monitor import build_monitor_sources
 from dectl.config import DectlConfig
+from dectl.env import active_environment
 
 
 def pipeline_from(pipeline_config: dict):
@@ -47,6 +48,20 @@ def test_build_monitor_sources_warns_on_unconfigured_resource():
 
     assert sources == []
     assert any('ghost' in warning for warning in warnings)
+
+
+def test_build_monitor_sources_substitutes_active_env(monkeypatch):
+    monkeypatch.setattr(active_environment, 'name', 'prod')
+    pipeline = pipeline_from(
+        {
+            'lambdas': {'ingest': {'name': 'salesdata-{env}-ingest', 'source_dir': 'x'}},
+            'monitor': {'lambdas': ['ingest']},
+        }
+    )
+    sources, warnings = build_monitor_sources(pipeline)
+
+    assert warnings == []
+    assert sources[0][1] == '/aws/lambda/salesdata-prod-ingest'
 
 
 def test_build_monitor_sources_pads_aliases_to_align():

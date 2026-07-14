@@ -3,6 +3,7 @@ from typer.testing import CliRunner
 from dectl.commands.s3 import make_s3_app
 from dectl.commands.s3 import shell_variable_name
 from dectl.config import DectlConfig
+from dectl.env import active_environment
 
 runner = CliRunner()
 
@@ -29,6 +30,17 @@ def test_export_emits_evalable_lowercase_statements():
     assert result.exit_code == 0
     assert "export my_proj_raw='s3://my-raw-bucket'" in result.stdout
     assert "export my_proj_curated='s3://my-curated-bucket'" in result.stdout
+
+
+def test_export_substitutes_active_env_in_bucket_name(monkeypatch):
+    monkeypatch.setattr(active_environment, 'name', 'prod')
+    config = make_config({'raw': 'salesdata-{env}-raw'})
+    app = make_s3_app('proj', config.pipelines['proj'], config)
+
+    result = runner.invoke(app, ['export'])
+
+    assert result.exit_code == 0
+    assert "export proj_raw='s3://salesdata-prod-raw'" in result.stdout
 
 
 def test_mount_rejects_unknown_shortname():

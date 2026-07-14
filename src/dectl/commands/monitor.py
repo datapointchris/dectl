@@ -2,6 +2,7 @@ import typer
 
 from dectl.config import DectlConfig
 from dectl.config import PipelineConfig
+from dectl.env import substitute_env
 from dectl.logs import tail_log_groups
 from dectl.output import console
 from dectl.output import error
@@ -22,7 +23,7 @@ def build_monitor_sources(pipeline: PipelineConfig) -> tuple[list[tuple[str, str
         if fn is None:
             warnings.append(f'monitor lists lambda "{alias}" but it is not configured')
             continue
-        entries.append((alias, 'cyan', f'/aws/lambda/{fn.name}'))
+        entries.append((alias, 'cyan', f'/aws/lambda/{substitute_env(fn.name)}'))
 
     for alias in pipeline.monitor.step_functions:
         sfn = pipeline.step_functions.get(alias)
@@ -32,7 +33,7 @@ def build_monitor_sources(pipeline: PipelineConfig) -> tuple[list[tuple[str, str
         if not sfn.log_group:
             warnings.append(f'step function "{alias}" has no log_group set; enable CloudWatch logging to monitor it')
             continue
-        entries.append((alias, 'magenta', sfn.log_group))
+        entries.append((alias, 'magenta', substitute_env(sfn.log_group)))
 
     # Left-pad the aliases so the prefixes line up into readable columns in the combined stream.
     width = max((len(alias) for alias, color, group in entries), default=0)

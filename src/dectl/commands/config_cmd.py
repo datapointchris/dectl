@@ -3,6 +3,7 @@ import typer
 from dectl.config import CONFIG_PATH
 from dectl.config import init_config
 from dectl.config import load_config
+from dectl.env import substitute_env
 from dectl.output import console
 from dectl.output import error
 from dectl.output import info
@@ -48,11 +49,11 @@ def config_show() -> None:
             types.append('s3')
         console.print(f'[bold]{name}[/bold] ({", ".join(types)})')
         for alias, job in pipeline.glue_jobs.items():
-            console.print(f'  glue/{alias}: {job.name}')
+            console.print(f'  glue/{alias}: {substitute_env(job.name)}')
         for alias, fn in pipeline.lambdas.items():
-            console.print(f'  lambda/{alias}: {fn.name}')
+            console.print(f'  lambda/{alias}: {substitute_env(fn.name)}')
         for alias, sfn in pipeline.step_functions.items():
-            console.print(f'  sfn/{alias}: {sfn.name}')
+            console.print(f'  sfn/{alias}: {substitute_env(sfn.name)}')
         for shortname, bucket in pipeline.buckets.items():
-            console.print(f'  s3/{shortname}: {bucket}')
+            console.print(f'  s3/{shortname}: {substitute_env(bucket)}')
         console.print()

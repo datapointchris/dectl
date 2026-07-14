@@ -54,6 +54,26 @@ its own block listing which lambdas / step machines to tail, kept separate so th
 is defined in one scannable place. When you change a model, update `TEMPLATE_CONFIG` in the same
 file so `config init` stays valid.
 
+### Environments
+
+Resource names carry an `{env}` placeholder (e.g. `salesdata-{env}-ds-thing`). `env.py` holds the
+env resolved for the invocation and substitutes the token — one config drives every environment
+by swapping a single token, rather than deriving the env out of inconsistent names. The active
+env is resolved once in `main.py`'s root callback (`--env` option with `envvar='DECTL_ENV'`,
+default from `defaults.environment`), giving the priority chain **`--env` > `DECTL_ENV` > config
+`environment` > `dev`**. Substitution happens at **runtime, at the `resolve_*` chokepoints** (via
+`render_env_model`, or `substitute_env` for bare strings) and in the display loops — never at
+import, because the flag is not known until the command runs. This assumes one AWS account across
+environments (names change, the session does not).
+
+The active env is surfaced so you always know which one you are pointed at: bare `dectl` prints an
+`environment: <name> (from <source>)` banner above the help, and `dectl env` prints it on demand.
+The source label is exact — `main.py` reads Click's `ctx.get_parameter_source('env')` to tell flag
+from `DECTL_ENV` from config/default. (This is why the top-level app drops `no_args_is_help`: that
+flag would short-circuit to help before the callback could print the banner, so the callback prints
+help itself.) `--help` still shows Click's static `[default: dev]` regardless of the resolved env,
+which is why the banner and `dectl env` exist.
+
 ## Cross-cutting modules
 
 | Module | Responsibility |

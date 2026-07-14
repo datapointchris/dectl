@@ -8,6 +8,7 @@ import typer
 
 from dectl.config import DectlConfig
 from dectl.config import LambdaConfig
+from dectl.env import render_env_model
 from dectl.logs import tail_lambda_logs
 from dectl.output import console
 from dectl.output import error
@@ -45,7 +46,7 @@ def make_lambda_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.
             known = ', '.join(lambdas.keys())
             error(f'unknown function "{function}" for pipeline {pipeline_name}. known: {known}')
             raise typer.Exit(1)
-        return lambdas[function]
+        return render_env_model(lambdas[function])
 
     @lambda_app.command(
         epilog=(

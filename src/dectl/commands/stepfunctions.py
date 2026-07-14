@@ -5,6 +5,7 @@ from rich.table import Table
 
 from dectl.config import DectlConfig
 from dectl.config import StepFunctionConfig
+from dectl.env import render_env_model
 from dectl.logs import tail_execution_history
 from dectl.output import console
 from dectl.output import error
@@ -32,7 +33,7 @@ def make_sfn_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Typ
             known = ', '.join(step_functions.keys())
             error(f'unknown state machine "{alias}" for pipeline {pipeline_name}. known: {known}')
             raise typer.Exit(1)
-        return step_functions[alias]
+        return render_env_model(step_functions[alias])
 
     def latest_execution_arn(client, arn: str) -> str | None:
         resp = client.list_executions(stateMachineArn=arn, maxResults=1)

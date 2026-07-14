@@ -6,6 +6,7 @@ import typer
 
 from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
+from dectl.env import render_env_model
 from dectl.logs import tail_glue_run
 from dectl.output import error
 from dectl.output import info
@@ -109,7 +110,7 @@ def make_glue_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Ty
             known = ', '.join(glue_jobs.keys())
             error(f'unknown job "{job_name}" for pipeline {pipeline_name}. known: {known}')
             raise typer.Exit(1)
-        return glue_jobs[job_name]
+        return render_env_model(glue_jobs[job_name])
 
     @glue_app.command(
         epilog=f'Example:\n\ndectl {pipeline_name} glue deploy {example}',

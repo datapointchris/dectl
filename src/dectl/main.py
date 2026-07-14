@@ -13,13 +13,34 @@ from dectl.commands.search import run_search
 from dectl.commands.stepfunctions import make_sfn_app
 from dectl.config import PipelineConfig
 from dectl.config import load_config
+from dectl.env import active_environment
+from dectl.env import set_active_environment
+from dectl.env import substitute_env
 from dectl.output import error
 from dectl.output import info
 from dectl.output import success
 from dectl.session import make_session
 
-app = typer.Typer(name='dectl', invoke_without_command=True, no_args_is_help=True)
+# no_args_is_help is intentionally omitted: it would short-circuit to help before the callback
+# runs, so the callback (invoke_without_command) prints the env banner then the help itself.
+app = typer.Typer(name='dectl', invoke_without_command=True)
 app.add_typer(config_app, name='config', rich_help_panel='Global commands')
+
+
+def print_environment_banner() -> None:
+    info(f'environment: [bold]{active_environment.name}[/bold]  (from {active_environment.source})')
+
+
+# Click's ParameterSource enum names -> how a user would refer to that source.
+ENV_SOURCE_LABELS = {'COMMANDLINE': '--env', 'ENVIRONMENT': 'DECTL_ENV'}
+
+
+def resolve_env_source(ctx: typer.Context) -> str:
+    source = ctx.get_parameter_source('env')
+    source_name = source.name if source is not None else 'DEFAULT'
+    # A DEFAULT source means the option default fired — and that default is sourced from the
+    # config's `environment` field (falling back to 'dev' only when there is no config at all).
+    return ENV_SOURCE_LABELS.get(source_name, 'config' if cfg else 'default')
 
 
 def print_pipeline(name: str, p: PipelineConfig) -> None:
@@ -34,21 +55,22 @@ def print_pipeline(name: str, p: PipelineConfig) -> None:
         types.append('s3')
     info(f'[bold]{name}[/bold] ({", ".join(types)})')
     for alias, job in p.glue_jobs.items():
-        info(f'  glue/{alias}: {job.name}')
-        info(f'    bucket: s3://{job.script_bucket}/{job.script_prefix}/')
+        info(f'  glue/{alias}: {substitute_env(job.name)}')
+        info(f'    bucket: s3://{substitute_env(job.script_bucket)}/{job.script_prefix}/')
         for s in job.scripts:
             info(f'      {s}')
     for alias, fn in p.lambdas.items():
-        info(f'  lambda/{alias}: {fn.name}')
+        info(f'  lambda/{alias}: {substitute_env(fn.name)}')
     for alias, sfn in p.step_functions.items():
-        info(f'  sfn/{alias}: {sfn.name}')
+        info(f'  sfn/{alias}: {substitute_env(sfn.name)}')
     for shortname, bucket in p.buckets.items():
-        info(f'  s3/{shortname}: {bucket}')
+        info(f'  s3/{shortname}: {substitute_env(bucket)}')
     info('')
 
 
 cfg = load_config()
 EXAMPLE_PIPELINE = next(iter(cfg.pipelines), 'my-pipeline') if cfg and cfg.pipelines else 'my-pipeline'
+DEFAULT_ENVIRONMENT = cfg.defaults.environment if cfg else 'dev'
 if cfg:
     for name, pipeline in cfg.pipelines.items():
         resources = []
@@ -137,7 +159,17 @@ def update() -> None:
         'dectl search my-bucket — find AWS resources by keyword'
     ),
 )
-def main(ctx: typer.Context) -> None:
+def main(
+    ctx: typer.Context,
+    env: Annotated[
+        str,
+        typer.Option(
+            '--env',
+            envvar='DECTL_ENV',
+            help='Environment substituted for {env} in resource names. Priority: --env > DECTL_ENV > config > dev.',
+        ),
+    ] = DEFAULT_ENVIRONMENT,
+) -> None:
     """[bold]dectl[/bold] — data engineering control for AWS pipelines.
 
     Commands follow the shape: [bold]dectl PIPELINE RESOURCE ACTION [ALIAS] [OPTIONS][/bold]
@@ -149,8 +181,13 @@ def main(ctx: typer.Context) -> None:
 
     Aliases (the JOB / FUNCTION names) are the short keys from your config, not
     the full AWS resource names — run [bold]dectl PIPELINE list[/bold] to see the mapping.
+
+    Config names carry an [bold]{env}[/bold] placeholder; [bold]--env prod[/bold] (or [bold]DECTL_ENV=prod[/bold])
+    substitutes it, so one config drives every environment.
     """
+    set_active_environment(env, resolve_env_source(ctx))
     if ctx.invoked_subcommand is None:
+        print_environment_banner()
         print(ctx.get_help())
 
 
@@ -169,6 +206,12 @@ def search(
         raise typer.Exit(1)
     session = make_session(cfg)
     run_search(session, keyword, cfg.defaults.region)
+
+
+@app.command('env', rich_help_panel='Global commands')
+def show_env() -> None:
+    """Show the active environment substituted for {env}, and where it was resolved from."""
+    print_environment_banner()
 
 
 @app.command('list', rich_help_panel='Global commands')

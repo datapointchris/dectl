@@ -8,6 +8,7 @@ from typing import Annotated
 import typer
 
 from dectl.config import DectlConfig
+from dectl.env import substitute_env
 from dectl.output import error
 from dectl.output import success
 
@@ -41,7 +42,7 @@ def make_s3_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Type
             known = ', '.join(buckets.keys())
             error(f'unknown bucket "{shortname}" for pipeline {pipeline_name}. known: {known}')
             raise typer.Exit(1)
-        return buckets[shortname]
+        return substitute_env(buckets[shortname])
 
     def require_linux() -> None:
         if platform.system() != 'Linux':
@@ -70,7 +71,7 @@ def make_s3_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Type
         # be free of markup and ANSI escapes. Bucket names are DNS-safe, so single-quoting
         # the value is sufficient shell quoting.
         for shortname, bucket in buckets.items():
-            print(f"export {shell_variable_name(pipeline_name, shortname)}='s3://{bucket}'")
+            print(f"export {shell_variable_name(pipeline_name, shortname)}='s3://{substitute_env(bucket)}'")
 
     @s3_app.command(
         epilog=f'Example:\n\ndectl {pipeline_name} s3 mount {example}',
