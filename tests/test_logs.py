@@ -1,12 +1,16 @@
 import json
+from datetime import datetime
 
 import pytest
 
 from dectl.logs import GLUE_ERROR_LOG_GROUP
 from dectl.logs import GLUE_OUTPUT_LOG_GROUP
 from dectl.logs import render_event
+from dectl.logs import render_history_event
 from dectl.logs import stream_prefix
+from dectl.logs import tail_execution_history
 from dectl.logs import tail_lambda_logs
+from dectl.logs import tail_log_groups
 from dectl.output import console
 
 
@@ -32,6 +36,26 @@ class FakeLogsClient:
         if self.filter_pages:
             return self.filter_pages.pop(0)
         return {'events': []}
+
+
+class FakeSfnClient:
+    """Step Functions stand-in returning queued get_execution_history pages."""
+
+    def __init__(self, history_pages: list[dict]) -> None:
+        self.history_pages = history_pages
+        self.history_calls: list[dict] = []
+
+    def get_execution_history(self, **kwargs) -> dict:
+        self.history_calls.append(kwargs)
+        if self.history_pages:
+            return self.history_pages.pop(0)
+        return {'events': []}
+
+
+def capture_history_event(event: dict) -> str:
+    with console.capture() as capture:
+        render_history_event(event)
+    return capture.get()
 
 
 def test_glue_log_groups_are_correct():
@@ -140,3 +164,64 @@ def test_lambda_tail_does_not_reprint_boundary_events():
 
     assert output.count('event-one') == 1
     assert output.count('event-two') == 1
+
+
+def test_render_history_event_shows_type_and_state_name():
+    event = {
+        'type': 'TaskStateEntered',
+        'timestamp': datetime(2026, 7, 13, 12),
+        'stateEnteredEventDetails': {'name': 'Transform'},
+    }
+    output = capture_history_event(event)
+    assert 'TaskStateEntered' in output
+    assert 'Transform' in output
+
+
+def test_render_history_event_surfaces_error_and_cause():
+    event = {
+        'type': 'ExecutionFailed',
+        'timestamp': datetime(2026, 7, 13, 12),
+        'executionFailedEventDetails': {'error': 'States.TaskFailed', 'cause': 'lambda blew up'},
+    }
+    output = capture_history_event(event)
+    assert 'ExecutionFailed' in output
+    assert 'States.TaskFailed' in output
+    assert 'lambda blew up' in output
+
+
+def test_tail_execution_history_stops_at_terminal_event():
+    timestamp = datetime(2026, 7, 13, 12)
+    events = [
+        {'id': 1, 'type': 'ExecutionStarted', 'timestamp': timestamp},
+        {'id': 2, 'type': 'TaskStateEntered', 'timestamp': timestamp, 'stateEnteredEventDetails': {'name': 'Do'}},
+        {'id': 3, 'type': 'ExecutionSucceeded', 'timestamp': timestamp},
+    ]
+    client = FakeSfnClient([{'events': events}])
+    with console.capture() as capture:
+        tail_execution_history(client, 'arn:execution', follow=True)
+    output = capture.get()
+
+    assert 'ExecutionStarted' in output
+    assert 'ExecutionSucceeded' in output
+    # Terminal event reached on the first fetch, so it must not poll again.
+    assert len(client.history_calls) == 1
+
+
+def test_tail_log_groups_interleaves_sources_by_timestamp():
+    # Group A's event is newer than group B's; the merged stream must render B before A, and
+    # each line must carry its source prefix.
+    client = FakeLogsClient(
+        streams=[],
+        filter_pages=[
+            {'events': [{'eventId': 'a1', 'timestamp': 2000, 'message': 'alpha-msg'}]},
+            {'events': [{'eventId': 'b1', 'timestamp': 1000, 'message': 'bravo-msg'}]},
+        ],
+    )
+    sources = [('[cyan]svc-a[/cyan] ', '/aws/lambda/a'), ('[magenta]svc-b[/magenta] ', '/aws/lambda/b')]
+    with console.capture() as capture:
+        tail_log_groups(client, sources, follow=False)
+    output = capture.get()
+
+    assert 'svc-a' in output
+    assert 'svc-b' in output
+    assert output.index('bravo-msg') < output.index('alpha-msg')

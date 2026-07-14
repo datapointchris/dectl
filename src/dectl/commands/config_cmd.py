@@ -42,6 +42,8 @@ def config_show() -> None:
             types.append('glue')
         if pipeline.lambdas:
             types.append('lambda')
+        if pipeline.step_functions:
+            types.append('sfn')
         if pipeline.buckets:
             types.append('s3')
         console.print(f'[bold]{name}[/bold] ({", ".join(types)})')
@@ -49,6 +51,8 @@ def config_show() -> None:
             console.print(f'  glue/{alias}: {job.name}')
         for alias, fn in pipeline.lambdas.items():
             console.print(f'  lambda/{alias}: {fn.name}')
+        for alias, sfn in pipeline.step_functions.items():
+            console.print(f'  sfn/{alias}: {sfn.name}')
         for shortname, bucket in pipeline.buckets.items():
             console.print(f'  s3/{shortname}: {bucket}')
         console.print()

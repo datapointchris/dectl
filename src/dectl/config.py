@@ -31,9 +31,18 @@ pipelines:
         name: my-dev-lambda-function
         source_dir: modules/lambda/my_function/code
         alias: live
+    step_functions:
+      my-flow:
+        name: my-dev-state-machine
+        log_group: /aws/vendedlogs/states/my-dev-state-machine
     buckets:
       raw: my-dev-raw-data-bucket
       curated: my-dev-curated-data-bucket
+    monitor:
+      lambdas:
+        - my-function
+      step_functions:
+        - my-flow
 """
 
 
@@ -71,12 +80,28 @@ class LambdaConfig(BaseModel):
     alias: str | None = None
 
 
+class StepFunctionConfig(BaseModel):
+    name: str
+    # CloudWatch log group the state machine logs to. Required only to include this state
+    # machine in `monitor`; `sfn watch` reads the execution history API and needs no log group.
+    log_group: str = ''
+
+
+class MonitorConfig(BaseModel):
+    # Explicit selection of which resources `monitor` tails, by alias. Kept as its own block so
+    # the monitored pipeline view is defined in one scannable place rather than inferred.
+    lambdas: list[str] = []
+    step_functions: list[str] = []
+
+
 class PipelineConfig(BaseModel):
     glue_jobs: dict[str, GlueJobConfig] = {}
     lambdas: dict[str, LambdaConfig] = {}
+    step_functions: dict[str, StepFunctionConfig] = {}
     # shortname -> real S3 bucket name. The shortname is what you reference on the CLI and
     # what dectl uses to build the exported shell variable / mount path (pipeline_shortname).
     buckets: dict[str, str] = {}
+    monitor: MonitorConfig = MonitorConfig()
     jenkins: JenkinsJobConfig | None = None
 
 

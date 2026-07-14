@@ -11,8 +11,8 @@ uv tool install git+https://github.com/datapointchris/dectl.git@latest
 ## Command grammar
 
 Commands follow the shape `dectl PIPELINE RESOURCE ACTION [ALIAS] [OPTIONS]`.
-Pipelines and their resources (`glue`, `lambda`, `s3`, `deploy`) are built from
-your config. Every level is self-documenting — run any partial command or add
+Pipelines and their resources (`glue`, `lambda`, `sfn`, `s3`, `deploy`) are built
+from your config. Every level is self-documenting — run any partial command or add
 `--help` to see what's available next, including the live list of aliases.
 
 ```bash
@@ -42,6 +42,42 @@ dectl uslegal deploy
 
 `--publish` requires an `alias` on the function in config; without it, deploy
 only ever touches `$LATEST` and alias-triggered functions keep running old code.
+
+## Step Functions
+
+```bash
+dectl uslegal sfn start ingest                 # start an execution, print its ARN
+dectl uslegal sfn start ingest '{"k":"v"}' -f  # start with input and tail the history
+dectl uslegal sfn watch ingest                 # tail the most recent execution
+dectl uslegal sfn list ingest                  # recent executions with status
+```
+
+`watch` renders the execution history — the typed state transitions
+(`TaskStateEntered`, `LambdaFunctionScheduled`, `ExecutionSucceeded`, …) — using
+the `GetExecutionHistory` API, so no CloudWatch logging setup is required.
+
+## Monitor a whole pipeline
+
+`monitor` tails several resources at once as a single time-ordered stream, so you
+can watch a multi-Lambda / Step Functions pipeline behave end to end without
+opening each log by hand. What it watches is defined explicitly in config:
+
+```yaml
+pipelines:
+  uslegal:
+    monitor:
+      lambdas: [ingest, transform, load]
+      step_functions: [flow]      # needs log_group set on the state machine
+```
+
+```bash
+dectl uslegal monitor    # interleaved, colored, one line per event, prefixed by resource
+```
+
+Each monitored line is prefixed and colored by its source, and the combined stream
+is ordered by timestamp so you see the actual cross-resource sequence. Step
+Functions is included only when the state machine has a `log_group` configured
+(CloudWatch logging enabled); monitor tells you when one is missing.
 
 ## S3 buckets
 

@@ -80,6 +80,81 @@ def render_event(message: str, prefix: str = '') -> None:
             console.print(f'  [bold]{escape(key)}[/bold]: {escape(str(value))}')
 
 
+# Execution-history event types that mean the state machine run is over, so tailing can stop.
+TERMINAL_EXECUTION_EVENTS = frozenset({'ExecutionSucceeded', 'ExecutionFailed', 'ExecutionAborted', 'ExecutionTimedOut'})
+
+
+def render_history_event(event: dict) -> None:
+    """Print one Step Functions execution-history event as a readable, colored line.
+
+    Each event carries exactly one '<something>EventDetails' dict; the interesting fields
+    across all of them are a state/resource name and, on failures, error/cause. Pull those
+    generically rather than special-casing all ~40 event types."""
+    event_type = event.get('type', 'Unknown')
+    timestamp = event.get('timestamp')
+    if timestamp is not None and hasattr(timestamp, 'isoformat'):
+        stamp = timestamp.isoformat()
+    else:
+        stamp = str(timestamp)
+
+    details: dict = {}
+    for key, value in event.items():
+        if key.endswith('EventDetails') and isinstance(value, dict):
+            details = value
+            break
+
+    lowered = event_type.lower()
+    if any(word in lowered for word in ('failed', 'aborted', 'timedout')):
+        color = 'red'
+    elif 'succeeded' in lowered:
+        color = 'green'
+    elif any(word in lowered for word in ('entered', 'started', 'scheduled')):
+        color = 'cyan'
+    else:
+        color = 'white'
+
+    label = details.get('name') or details.get('resource') or ''
+    header = [f'[cyan]{escape(stamp)}[/cyan]', f'[bold {color}]{escape(event_type)}[/bold {color}]']
+    if label:
+        header.append(escape(label))
+    console.print(' '.join(header))
+
+    if details.get('error'):
+        console.print(f'  [bold red]error[/bold red]: {escape(str(details["error"]))}')
+    if details.get('cause'):
+        console.print(f'  [bold red]cause[/bold red]: {escape(str(details["cause"]))}')
+
+
+def tail_execution_history(sfn_client, execution_arn: str, follow: bool = True) -> None:
+    """Poll a state machine execution's history until it reaches a terminal state.
+
+    Event ids are stable and unique within an execution, so dedup by id; get_execution_history
+    returns the full history each call in chronological order."""
+    seen_event_ids: set = set()
+    while True:
+        events = []
+        next_token = None
+        while True:
+            kwargs: dict = {'executionArn': execution_arn}
+            if next_token:
+                kwargs['nextToken'] = next_token
+            resp = sfn_client.get_execution_history(**kwargs)
+            events.extend(resp.get('events', []))
+            next_token = resp.get('nextToken')
+            if not next_token:
+                break
+
+        for event in events:
+            if event['id'] in seen_event_ids:
+                continue
+            render_history_event(event)
+            seen_event_ids.add(event['id'])
+
+        if not follow or any(event.get('type') in TERMINAL_EXECUTION_EVENTS for event in events):
+            break
+        time.sleep(2)
+
+
 def wait_for_log_stream(logs_client, log_group: str, stream_prefix: str, timeout: int = 120) -> str | None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -93,6 +168,51 @@ def wait_for_log_stream(logs_client, log_group: str, stream_prefix: str, timeout
             return streams[0]['logStreamName']
         time.sleep(5)
     return None
+
+
+def tail_log_groups(logs_client, sources: list[tuple[str, str]], follow: bool = True) -> None:
+    """Tail several CloudWatch log groups into one time-ordered stream.
+
+    sources is a list of (prefix, log_group). Each poll fetches new events from every group,
+    merges them, and renders in timestamp order so the cross-source causal sequence (lambda A
+    fires -> state machine transitions -> lambda B fires) reads top to bottom. Uses the same
+    moving-startTime + boundary dedup as the single-group Lambda tailer, per group."""
+    now = int(time.time() * 1000)
+    prefixes = {group: prefix for prefix, group in sources}
+    start_times = {group: now for group in prefixes}
+    seen_at_boundary: dict[str, set] = {group: set() for group in prefixes}
+
+    while True:
+        batch = []
+        for group in prefixes:
+            fetched = []
+            next_token = None
+            while True:
+                kwargs: dict = {'logGroupName': group, 'startTime': start_times[group]}
+                if next_token:
+                    kwargs['nextToken'] = next_token
+                page = logs_client.filter_log_events(**kwargs)
+                fetched.extend(page.get('events', []))
+                next_token = page.get('nextToken')
+                if not next_token:
+                    break
+
+            new_events = [event for event in fetched if event['eventId'] not in seen_at_boundary[group]]
+            for event in new_events:
+                batch.append((event['timestamp'], prefixes[group], event['message']))
+
+            if new_events:
+                max_timestamp = max(event['timestamp'] for event in new_events)
+                start_times[group] = max_timestamp
+                seen_at_boundary[group] = {event['eventId'] for event in fetched if event['timestamp'] == max_timestamp}
+
+        for event in sorted(batch):
+            render_event(event[2], prefix=event[1])
+
+        if not follow:
+            break
+        if not batch:
+            time.sleep(2)
 
 
 def tail_glue_run(logs_client, run_id: str, follow: bool = True) -> None:

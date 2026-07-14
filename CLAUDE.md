@@ -1,7 +1,7 @@
 # dectl
 
-Data engineering control CLI for driving AWS pipelines (Glue, Lambda, S3, Jenkins deploys)
-from a single config file. Installed via `uv tool install`; the entry point is
+Data engineering control CLI for driving AWS pipelines (Glue, Lambda, Step Functions, S3,
+Jenkins deploys) from a single config file. Installed via `uv tool install`; the entry point is
 `dectl.main:app`. Universal rules live in `~/.claude/CLAUDE.md` — this file only covers what
 is specific to dectl.
 
@@ -32,18 +32,27 @@ The factory closes over the pipeline and config so each command already knows wh
 belongs to — the commands themselves take only user arguments (an alias, a flag), never the
 pipeline. Inside, a `resolve_*` helper turns a config **alias/shortname** into the full config
 object (or real AWS name) and exits with a clear error on an unknown key. Follow this shape for
-new resources: `glue.py` and `lambda_.py` are the reference implementations, `s3.py` the
-newest.
+new resources: `glue.py` and `lambda_.py` are the reference implementations, `stepfunctions.py`
+and `s3.py` the newest.
 
 Aliases matter: users reference the short config keys (`raw`, `source-copy`), never the real
 AWS names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
+
+`monitor` is the exception to the factory pattern: it is a **pipeline-level** command (like
+`list`, registered on `pipeline_app` directly), not a resource sub-app, because it spans
+several resources. It reads the pipeline's explicit `monitor` config block and tails every
+selected resource's CloudWatch log group as one interleaved, time-ordered stream via
+`logs.tail_log_groups`.
 
 ## Config
 
 `src/dectl/config.py` — Pydantic models plus `load_config()` / `init_config()`. Config lives at
 `~/.config/dectl/config.yaml`. `buckets` is a `shortname -> real-bucket-name` mapping (same
-alias→name shape as `glue_jobs` and `lambdas`), not a fixed set of roles. When you change a
-model, update `TEMPLATE_CONFIG` in the same file so `config init` stays valid.
+alias→name shape as `glue_jobs` and `lambdas`), not a fixed set of roles. `step_functions` maps
+alias → `{name, log_group}` (the log group is optional, needed only for `monitor`). `monitor` is
+its own block listing which lambdas / step machines to tail, kept separate so the monitored view
+is defined in one scannable place. When you change a model, update `TEMPLATE_CONFIG` in the same
+file so `config init` stays valid.
 
 ## Cross-cutting modules
 
@@ -51,7 +60,7 @@ model, update `TEMPLATE_CONFIG` in the same file so `config init` stays valid.
 |---|---|
 | `session.py` | Builds the boto3 `Session` from config (region + optional profile). Every command that touches AWS goes through `make_session`. |
 | `output.py` | The `rich` console and the `error`/`success`/`info` helpers. Use these, not bare `print`, for anything human-facing. |
-| `logs.py` | CloudWatch log tailing shared by Glue and Lambda, including structured-JSON pretty-printing. |
+| `logs.py` | CloudWatch log tailing (Glue, Lambda, and the multi-group `monitor` stream) plus Step Functions execution-history rendering, including structured-JSON pretty-printing. |
 
 ## Gotchas
 
@@ -68,6 +77,15 @@ model, update `TEMPLATE_CONFIG` in the same file so `config init` stays valid.
   FUSE-based and unavailable on macOS. The command detects a non-Linux OS and refuses with a
   pointer to `export`. Binaries are resolved with `shutil.which` (full path) so bandit's
   partial-path check (B607) stays clean without a `nosec`.
+- **Step Functions has two log sources** — `sfn watch` uses the `GetExecutionHistory` API (typed
+  state transitions, no setup, Standard workflows only). `monitor` instead uses the state
+  machine's CloudWatch **log group**, because it needs one uniform source it can merge with the
+  Lambda groups — which is why a monitored state machine must have `log_group` set (Express
+  workflows only log to CloudWatch and have no history API at all).
+- **Log tailing follows by time, not by stream** — Lambda writes each execution environment to a
+  new stream, so `tail_lambda_logs` and `tail_log_groups` poll the whole log group with a moving
+  `startTime` and dedup boundary events by `eventId`, rather than pinning to one stream. Glue is
+  the exception: `tail_glue_run` pins to the run's streams because they are created up front.
 
 ## Tests
 

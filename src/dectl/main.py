@@ -7,8 +7,10 @@ from dectl.commands.config_cmd import config_app
 from dectl.commands.deploy import make_deploy_app
 from dectl.commands.glue import make_glue_app
 from dectl.commands.lambda_ import make_lambda_app
+from dectl.commands.monitor import run_monitor
 from dectl.commands.s3 import make_s3_app
 from dectl.commands.search import run_search
+from dectl.commands.stepfunctions import make_sfn_app
 from dectl.config import PipelineConfig
 from dectl.config import load_config
 from dectl.output import error
@@ -26,6 +28,8 @@ def print_pipeline(name: str, p: PipelineConfig) -> None:
         types.append('glue')
     if p.lambdas:
         types.append('lambda')
+    if p.step_functions:
+        types.append('sfn')
     if p.buckets:
         types.append('s3')
     info(f'[bold]{name}[/bold] ({", ".join(types)})')
@@ -36,6 +40,8 @@ def print_pipeline(name: str, p: PipelineConfig) -> None:
             info(f'      {s}')
     for alias, fn in p.lambdas.items():
         info(f'  lambda/{alias}: {fn.name}')
+    for alias, sfn in p.step_functions.items():
+        info(f'  sfn/{alias}: {sfn.name}')
     for shortname, bucket in p.buckets.items():
         info(f'  s3/{shortname}: {bucket}')
     info('')
@@ -50,6 +56,8 @@ if cfg:
             resources.append(f'glue ({", ".join(pipeline.glue_jobs)})')
         if pipeline.lambdas:
             resources.append(f'lambda ({", ".join(pipeline.lambdas)})')
+        if pipeline.step_functions:
+            resources.append(f'sfn ({", ".join(pipeline.step_functions)})')
         if pipeline.buckets:
             resources.append(f's3 ({", ".join(pipeline.buckets)})')
         if pipeline.jenkins and cfg.jenkins:
@@ -66,11 +74,17 @@ if cfg:
         if pipeline.lambdas:
             pipeline_app.add_typer(make_lambda_app(name, pipeline, cfg), name='lambda', rich_help_panel='Resources')
             has_commands = True
+        if pipeline.step_functions:
+            pipeline_app.add_typer(make_sfn_app(name, pipeline, cfg), name='sfn', rich_help_panel='Resources')
+            has_commands = True
         if pipeline.buckets:
             pipeline_app.add_typer(make_s3_app(name, pipeline, cfg), name='s3', rich_help_panel='Resources')
             has_commands = True
         if pipeline.jenkins and cfg.jenkins:
             pipeline_app.add_typer(make_deploy_app(name, pipeline.jenkins, cfg), name='deploy', rich_help_panel='Resources')
+            has_commands = True
+        has_monitor = bool(pipeline.monitor.lambdas or pipeline.monitor.step_functions)
+        if has_monitor:
             has_commands = True
         if has_commands:
 
@@ -81,6 +95,17 @@ if cfg:
                     print_pipeline(pname, pconfig)
 
             _make_list_cmd(pipeline_app, name, pipeline)
+
+            if has_monitor:
+
+                def register_monitor_command(papp: typer.Typer, pconfig: PipelineConfig, gconfig) -> None:
+                    @papp.command('monitor', rich_help_panel='Info')
+                    def monitor_pipeline() -> None:
+                        """Tail every configured monitor source for this pipeline as one interleaved stream."""
+                        run_monitor(pconfig, gconfig)
+
+                register_monitor_command(pipeline_app, pipeline, cfg)
+
             app.add_typer(pipeline_app, name=name, rich_help_panel='Pipelines')
 
 
