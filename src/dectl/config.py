@@ -33,6 +33,7 @@ pipelines:
         alias: live
     buckets:
       raw: my-dev-raw-data-bucket
+      curated: my-dev-curated-data-bucket
 """
 
 
@@ -70,16 +71,12 @@ class LambdaConfig(BaseModel):
     alias: str | None = None
 
 
-class BucketConfig(BaseModel):
-    raw: str = ''
-    curated: str = ''
-    error: str = ''
-
-
 class PipelineConfig(BaseModel):
     glue_jobs: dict[str, GlueJobConfig] = {}
     lambdas: dict[str, LambdaConfig] = {}
-    buckets: BucketConfig = BucketConfig()
+    # shortname -> real S3 bucket name. The shortname is what you reference on the CLI and
+    # what dectl uses to build the exported shell variable / mount path (pipeline_shortname).
+    buckets: dict[str, str] = {}
     jenkins: JenkinsJobConfig | None = None
 
 

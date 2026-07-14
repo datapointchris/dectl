@@ -11,8 +11,8 @@ uv tool install git+https://github.com/datapointchris/dectl.git@latest
 ## Command grammar
 
 Commands follow the shape `dectl PIPELINE RESOURCE ACTION [ALIAS] [OPTIONS]`.
-Pipelines and their resources (`glue`, `lambda`, `deploy`) are built from your
-config. Every level is self-documenting — run any partial command or add
+Pipelines and their resources (`glue`, `lambda`, `s3`, `deploy`) are built from
+your config. Every level is self-documenting — run any partial command or add
 `--help` to see what's available next, including the live list of aliases.
 
 ```bash
@@ -42,6 +42,24 @@ dectl uslegal deploy
 
 `--publish` requires an `alias` on the function in config; without it, deploy
 only ever touches `$LATEST` and alias-triggered functions keep running old code.
+
+## S3 buckets
+
+Buckets are declared in config as a `shortname -> real bucket name` mapping. Two
+ways to work with them:
+
+```bash
+# Load bucket URIs into your shell as $pipeline_shortname (lowercase), then use
+# them with the aws CLI. A CLI can't set the parent shell's env, so you eval it:
+eval "$(dectl uslegal s3 export)"
+aws s3 cp "$uslegal_raw/incoming/file.txt" .
+
+# Mount a bucket as a local directory (Linux only — uses mount-s3 / FUSE):
+dectl uslegal s3 mount raw       # -> ~/.cache/dectl/mounts/uslegal/raw
+dectl uslegal s3 unmount raw
+```
+
+`s3 mount` refuses on macOS and points you at `export` instead.
 
 ## Other commands
 

@@ -75,6 +75,24 @@ def test_glue_job_arguments_parsed_as_dict():
     assert job.arguments == {'FOO': 'bar', 'NUM': '4'}
 
 
+def test_buckets_parsed_as_shortname_mapping():
+    raw = {
+        'defaults': {'account_id': '111', 'region': 'us-east-1'},
+        'pipelines': {'p': {'buckets': {'raw': 'my-raw-bucket', 'curated': 'my-curated-bucket'}}},
+    }
+    config = DectlConfig.model_validate(raw)
+    assert config.pipelines['p'].buckets == {'raw': 'my-raw-bucket', 'curated': 'my-curated-bucket'}
+
+
+def test_buckets_default_to_empty_when_omitted():
+    raw = {
+        'defaults': {'account_id': '111'},
+        'pipelines': {'p': {}},
+    }
+    config = DectlConfig.model_validate(raw)
+    assert config.pipelines['p'].buckets == {}
+
+
 def test_defaults_have_sensible_fallbacks():
     raw = {
         'defaults': {'account_id': '111'},

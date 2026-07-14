@@ -7,6 +7,7 @@ from dectl.commands.config_cmd import config_app
 from dectl.commands.deploy import make_deploy_app
 from dectl.commands.glue import make_glue_app
 from dectl.commands.lambda_ import make_lambda_app
+from dectl.commands.s3 import make_s3_app
 from dectl.commands.search import run_search
 from dectl.config import PipelineConfig
 from dectl.config import load_config
@@ -25,6 +26,8 @@ def print_pipeline(name: str, p: PipelineConfig) -> None:
         types.append('glue')
     if p.lambdas:
         types.append('lambda')
+    if p.buckets:
+        types.append('s3')
     info(f'[bold]{name}[/bold] ({", ".join(types)})')
     for alias, job in p.glue_jobs.items():
         info(f'  glue/{alias}: {job.name}')
@@ -33,12 +36,8 @@ def print_pipeline(name: str, p: PipelineConfig) -> None:
             info(f'      {s}')
     for alias, fn in p.lambdas.items():
         info(f'  lambda/{alias}: {fn.name}')
-    if p.buckets.raw:
-        info(f'  s3/raw: {p.buckets.raw}')
-    if p.buckets.curated:
-        info(f'  s3/curated: {p.buckets.curated}')
-    if p.buckets.error:
-        info(f'  s3/error: {p.buckets.error}')
+    for shortname, bucket in p.buckets.items():
+        info(f'  s3/{shortname}: {bucket}')
     info('')
 
 
@@ -51,6 +50,8 @@ if cfg:
             resources.append(f'glue ({", ".join(pipeline.glue_jobs)})')
         if pipeline.lambdas:
             resources.append(f'lambda ({", ".join(pipeline.lambdas)})')
+        if pipeline.buckets:
+            resources.append(f's3 ({", ".join(pipeline.buckets)})')
         if pipeline.jenkins and cfg.jenkins:
             resources.append('deploy (jenkins)')
         summary = ' · '.join(resources) if resources else 'none configured'
@@ -64,6 +65,9 @@ if cfg:
             has_commands = True
         if pipeline.lambdas:
             pipeline_app.add_typer(make_lambda_app(name, pipeline, cfg), name='lambda', rich_help_panel='Resources')
+            has_commands = True
+        if pipeline.buckets:
+            pipeline_app.add_typer(make_s3_app(name, pipeline, cfg), name='s3', rich_help_panel='Resources')
             has_commands = True
         if pipeline.jenkins and cfg.jenkins:
             pipeline_app.add_typer(make_deploy_app(name, pipeline.jenkins, cfg), name='deploy', rich_help_panel='Resources')
