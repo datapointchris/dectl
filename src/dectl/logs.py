@@ -95,30 +95,6 @@ def wait_for_log_stream(logs_client, log_group: str, stream_prefix: str, timeout
     return None
 
 
-def tail_log_stream(logs_client, log_group: str, stream_name: str, follow: bool = True) -> None:
-    token = None
-    while True:
-        kwargs: dict = {
-            'logGroupName': log_group,
-            'logStreamName': stream_name,
-            'startFromHead': True,
-        }
-        if token:
-            kwargs['nextToken'] = token
-            kwargs.pop('startFromHead', None)
-
-        resp = logs_client.get_log_events(**kwargs)
-        for event in resp.get('events', []):
-            render_event(event['message'])
-
-        new_token = resp.get('nextForwardToken')
-        if new_token == token:
-            if not follow:
-                break
-            time.sleep(2)
-        token = new_token
-
-
 def tail_glue_run(logs_client, run_id: str, follow: bool = True) -> None:
     info(f'waiting for log streams for run {run_id}...')
 
@@ -169,15 +145,48 @@ def tail_lambda_logs(logs_client, function_name: str, follow: bool = True) -> No
     log_group = f'/aws/lambda/{function_name}'
     info(f'tailing {log_group}')
 
-    resp = logs_client.describe_log_streams(
+    # Lambda writes each execution environment to its own log stream, and an invocation that
+    # cold-starts (after the previous warm environment is reaped, ~5-15 min idle) lands in a
+    # brand-new stream. Following a single stream would silently miss those later runs, so poll
+    # the whole log group by time with filter_log_events, which spans every stream.
+    stream_resp = logs_client.describe_log_streams(
         logGroupName=log_group,
         orderBy='LastEventTime',
         descending=True,
         limit=1,
     )
-    streams = resp.get('logStreams', [])
-    if not streams:
-        console.print('[yellow]no log streams found[/yellow]')
-        return
+    streams = stream_resp.get('logStreams', [])
+    # Seed from the newest stream's first event so existing output for the current run shows
+    # before we start following; fall back to now when the function has never run.
+    start_time = streams[0].get('firstEventTimestamp') if streams else None
+    if start_time is None:
+        start_time = int(time.time() * 1000)
 
-    tail_log_stream(logs_client, log_group, streams[0]['logStreamName'], follow=follow)
+    # eventIds already rendered at exactly start_time. filter_log_events treats startTime as
+    # inclusive, so those events come back on the next poll and must be skipped to avoid dupes.
+    seen_at_boundary: set[str] = set()
+    while True:
+        fetched = []
+        next_token = None
+        while True:
+            kwargs: dict = {'logGroupName': log_group, 'startTime': start_time}
+            if next_token:
+                kwargs['nextToken'] = next_token
+            page = logs_client.filter_log_events(**kwargs)
+            fetched.extend(page.get('events', []))
+            next_token = page.get('nextToken')
+            if not next_token:
+                break
+
+        new_events = [event for event in fetched if event['eventId'] not in seen_at_boundary]
+        for event in new_events:
+            render_event(event['message'])
+
+        if new_events:
+            max_timestamp = max(event['timestamp'] for event in new_events)
+            start_time = max_timestamp
+            seen_at_boundary = {event['eventId'] for event in fetched if event['timestamp'] == max_timestamp}
+        else:
+            if not follow:
+                break
+            time.sleep(2)

@@ -1,9 +1,12 @@
 import json
 
+import pytest
+
 from dectl.logs import GLUE_ERROR_LOG_GROUP
 from dectl.logs import GLUE_OUTPUT_LOG_GROUP
 from dectl.logs import render_event
 from dectl.logs import stream_prefix
+from dectl.logs import tail_lambda_logs
 from dectl.output import console
 
 
@@ -11,6 +14,24 @@ def capture_event(message: str, prefix: str = '') -> str:
     with console.capture() as capture:
         render_event(message, prefix=prefix)
     return capture.get()
+
+
+class FakeLogsClient:
+    """Minimal CloudWatch Logs stand-in returning queued filter_log_events pages."""
+
+    def __init__(self, streams: list[dict], filter_pages: list[dict]) -> None:
+        self.streams = streams
+        self.filter_pages = filter_pages
+        self.filter_calls: list[dict] = []
+
+    def describe_log_streams(self, **kwargs) -> dict:
+        return {'logStreams': self.streams}
+
+    def filter_log_events(self, **kwargs) -> dict:
+        self.filter_calls.append(kwargs)
+        if self.filter_pages:
+            return self.filter_pages.pop(0)
+        return {'events': []}
 
 
 def test_glue_log_groups_are_correct():
@@ -65,3 +86,57 @@ def test_render_event_prints_extra_fields():
     output = capture_event(message)
     assert 'record_count' in output
     assert '42' in output
+
+
+def test_lambda_tail_picks_up_events_across_streams():
+    # The bug: a later invocation cold-starts into a new log stream. filter_log_events spans
+    # the whole group, so events from both streams surface in a single tail session.
+    client = FakeLogsClient(
+        streams=[{'logStreamName': 'old-stream', 'firstEventTimestamp': 1000}],
+        filter_pages=[
+            {
+                'events': [
+                    {'eventId': 'a', 'timestamp': 2000, 'message': 'warm run', 'logStreamName': 'stream-A'},
+                    {'eventId': 'b', 'timestamp': 3000, 'message': 'cold-start run', 'logStreamName': 'stream-B'},
+                ]
+            }
+        ],
+    )
+    with console.capture() as capture:
+        tail_lambda_logs(client, 'my-func', follow=False)
+    output = capture.get()
+
+    assert 'warm run' in output
+    assert 'cold-start run' in output
+
+
+def test_lambda_tail_does_not_reprint_boundary_events():
+    # startTime is inclusive, so the newest event is re-returned on the next poll; it must not
+    # print twice. A raising sleep breaks out of the follow loop once the pages drain.
+    class StopTail(Exception):
+        pass
+
+    client = FakeLogsClient(
+        streams=[{'logStreamName': 'old-stream', 'firstEventTimestamp': 1000}],
+        filter_pages=[
+            {'events': [{'eventId': 'a', 'timestamp': 2000, 'message': 'event-one', 'logStreamName': 's'}]},
+            {
+                'events': [
+                    {'eventId': 'a', 'timestamp': 2000, 'message': 'event-one', 'logStreamName': 's'},
+                    {'eventId': 'b', 'timestamp': 2001, 'message': 'event-two', 'logStreamName': 's'},
+                ]
+            },
+        ],
+    )
+
+    def stop_sleep(_seconds):
+        raise StopTail
+
+    with pytest.MonkeyPatch.context() as monkeypatch, console.capture() as capture:
+        monkeypatch.setattr('dectl.logs.time.sleep', stop_sleep)
+        with pytest.raises(StopTail):
+            tail_lambda_logs(client, 'my-func', follow=True)
+    output = capture.get()
+
+    assert output.count('event-one') == 1
+    assert output.count('event-two') == 1
