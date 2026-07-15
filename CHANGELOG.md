@@ -1,6 +1,18 @@
 # CHANGELOG
 
 
+## v0.6.1 (2026-07-15)
+
+### Bug Fixes
+
+- **s3**: Mount buckets under ~/buckets instead of cache dir
+  ([`c80d336`](https://github.com/datapointchris/dectl/commit/c80d336542e8fa350d462c559ec28b2adf6af69c))
+
+The old ~/.cache/dectl/mounts/PIPELINE/SHORTNAME path was buried and impractical to cd into. Mount
+  at ~/buckets/PIPELINE/SHORTNAME instead, keeping the pipeline segment so buckets sharing a
+  shortname across pipelines don't collide.
+
+
 ## v0.6.0 (2026-07-15)
 
 ### Features
