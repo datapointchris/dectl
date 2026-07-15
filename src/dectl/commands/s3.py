@@ -12,9 +12,10 @@ from dectl.env import substitute_env
 from dectl.output import error
 from dectl.output import success
 
-# Where mounted buckets land. Kept under the user cache dir so mounts are per-user and
-# obviously ephemeral rather than polluting the home directory.
-MOUNT_BASE = Path.home() / '.cache' / 'dectl' / 'mounts'
+# Where mounted buckets land. A short, top-level path under $HOME so a mounted bucket is
+# easy to cd into (~/buckets/PIPELINE/SHORTNAME); the pipeline segment namespaces buckets
+# that share a shortname across pipelines.
+MOUNT_BASE = Path.home() / 'buckets'
 
 
 def shell_variable_name(pipeline_name: str, shortname: str) -> str:
@@ -82,7 +83,7 @@ def make_s3_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Type
         """Mount a bucket as a local directory using Mountpoint for Amazon S3 (Linux only).
 
         Shells out to `mount-s3`, mounting the bucket at
-        ~/.cache/dectl/mounts/PIPELINE/SHORTNAME using the pipeline's configured profile
+        ~/buckets/PIPELINE/SHORTNAME using the pipeline's configured profile
         and region. FUSE is Linux-only; on macOS use `export` instead.
         """
         bucket = resolve_bucket(shortname)

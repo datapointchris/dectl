@@ -118,7 +118,7 @@ eval "$(dectl uslegal s3 export)"
 aws s3 cp "$uslegal_raw/incoming/file.txt" .
 
 # Mount a bucket as a local directory (Linux only — uses mount-s3 / FUSE):
-dectl uslegal s3 mount raw       # -> ~/.cache/dectl/mounts/uslegal/raw
+dectl uslegal s3 mount raw       # -> ~/buckets/uslegal/raw
 dectl uslegal s3 unmount raw
 ```
 
