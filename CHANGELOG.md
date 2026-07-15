@@ -1,6 +1,33 @@
 # CHANGELOG
 
 
+## v0.6.0 (2026-07-15)
+
+### Features
+
+- **config**: Add example, edit, validate, path
+  ([`cd3f3dd`](https://github.com/datapointchris/dectl/commit/cd3f3ddf09dce1ce383408951574f6f4bdce1f23))
+
+Add four config-management commands to the always-present config app:
+
+- example: print the full template config (one of every option) to stdout, syntax-highlighted on a
+  TTY and plain when piped, for side-by-side reference while editing the real config in another
+  pane. - edit: open the config in $VISUAL then $EDITOR (no hardcoded editor), shlex-split so args
+  survive, binary resolved via shutil.which; seeds from the template if none exists. Foreground, so
+  terminal editors block and GUI editors follow their own --wait semantics. - validate: parse the
+  file and report the exact failing config path. - path: bare-print the config path for shell
+  substitution.
+
+Viewing is done in-process via rich.syntax.Syntax rather than shelling out to a pager, so there is
+  no PATH lookup or $PAGER parsing and it works everywhere.
+
+Models now inherit StrictModel (extra='forbid'), so an unknown key is a loud validate error instead
+  of a silently dropped field. Because that widens what counts as invalid, main.py wraps its
+  import-time load_config() so a present-but-invalid config falls back to no config (keeping the
+  config commands reachable to fix it) and the root banner prints the reason, rather than crashing
+  on import.
+
+
 ## v0.5.0 (2026-07-14)
 
 ### Bug Fixes
