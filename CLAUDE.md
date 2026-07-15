@@ -52,7 +52,25 @@ alias→name shape as `glue_jobs` and `lambdas`), not a fixed set of roles. `ste
 alias → `{name, log_group}` (the log group is optional, needed only for `monitor`). `monitor` is
 its own block listing which lambdas / step machines to tail, kept separate so the monitored view
 is defined in one scannable place. When you change a model, update `TEMPLATE_CONFIG` in the same
-file so `config init` stays valid.
+file so `config init` stays valid — a test asserts `TEMPLATE_CONFIG` round-trips through the models.
+
+`TEMPLATE_CONFIG` is the single source for the example config: `config init` writes it, `config
+example` prints it (syntax-highlighted on a TTY, plain when piped so `config example > config.yaml`
+stays clean), and it exercises every option so it doubles as side-by-side reference while editing.
+
+All models inherit `StrictModel` (`extra='forbid'`), so an unknown key — a typo like
+`step_function:` — is a loud error surfaced by `config validate` rather than a silently dropped
+field. Because forbidding extras widens what counts as "invalid," `main.py` wraps its import-time
+`load_config()` in try/except: a present-but-invalid config falls back to `cfg = None` (so the
+always-present `config` commands stay reachable to diagnose and fix it) and the root callback's
+bare-invocation banner prints the reason. Only a *missing* config yields `None` from
+`load_config()` directly; an invalid one still raises, which is what `config validate` catches to
+report the exact failing path.
+
+`config edit` resolves the editor via `$VISUAL` → `$EDITOR` (no hardcoded fallback — the env var
+carries the user's intent, including any `--wait`), `shlex.split`s it so args survive, resolves the
+binary with `shutil.which` (full path, B607-clean), and runs it in the foreground. It seeds from the
+template first if no config exists.
 
 ### Environments
 
@@ -77,7 +95,7 @@ which is why the banner and `dectl env` exist.
 ## Cross-cutting modules
 
 | Module | Responsibility |
-|---|---|
+| --- | --- |
 | `session.py` | Builds the boto3 `Session` from config (region + optional profile). Every command that touches AWS goes through `make_session`. |
 | `output.py` | The `rich` console and the `error`/`success`/`info` helpers. Use these, not bare `print`, for anything human-facing. |
 | `logs.py` | CloudWatch log tailing (Glue, Lambda, and the multi-group `monitor` stream) plus Step Functions execution-history rendering, including structured-JSON pretty-printing. |

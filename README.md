@@ -134,5 +134,18 @@ dectl config show                    # inspect the loaded config
 
 ## Config
 
-Config lives at `~/.config/dectl/config.yaml`. Run `dectl config init` to create
-a template, then `dectl config show` to verify what loaded.
+Config lives at `~/.config/dectl/config.yaml`.
+
+```bash
+dectl config init        # write a starter config (fails if one already exists)
+dectl config example     # print a full example of every option, for side-by-side reference
+dectl config edit        # open it in $VISUAL / $EDITOR (seeds one from the template if missing)
+dectl config validate    # check it parses and matches the schema
+dectl config show        # resolved pipelines with alias -> AWS name mapping
+dectl config path        # print the config file path
+```
+
+Unknown keys are rejected, so `config validate` catches a typo like `step_function:`
+instead of silently ignoring it. `config example` prints to stdout (highlighted in a
+terminal, plain when redirected), so you can display the full reference in one pane
+while editing the real config in another.

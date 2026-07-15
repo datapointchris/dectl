@@ -2,6 +2,8 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+import yaml
+from pydantic import ValidationError
 
 from dectl.commands.config_cmd import config_app
 from dectl.commands.deploy import make_deploy_app
@@ -11,6 +13,7 @@ from dectl.commands.monitor import run_monitor
 from dectl.commands.s3 import make_s3_app
 from dectl.commands.search import run_search
 from dectl.commands.stepfunctions import make_sfn_app
+from dectl.config import CONFIG_PATH
 from dectl.config import PipelineConfig
 from dectl.config import load_config
 from dectl.env import active_environment
@@ -68,7 +71,17 @@ def print_pipeline(name: str, p: PipelineConfig) -> None:
     info('')
 
 
-cfg = load_config()
+# A present-but-invalid config must not brick the CLI: without this guard the ValidationError
+# would propagate out of import and take down every command, including the `config validate` /
+# `config edit` you would use to fix it. Fall back to no config and surface the reason in the
+# root callback's banner instead.
+try:
+    cfg = load_config()
+    CONFIG_LOAD_ERROR: str | None = None
+except (ValidationError, yaml.YAMLError) as exc:
+    cfg = None
+    CONFIG_LOAD_ERROR = str(exc)
+
 EXAMPLE_PIPELINE = next(iter(cfg.pipelines), 'my-pipeline') if cfg and cfg.pipelines else 'my-pipeline'
 DEFAULT_ENVIRONMENT = cfg.defaults.environment if cfg else 'dev'
 if cfg:
@@ -188,6 +201,9 @@ def main(
     set_active_environment(env, resolve_env_source(ctx))
     if ctx.invoked_subcommand is None:
         print_environment_banner()
+        if CONFIG_LOAD_ERROR:
+            error(f'config at {CONFIG_PATH} is invalid — pipelines unavailable.')
+            info('run "dectl config validate" to see what is wrong, or "dectl config edit" to fix it')
         print(ctx.get_help())
 
 

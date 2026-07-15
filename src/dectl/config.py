@@ -2,6 +2,7 @@ from pathlib import Path
 
 import yaml
 from pydantic import BaseModel
+from pydantic import ConfigDict
 
 CONFIG_DIR = Path.home() / '.config' / 'dectl'
 CONFIG_PATH = CONFIG_DIR / 'config.yaml'
@@ -48,25 +49,32 @@ pipelines:
 """
 
 
-class Defaults(BaseModel):
+class StrictModel(BaseModel):
+    # Reject unknown keys everywhere so a typo (`step_function:` for `step_functions:`) is a
+    # loud error via `config validate` rather than a silently ignored field. main.py catches the
+    # resulting ValidationError at import so a bad config never bricks the CLI.
+    model_config = ConfigDict(extra='forbid')
+
+
+class Defaults(StrictModel):
     account_id: str
     region: str = 'us-east-2'
     environment: str = 'dev'
     aws_profile: str = ''
 
 
-class JenkinsConfig(BaseModel):
+class JenkinsConfig(StrictModel):
     url: str
     user: str
     token: str
 
 
-class JenkinsJobConfig(BaseModel):
+class JenkinsJobConfig(StrictModel):
     job_path: str
     parameters: dict[str, str] = {}
 
 
-class GlueJobConfig(BaseModel):
+class GlueJobConfig(StrictModel):
     name: str
     script_bucket: str
     script_prefix: str = 'scripts'
@@ -76,27 +84,27 @@ class GlueJobConfig(BaseModel):
     arguments: dict[str, str] = {}
 
 
-class LambdaConfig(BaseModel):
+class LambdaConfig(StrictModel):
     name: str
     source_dir: str
     alias: str | None = None
 
 
-class StepFunctionConfig(BaseModel):
+class StepFunctionConfig(StrictModel):
     name: str
     # CloudWatch log group the state machine logs to. Required only to include this state
     # machine in `monitor`; `sfn watch` reads the execution history API and needs no log group.
     log_group: str = ''
 
 
-class MonitorConfig(BaseModel):
+class MonitorConfig(StrictModel):
     # Explicit selection of which resources `monitor` tails, by alias. Kept as its own block so
     # the monitored pipeline view is defined in one scannable place rather than inferred.
     lambdas: list[str] = []
     step_functions: list[str] = []
 
 
-class PipelineConfig(BaseModel):
+class PipelineConfig(StrictModel):
     glue_jobs: dict[str, GlueJobConfig] = {}
     lambdas: dict[str, LambdaConfig] = {}
     step_functions: dict[str, StepFunctionConfig] = {}
@@ -107,7 +115,7 @@ class PipelineConfig(BaseModel):
     jenkins: JenkinsJobConfig | None = None
 
 
-class DectlConfig(BaseModel):
+class DectlConfig(StrictModel):
     defaults: Defaults
     jenkins: JenkinsConfig | None = None
     pipelines: dict[str, PipelineConfig]

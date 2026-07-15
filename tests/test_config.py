@@ -3,10 +3,37 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
+from dectl.config import TEMPLATE_CONFIG
 from dectl.config import DectlConfig
 from dectl.config import load_config
+
+
+def test_template_config_is_valid():
+    # The example config that `config init` writes and `config example` prints must always
+    # round-trip through the models, so the example can never drift out of validity.
+    config = DectlConfig.model_validate(yaml.safe_load(TEMPLATE_CONFIG))
+    assert 'example-pipeline' in config.pipelines
+
+
+def test_validation_rejects_unknown_pipeline_key():
+    raw = {
+        'defaults': {'account_id': '111'},
+        'pipelines': {'p': {'step_function': {}}},  # typo: should be step_functions
+    }
+    with pytest.raises(ValidationError):
+        DectlConfig.model_validate(raw)
+
+
+def test_validation_rejects_unknown_defaults_key():
+    raw = {
+        'defaults': {'account_id': '111', 'regon': 'us-east-1'},  # typo: should be region
+        'pipelines': {},
+    }
+    with pytest.raises(ValidationError):
+        DectlConfig.model_validate(raw)
 
 
 def test_load_config_returns_none_when_file_missing():
