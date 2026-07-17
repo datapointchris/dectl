@@ -5,8 +5,13 @@ Data engineering control CLI for managing AWS pipelines.
 ## Installing
 
 ```bash
-uv tool install git+https://github.com/datapointchris/dectl.git@latest
+uv tool install git+https://github.com/datapointchris/dectl.git
 ```
+
+Releases are cut from `main` by python-semantic-release, so the default branch is
+always the latest release. Pin a specific version with `@v0.6.1` if you need to.
+On your dev machine, `dectl update` reinstalls from your local `~/tools/dectl`
+checkout instead.
 
 ## Command grammar
 
