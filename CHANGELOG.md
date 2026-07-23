@@ -1,6 +1,76 @@
 # CHANGELOG
 
 
+## v1.0.0 (2026-07-23)
+
+### Chores
+
+- **pre-commit**: Restrict hooks to pre-commit stage
+  ([`b71294f`](https://github.com/datapointchris/dectl/commit/b71294f0fc4cbab442009e9c010c5066ede8a7d0))
+
+Add default_stages: [pre-commit] so hooks without an explicit stages: run only at the pre-commit
+  stage. Without it, unrestricted hooks (ruff, codespell, bandit, etc.) also ran at the
+  prepare-commit-msg and commit-msg stages, firing multiple times per commit.
+
+### Documentation
+
+- Anonymize example resource names to salesdata
+  ([`7d9a1bb`](https://github.com/datapointchris/dectl/commit/7d9a1bb561cf4809961340ff23f67abb85478018))
+
+Replace the real internal name used in docstrings, README examples, and test fixtures with a generic
+  'salesdata' so no real system name ships in the repo.
+
+- Fix install command and document release model
+  ([`2a732fd`](https://github.com/datapointchris/dectl/commit/2a732fdaa4cfc9df51f8aa59afc9b184df88effa))
+
+The documented 'uv tool install ...@latest' failed because releases are semver tags with no moving
+  'latest' ref. Point install at the default branch (always the latest release under
+  python-semantic-release) and document version pinning and the local 'dectl update' path.
+
+### Features
+
+- Add --json to read commands and unify pipeline rendering
+  ([`d8a8d76`](https://github.com/datapointchris/dectl/commit/d8a8d765152f43610634746e69db55d3dda1d9be))
+
+Add an emit_json output helper (bare print, no rich markup, so piped output stays clean for jq) and
+  a stable JSON shape for pipeline listings. Wire --json onto 'dectl list', 'PIPELINE list', 'config
+  show', and 'search'. Extract the duplicated pipeline-printing from main.py and config_cmd.py into
+  a shared pipeline_view module (importable by both without the main<->config_cmd import cycle).
+
+- Verb-last CLI grammar and unified verbs
+  ([`ccc6911`](https://github.com/datapointchris/dectl/commit/ccc69112e00c3af526469eb26d540bdcc3715fb9))
+
+Restructure the command surface to PIPELINE RESOURCE ALIAS VERB, with the verb last so a deploy ->
+  run -> logs loop on one resource changes only the trailing word. The alias becomes a
+  config-assembled sub-app and each verb closes over its resolved config; {env} is substituted at
+  call time. One rule governs the surface: aliased acts on one thing, unaliased on the set.
+
+- Unify verbs: lambda invoke -> run, sfn start -> run, sfn watch -> logs, sfn list -> runs; add glue
+  runs. deploy always means "update artifact". - --follow defaults off everywhere (was forced-on for
+  glue/lambda logs, glue run, sfn watch); streaming is now an explicit opt-in. - lambda/sfn run take
+  payloads via --payload-file PATH or - (stdin). - s3: per-bucket mount/unmount/uri sub-apps; export
+  stays set-level with --prefix; new uri prints a bare s3:// for command substitution. - Pipeline
+  Jenkins deploy -> release, with --plan (was --dry-run). - Config: lambda alias -> live_alias (no
+  back-compat; extra=forbid rejects the old key loudly). buckets docs say alias, not shortname. -
+  dectl reference prints the full grammar, config-independent. - Progressive discovery: no-args help
+  at every level, each alias node doubles as an info panel, examples-first, instance/set help
+  panels.
+
+No confirmation prompts or --yes: dectl is used at the operator's own peril.
+
+BREAKING CHANGE: command grammar is now PIPELINE RESOURCE ALIAS VERB (verb last). Renamed verbs
+  (invoke/start/watch/sfn list -> run/run/logs/runs), pipeline deploy -> release (--dry-run ->
+  --plan), --follow now defaults to false, inline positional JSON payloads replaced by
+  --payload-file, and the lambda config field alias -> live_alias. No deprecation aliases.
+
+### Breaking Changes
+
+- Command grammar is now PIPELINE RESOURCE ALIAS VERB (verb last). Renamed verbs
+  (invoke/start/watch/sfn list -> run/run/logs/runs), pipeline deploy -> release (--dry-run ->
+  --plan), --follow now defaults to false, inline positional JSON payloads replaced by
+  --payload-file, and the lambda config field alias -> live_alias. No deprecation aliases.
+
+
 ## v0.6.1 (2026-07-15)
 
 ### Bug Fixes
