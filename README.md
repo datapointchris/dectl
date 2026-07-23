@@ -15,17 +15,28 @@ checkout instead.
 
 ## Command grammar
 
-Commands follow the shape `dectl PIPELINE RESOURCE ACTION [ALIAS] [OPTIONS]`.
-Pipelines and their resources (`glue`, `lambda`, `sfn`, `s3`, `deploy`) are built
-from your config. Every level is self-documenting — run any partial command or add
-`--help` to see what's available next, including the live list of aliases.
+Commands follow the shape `dectl PIPELINE RESOURCE ALIAS VERB [OPTIONS]` — **the verb comes
+last**, so a deploy → run → logs loop on one resource changes only the final word. Pipelines
+and their resources (`glue`, `lambda`, `sfn`, `s3`, `release`) are built from your config.
+Every level is self-documenting — run any partial command or add `--help` to see what's next,
+including the live list of aliases. `dectl reference` prints the whole grammar independent of
+your config.
+
+**One rule: aliased vs. set.** Acting on one thing takes an alias (`glue JOB run`,
+`s3 BUCKET mount`); acting on the whole set takes none (`s3 export`, `release`, `list`,
+`monitor`).
 
 ```bash
 dectl                              # top-level help: pipelines + global commands
-dectl uslegal                      # what the uslegal pipeline manages
-dectl uslegal list                 # alias -> real AWS name mapping
-dectl uslegal lambda --help        # functions and their actions
+dectl reference                    # the full command grammar, config-independent
+dectl salesdata                    # what the salesdata pipeline manages
+dectl salesdata list               # alias -> real AWS name mapping (add --json for scripts)
+dectl salesdata glue               # the glue jobs; then pick one, then a verb
+dectl salesdata glue source-copy   # this job's verbs (deploy/run/logs/runs) + what it maps to
 ```
+
+Every read command takes `--json` for a stable, machine-readable shape on stdout (`list`,
+`config show`, `search`, the per-resource `runs`, `lambda ... run`, `release status`).
 
 ## Environments
 
@@ -43,6 +54,9 @@ dectl --env prod salesdata list      # -> salesdata-prod-ds-do-thing-lambda
 DECTL_ENV=staging dectl salesdata s3 export
 ```
 
+Since `--env` is only known at runtime, `{env}` is substituted when a command runs, not when
+the tree is built. `--help` and the alias info panels show the raw `{env}` token.
+
 Resolution priority is `--env` > `DECTL_ENV` > `defaults.environment` in config > `dev`. This
 assumes one AWS account across environments — only the names change.
 
@@ -56,35 +70,39 @@ dectl env
 
 ## Lambda dev loop vs release
 
-`ALIAS` values are the short config keys, not the full AWS names.
+Aliases are the short config keys, not the full AWS names. The verb is last, so the
+deploy → run → logs loop only changes the trailing word.
 
 ```bash
 # Fast local loop — updates $LATEST, test it directly
-dectl uslegal lambda deploy error-notifier
-dectl uslegal lambda invoke error-notifier '{"key": "value"}'
-dectl uslegal lambda logs error-notifier
+dectl salesdata lambda error-notifier deploy
+dectl salesdata lambda error-notifier run --payload-file event.json
+dectl salesdata lambda error-notifier run --json          # response as machine-readable JSON
+dectl salesdata lambda error-notifier logs                # add --follow to tail
+echo '{"key": "value"}' | dectl salesdata lambda error-notifier run --payload-file -
 
 # Make it live behind the alias (S3 triggers / durable functions see it):
-# updates $LATEST, publishes an immutable version, moves the configured alias
-dectl uslegal lambda deploy error-notifier --publish
+# updates $LATEST, publishes an immutable version, moves the configured live alias
+dectl salesdata lambda error-notifier deploy --publish
 
 # Canonical release through Jenkins + Terraform
-dectl uslegal deploy
+dectl salesdata release                                   # add --plan for terraform plan only
 ```
 
-`--publish` requires an `alias` on the function in config; without it, deploy
-only ever touches `$LATEST` and alias-triggered functions keep running old code.
+`--publish` requires a `live_alias` on the function in config; without it, deploy only ever
+touches `$LATEST` and alias-triggered functions keep running old code. `run` always targets
+`$LATEST`, so it exercises the code from `deploy` even before you publish.
 
 ## Step Functions
 
 ```bash
-dectl uslegal sfn start ingest                 # start an execution, print its ARN
-dectl uslegal sfn start ingest '{"k":"v"}' -f  # start with input and tail the history
-dectl uslegal sfn watch ingest                 # tail the most recent execution
-dectl uslegal sfn list ingest                  # recent executions with status
+dectl salesdata sfn ingest run                                   # start an execution, print its ARN
+dectl salesdata sfn ingest run --payload-file input.json --follow  # start with input and tail history
+dectl salesdata sfn ingest logs                                  # show the most recent execution's history
+dectl salesdata sfn ingest runs                                  # recent executions with status (--json)
 ```
 
-`watch` renders the execution history — the typed state transitions
+`logs` renders the execution history — the typed state transitions
 (`TaskStateEntered`, `LambdaFunctionScheduled`, `ExecutionSucceeded`, …) — using
 the `GetExecutionHistory` API, so no CloudWatch logging setup is required.
 
@@ -96,14 +114,14 @@ opening each log by hand. What it watches is defined explicitly in config:
 
 ```yaml
 pipelines:
-  uslegal:
+  salesdata:
     monitor:
       lambdas: [ingest, transform, load]
       step_functions: [flow]      # needs log_group set on the state machine
 ```
 
 ```bash
-dectl uslegal monitor    # interleaved, colored, one line per event, prefixed by resource
+dectl salesdata monitor    # interleaved, colored, one line per event, prefixed by resource
 ```
 
 Each monitored line is prefixed and colored by its source, and the combined stream
@@ -113,28 +131,32 @@ Functions is included only when the state machine has a `log_group` configured
 
 ## S3 buckets
 
-Buckets are declared in config as a `shortname -> real bucket name` mapping. Two
-ways to work with them:
+Buckets are declared in config as an `alias -> real bucket name` mapping. Per-bucket verbs
+(`mount`/`unmount`/`uri`) take the alias; the set-level `export` spans every bucket.
 
 ```bash
-# Load bucket URIs into your shell as $pipeline_shortname (lowercase), then use
+# Load every bucket URI into your shell as $pipeline_alias (lowercase), then use
 # them with the aws CLI. A CLI can't set the parent shell's env, so you eval it:
-eval "$(dectl uslegal s3 export)"
-aws s3 cp "$uslegal_raw/incoming/file.txt" .
+eval "$(dectl salesdata s3 export)"           # --prefix overrides the variable name prefix
+aws s3 cp "$salesdata_raw/incoming/file.txt" .
+
+# One bucket's bare s3:// URI, for command substitution:
+aws s3 ls "$(dectl salesdata s3 raw uri)"
 
 # Mount a bucket as a local directory (Linux only — uses mount-s3 / FUSE):
-dectl uslegal s3 mount raw       # -> ~/buckets/uslegal/raw
-dectl uslegal s3 unmount raw
+dectl salesdata s3 raw mount     # -> ~/buckets/salesdata/raw
+dectl salesdata s3 raw unmount
 ```
 
-`s3 mount` refuses on macOS and points you at `export` instead.
+`s3 <alias> mount` refuses on macOS and points you at `export` instead.
 
 ## Other commands
 
 ```bash
-dectl uslegal glue run source-copy   # start a Glue job and tail its logs
-dectl search my-bucket               # find AWS resources by keyword
-dectl config show                    # inspect the loaded config
+dectl salesdata glue source-copy run   # start a Glue job (add --follow to tail it)
+dectl reference                        # the full command grammar, config-independent
+dectl search my-bucket                 # find AWS resources by keyword (--json to script it)
+dectl config show                      # inspect the loaded config (--json for the shape)
 ```
 
 ## Config

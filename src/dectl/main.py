@@ -7,10 +7,10 @@ import yaml
 from pydantic import ValidationError
 
 from dectl.commands.config_cmd import config_app
-from dectl.commands.deploy import make_deploy_app
 from dectl.commands.glue import make_glue_app
 from dectl.commands.lambda_ import make_lambda_app
 from dectl.commands.monitor import run_monitor
+from dectl.commands.release import make_release_app
 from dectl.commands.s3 import make_s3_app
 from dectl.commands.search import run_search
 from dectl.commands.stepfunctions import make_sfn_app
@@ -19,12 +19,14 @@ from dectl.config import PipelineConfig
 from dectl.config import load_config
 from dectl.env import active_environment
 from dectl.env import set_active_environment
+from dectl.output import console
 from dectl.output import emit_json
 from dectl.output import error
 from dectl.output import info
 from dectl.output import success
 from dectl.pipeline_view import pipeline_to_dict
 from dectl.pipeline_view import render_pipeline
+from dectl.pipeline_view import resource_types
 from dectl.session import make_session
 
 # no_args_is_help is intentionally omitted: it would short-circuit to help before the callback
@@ -74,7 +76,7 @@ if cfg:
         if pipeline.buckets:
             resources.append(f's3 ({", ".join(pipeline.buckets)})')
         if pipeline.jenkins and cfg.jenkins:
-            resources.append('deploy (jenkins)')
+            resources.append('release (jenkins)')
         summary = ' · '.join(resources) if resources else 'none configured'
         pipeline_app = typer.Typer(
             no_args_is_help=True,
@@ -94,7 +96,7 @@ if cfg:
             pipeline_app.add_typer(make_s3_app(name, pipeline, cfg), name='s3', rich_help_panel='Resources')
             has_commands = True
         if pipeline.jenkins and cfg.jenkins:
-            pipeline_app.add_typer(make_deploy_app(name, pipeline.jenkins, cfg), name='deploy', rich_help_panel='Resources')
+            pipeline_app.add_typer(make_release_app(name, pipeline.jenkins, cfg), name='release', rich_help_panel='Pipeline')
             has_commands = True
         has_monitor = bool(pipeline.monitor.lambdas or pipeline.monitor.step_functions)
         if has_monitor:
@@ -117,7 +119,7 @@ if cfg:
             if has_monitor:
 
                 def register_monitor_command(papp: typer.Typer, pconfig: PipelineConfig, gconfig) -> None:
-                    @papp.command('monitor', rich_help_panel='Info')
+                    @papp.command('monitor', rich_help_panel='Pipeline')
                     def monitor_pipeline() -> None:
                         """Tail every configured monitor source for this pipeline as one interleaved stream."""
                         run_monitor(pconfig, gconfig)
@@ -125,6 +127,58 @@ if cfg:
                 register_monitor_command(pipeline_app, pipeline, cfg)
 
             app.add_typer(pipeline_app, name=name, rich_help_panel='Pipelines')
+
+
+# The option-syntax brackets ([--follow], [OPTIONS], ...) would be parsed as rich style tags, so
+# these lines are printed with markup disabled; section headers get their style via a style arg.
+REFERENCE_INSTANCE_VERBS = [
+    'glue    ALIAS  deploy · run [--follow] · logs [RUN_ID] [--follow] · runs [--limit N] [--json]',
+    'lambda  ALIAS  deploy [--publish] · run [--payload-file F|-] [--json] · logs [--follow]',
+    'sfn     ALIAS  run [--payload-file F|-] [--follow] · logs [ARN] [--follow] · runs [--limit N] [--json]',
+    's3      ALIAS  mount · unmount · uri',
+]
+REFERENCE_SET_VERBS = [
+    's3 export [--prefix STR]',
+    'release [--plan] [--follow] · release status [--json] · release logs [--follow]',
+    'list [--json] · monitor',
+]
+REFERENCE_GLOBAL = [
+    'reference · env · list [--json] · search KEYWORD [--json] · update',
+    'config  init · show [--json] · path · example · edit · validate',
+]
+
+
+@app.command(rich_help_panel='Global commands')
+def reference() -> None:
+    """Print the full command grammar, independent of the local config.
+
+    Every resource and its universal verbs, plus the one rule (aliased = one thing,
+    unaliased = the whole set). Learn the shape on a fresh machine before authoring config.
+    """
+    console.print('dectl command grammar', style='bold')
+    console.print('  dectl PIPELINE RESOURCE ALIAS VERB [OPTIONS]   — the verb comes last', markup=False)
+    console.print('  One rule: acting on one thing takes an alias; the whole set takes none.', markup=False)
+    console.print()
+    console.print('Instance verbs  (dectl PIPELINE RESOURCE ALIAS VERB)', style='bold cyan')
+    for line in REFERENCE_INSTANCE_VERBS:
+        console.print(f'  {line}', markup=False)
+    console.print()
+    console.print('Set / pipeline verbs  (no alias)', style='bold magenta')
+    for line in REFERENCE_SET_VERBS:
+        console.print(f'  {line}', markup=False)
+    console.print()
+    console.print('Global', style='bold')
+    for line in REFERENCE_GLOBAL:
+        console.print(f'  {line}', markup=False)
+    console.print()
+
+    if cfg:
+        configured = sorted({rtype for p in cfg.pipelines.values() for rtype in resource_types(p)})
+        if cfg.jenkins and any(p.jenkins for p in cfg.pipelines.values()):
+            configured.append('release')
+        info(f'Configured on this machine: {", ".join(configured) or "(none)"}')
+    else:
+        info('No config on this machine yet — run "dectl config init".')
 
 
 @app.command(rich_help_panel='Global commands')
@@ -150,8 +204,9 @@ def update() -> None:
     epilog=(
         'Examples:\n\n'
         f'dectl {EXAMPLE_PIPELINE} list — show what this pipeline manages\n\n'
-        f'dectl {EXAMPLE_PIPELINE} lambda deploy FUNCTION --publish — deploy and move the alias\n\n'
-        f'dectl {EXAMPLE_PIPELINE} glue run JOB — start a Glue job and tail its logs\n\n'
+        f'dectl {EXAMPLE_PIPELINE} glue JOB run --follow — start a Glue job and tail it\n\n'
+        f'dectl {EXAMPLE_PIPELINE} lambda FN deploy --publish — deploy and move the live alias\n\n'
+        'dectl reference — the full command grammar\n\n'
         'dectl search my-bucket — find AWS resources by keyword'
     ),
 )
@@ -168,15 +223,17 @@ def main(
 ) -> None:
     """[bold]dectl[/bold] — data engineering control for AWS pipelines.
 
-    Commands follow the shape: [bold]dectl PIPELINE RESOURCE ACTION [ALIAS] [OPTIONS][/bold]
+    Commands follow the shape: [bold]dectl PIPELINE RESOURCE ALIAS VERB [OPTIONS][/bold] — the
+    verb comes last, so a deploy → run → logs loop on one resource changes only the final word.
 
-    Pipelines come from your config (below, under Pipelines). Each pipeline
-    exposes the resources it defines — [bold]glue[/bold], [bold]lambda[/bold], and/or [bold]deploy[/bold] (Jenkins).
-    Every level is self-documenting: run any partial command with no arguments
-    or [bold]--help[/bold] to see what is available next.
+    [bold]One rule: aliased vs. set.[/bold] Acting on one thing takes an alias
+    ([bold]glue JOB run[/bold], [bold]s3 BUCKET mount[/bold]); acting on the whole set takes none
+    ([bold]s3 export[/bold], [bold]release[/bold], [bold]list[/bold], [bold]monitor[/bold]).
 
-    Aliases (the JOB / FUNCTION names) are the short keys from your config, not
-    the full AWS resource names — run [bold]dectl PIPELINE list[/bold] to see the mapping.
+    Pipelines and their resources come from your config. Every level is self-documenting: run
+    any partial command with no arguments or [bold]--help[/bold] to see what is next. Aliases are
+    the short config keys, not full AWS names — run [bold]dectl PIPELINE list[/bold] for the mapping,
+    or [bold]dectl reference[/bold] for the whole grammar.
 
     Config names carry an [bold]{env}[/bold] placeholder; [bold]--env prod[/bold] (or [bold]DECTL_ENV=prod[/bold])
     substitutes it, so one config drives every environment.

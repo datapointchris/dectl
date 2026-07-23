@@ -7,6 +7,7 @@ import typer
 
 from dectl.config import DectlConfig
 from dectl.config import JenkinsJobConfig
+from dectl.output import emit_json
 from dectl.output import error
 from dectl.output import info
 from dectl.output import success
@@ -39,43 +40,40 @@ def jenkins_request(config: DectlConfig, method: str, path: str, **kwargs):
         return resp
 
 
-def make_deploy_app(pipeline_name: str, job_config: JenkinsJobConfig, config: DectlConfig) -> typer.Typer:
-    deploy_app = typer.Typer(
+def make_release_app(pipeline_name: str, job_config: JenkinsJobConfig, config: DectlConfig) -> typer.Typer:
+    release_app = typer.Typer(
         help=(
-            f'Run the Jenkins Terraform deploy for [bold]{pipeline_name}[/bold] (the production path).\n\n'
-            'Running this with no subcommand triggers a deploy build. Use "status" and "logs" '
+            f'Release [bold]{pipeline_name}[/bold] through Jenkins + Terraform (the production path).\n\n'
+            'Running this with no subcommand triggers a release build. Use "status" and "logs" '
             'to inspect the last build without starting a new one.'
         ),
     )
 
-    @deploy_app.callback(
+    @release_app.callback(
         invoke_without_command=True,
         epilog=(
             'Examples:\n\n'
-            f'dectl {pipeline_name} deploy — trigger a deploy and stream the console\n\n'
-            f'dectl {pipeline_name} deploy --dry-run — run terraform plan only\n\n'
-            f'dectl {pipeline_name} deploy status — show the last build result'
+            f'dectl {pipeline_name} release — trigger a release and stream the console\n\n'
+            f'dectl {pipeline_name} release --plan — run terraform plan only\n\n'
+            f'dectl {pipeline_name} release status — show the last build result'
         ),
     )
-    def deploy(
+    def release(
         ctx: typer.Context,
-        dry_run: Annotated[bool, typer.Option('--dry-run', help='Run terraform plan only, do not apply')] = False,
-        follow: Annotated[bool, typer.Option('--follow', '-f', help='Stream console output after triggering')] = True,
+        plan: Annotated[bool, typer.Option('--plan', help='Run terraform plan only, do not apply')] = False,
+        follow: Annotated[bool, typer.Option('--follow', '-f', help='Stream console output after triggering')] = False,
     ) -> None:
-        """Trigger a Jenkins Terraform deploy build for this pipeline.
+        """Trigger a Jenkins Terraform release build for this pipeline.
 
         This is the canonical release path: it publishes the real function
         versions and moves aliases through Terraform. Use "dectl PIPELINE lambda
-        deploy --publish" for fast local iteration between releases.
+        <alias> deploy --publish" for fast local iteration between releases.
         """
         if ctx.invoked_subcommand is not None:
             return
 
         params = dict(job_config.parameters)
-        if dry_run:
-            params['ACTION'] = 'dry_run'
-        else:
-            params['ACTION'] = 'deploy'
+        params['ACTION'] = 'dry_run' if plan else 'deploy'
 
         job_path = job_config.job_path.replace('/', '/job/')
         resp = jenkins_request(config, 'POST', f'/job/{job_path}/buildWithParameters', data=params)
@@ -90,8 +88,10 @@ def make_deploy_app(pipeline_name: str, job_config: JenkinsJobConfig, config: De
             time.sleep(3)
             stream_console(config, job_config)
 
-    @deploy_app.command()
-    def status() -> None:
+    @release_app.command()
+    def status(
+        as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
+    ) -> None:
         """Show the result of the most recent Jenkins build for this pipeline."""
         job_path = job_config.job_path.replace('/', '/job/')
         resp = jenkins_request(config, 'GET', f'/job/{job_path}/lastBuild/api/json')
@@ -106,6 +106,10 @@ def make_deploy_app(pipeline_name: str, job_config: JenkinsJobConfig, config: De
         number = data.get('number', '?')
         display = data.get('displayName', f'#{number}')
 
+        if as_json:
+            emit_json({'build': display, 'number': number, 'building': building, 'result': result})
+            return
+
         if building:
             info(f'{display} - [yellow]BUILDING[/yellow]')
         elif result == 'SUCCESS':
@@ -113,7 +117,7 @@ def make_deploy_app(pipeline_name: str, job_config: JenkinsJobConfig, config: De
         else:
             error(f'{display} - {result}')
 
-    @deploy_app.command()
+    @release_app.command()
     def logs(
         follow: Annotated[bool, typer.Option('--follow', '-f', help='Keep tailing while the build is still running')] = False,
     ) -> None:
@@ -151,4 +155,4 @@ def make_deploy_app(pipeline_name: str, job_config: JenkinsJobConfig, config: De
             offset = new_offset
             time.sleep(2)
 
-    return deploy_app
+    return release_app

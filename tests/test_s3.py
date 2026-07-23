@@ -43,11 +43,33 @@ def test_export_substitutes_active_env_in_bucket_name(monkeypatch):
     assert "export proj_raw='s3://salesdata-prod-raw'" in result.stdout
 
 
-def test_mount_rejects_unknown_shortname():
+def test_unknown_bucket_is_not_a_command():
+    # Buckets are sub-apps now, so an unknown bucket is an unknown command (Typer usage error).
     config = make_config({'raw': 'my-raw-bucket'})
     app = make_s3_app('proj', config.pipelines['proj'], config)
 
-    result = runner.invoke(app, ['mount', 'nope'])
+    result = runner.invoke(app, ['nope', 'mount'])
 
-    assert result.exit_code == 1
-    assert 'unknown bucket' in result.stdout
+    assert result.exit_code != 0
+
+
+def test_uri_prints_bare_s3_uri(monkeypatch):
+    monkeypatch.setattr(active_environment, 'name', 'prod')
+    config = make_config({'raw': 'salesdata-{env}-raw'})
+    app = make_s3_app('proj', config.pipelines['proj'], config)
+
+    result = runner.invoke(app, ['raw', 'uri'])
+
+    assert result.exit_code == 0
+    # Bare URI, no markup, so it composes in $(...).
+    assert result.stdout.strip() == 's3://salesdata-prod-raw'
+
+
+def test_export_prefix_overrides_variable_name():
+    config = make_config({'raw': 'my-raw-bucket'})
+    app = make_s3_app('my-proj', config.pipelines['proj'], config)
+
+    result = runner.invoke(app, ['export', '--prefix', 'ds'])
+
+    assert result.exit_code == 0
+    assert "export ds_raw='s3://my-raw-bucket'" in result.stdout

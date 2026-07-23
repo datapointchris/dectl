@@ -1,5 +1,27 @@
+from typer.testing import CliRunner
+
+from dectl.commands.glue import make_glue_app
 from dectl.commands.glue import update_glue_job
+from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
+
+runner = CliRunner()
+
+
+def test_job_exposes_deploy_run_logs_runs_verbs():
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '123456789012'},
+            'pipelines': {'proj': {'glue_jobs': {'source-copy': {'name': 'j', 'script_bucket': 'b', 'scripts': ['s.py'], 'role': 'r'}}}},
+        }
+    )
+    app = make_glue_app('proj', config.pipelines['proj'], config)
+
+    result = runner.invoke(app, ['source-copy', '--help'])
+
+    assert result.exit_code == 0
+    for verb in ('deploy', 'run', 'logs', 'runs'):
+        assert verb in result.stdout
 
 
 class FakeGlueClient:

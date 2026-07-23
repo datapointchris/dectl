@@ -18,7 +18,16 @@ than raising.
 This means the command you see depends entirely on the user's config. When adding a resource
 type, you touch two places: the resource's own `make_*_app` module, and the pipeline loop in
 `main.py` that conditionally wires it in (plus the `resources` summary line and
-`print_pipeline`).
+`pipeline_view.render_pipeline`).
+
+## Grammar: `PIPELINE RESOURCE ALIAS VERB` (verb last)
+
+The command shape is `dectl PIPELINE RESOURCE ALIAS VERB [OPTIONS]` — the **verb is last** so a
+deploy → run → logs loop on one resource changes only the trailing word. One rule governs the
+whole surface: **aliased = one thing, unaliased = the set/pipeline.** Instance verbs take an
+alias (`glue JOB run`, `s3 BUCKET mount`); set verbs take none (`s3 export`, `release`, `list`,
+`monitor`). `dectl reference` prints the full static grammar independent of config; every read
+command takes `--json` (via `output.emit_json`, bare-print so pipes stay clean).
 
 ## The `make_*_app` factory pattern
 
@@ -28,15 +37,24 @@ Every resource type is a module in `src/dectl/commands/` exposing a factory:
 def make_<resource>_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Typer:
 ```
 
-The factory closes over the pipeline and config so each command already knows which pipeline it
-belongs to — the commands themselves take only user arguments (an alias, a flag), never the
-pipeline. Inside, a `resolve_*` helper turns a config **alias/shortname** into the full config
-object (or real AWS name) and exits with a clear error on an unknown key. Follow this shape for
-new resources: `glue.py` and `lambda_.py` are the reference implementations, `stepfunctions.py`
-and `s3.py` the newest.
+The factory returns the resource-level app (`glue`) and, for each configured alias, attaches a
+**per-alias sub-app** (`make_<resource>_<thing>_app`) whose commands are the verbs. This is the
+same config-assembled pattern as the pipeline loop, one level down: the alias is a tree node,
+not an argument. Each verb command **closes over that alias's config** and resolves `{env}` at
+call time (`render_env_model` / `substitute_env`) — never at import, since `--env` is not known
+until the command runs. Because the alias is a sub-app, an unknown alias is a Typer
+"no such command" (usage) error, not a `resolve_*` failure; the valid aliases are discoverable
+via no-args/`--help` at the resource level, and each alias sub-app's `help=` doubles as an info
+panel (its resolved name, bucket, scripts). `glue.py` and `lambda_.py` are the reference
+implementations, `stepfunctions.py` and `s3.py` the newest.
 
 Aliases matter: users reference the short config keys (`raw`, `source-copy`), never the real
 AWS names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
+
+`s3` is the one resource with a set-level verb: per-bucket `mount`/`unmount`/`uri` are alias
+sub-apps, but `export` (spans every bucket, no alias) is a command on the `s3` app itself.
+`lambda`/`sfn` `run` take payloads via `payloads.read_payload` (a `--payload-file` path, or `-`
+for stdin), not an inline positional.
 
 `monitor` is the exception to the factory pattern: it is a **pipeline-level** command (like
 `list`, registered on `pipeline_app` directly), not a resource sub-app, because it spans
@@ -47,8 +65,10 @@ selected resource's CloudWatch log group as one interleaved, time-ordered stream
 ## Config
 
 `src/dectl/config.py` — Pydantic models plus `load_config()` / `init_config()`. Config lives at
-`~/.config/dectl/config.yaml`. `buckets` is a `shortname -> real-bucket-name` mapping (same
-alias→name shape as `glue_jobs` and `lambdas`), not a fixed set of roles. `step_functions` maps
+`~/.config/dectl/config.yaml`. `buckets` is an `alias -> real-bucket-name` mapping (same
+alias→name shape as `glue_jobs` and `lambdas`), not a fixed set of roles. A lambda's
+`live_alias` (renamed from `alias` to avoid colliding with the CLI "alias" = the config key) is
+the AWS Lambda alias that `deploy --publish` repoints. `step_functions` maps
 alias → `{name, log_group}` (the log group is optional, needed only for `monitor`). `monitor` is
 its own block listing which lambdas / step machines to tail, kept separate so the monitored view
 is defined in one scannable place. When you change a model, update `TEMPLATE_CONFIG` in the same
@@ -97,7 +117,9 @@ which is why the banner and `dectl env` exist.
 | Module | Responsibility |
 | --- | --- |
 | `session.py` | Builds the boto3 `Session` from config (region + optional profile). Every command that touches AWS goes through `make_session`. |
-| `output.py` | The `rich` console and the `error`/`success`/`info` helpers. Use these, not bare `print`, for anything human-facing. |
+| `output.py` | The `rich` console and the `error`/`success`/`info` helpers, plus `emit_json` (bare-print JSON for `--json`). Use these, not bare `print`, for anything human-facing. |
+| `pipeline_view.py` | Shared pipeline rendering — `render_pipeline` (human) and `pipeline_to_dict` (the stable `--json` shape). Used by both `main.py` (`list`) and `config_cmd.py` (`show`); lives outside both to avoid the `main` ↔ `config_cmd` import cycle. |
+| `payloads.py` | `read_payload` — resolves a `--payload-file` path or `-` (stdin) to a JSON string for `lambda`/`sfn` `run`. |
 | `logs.py` | CloudWatch log tailing (Glue, Lambda, and the multi-group `monitor` stream) plus Step Functions execution-history rendering, including structured-JSON pretty-printing. |
 
 ## Gotchas
@@ -106,17 +128,18 @@ which is why the banner and `dectl env` exist.
   reconstructs the update from the existing definition and overrides only what dectl manages, so
   fields set outside dectl survive a deploy. See the comments there before touching it.
 - **Lambda `$LATEST` vs. published alias** — `deploy` without `--publish` only moves `$LATEST`;
-  alias-following triggers keep running the old published version until you `--publish`. `invoke`
-  always targets `$LATEST`.
-- **`s3 export` must stay eval-safe** — a CLI cannot mutate its parent shell, so `export` prints
-  `export name='s3://…'` lines to stdout for `eval "$(...)"`. That output uses bare `print()`, not
-  the rich console, so no markup or ANSI escapes leak into what gets evaluated.
-- **`s3 mount` is Linux-only** — it shells out to `mount-s3` (Mountpoint for Amazon S3), which is
-  FUSE-based and unavailable on macOS. The command detects a non-Linux OS and refuses with a
-  pointer to `export`. Binaries are resolved with `shutil.which` (full path) so bandit's
+  alias-following triggers keep running the old published version until you `--publish` (which
+  moves the configured `live_alias`). `run` always targets `$LATEST`.
+- **`s3 export` / `s3 <alias> uri` must stay eval-safe** — a CLI cannot mutate its parent shell,
+  so `export` prints `export name='s3://…'` lines for `eval "$(...)"` and `uri` prints a bare
+  `s3://…`. Both use bare `print()`, not the rich console, so no markup or ANSI escapes leak into
+  command substitution.
+- **`s3 <alias> mount` is Linux-only** — it shells out to `mount-s3` (Mountpoint for Amazon S3),
+  which is FUSE-based and unavailable on macOS. The command detects a non-Linux OS and refuses
+  with a pointer to `export`. Binaries are resolved with `shutil.which` (full path) so bandit's
   partial-path check (B607) stays clean without a `nosec`.
-- **Step Functions has two log sources** — `sfn watch` uses the `GetExecutionHistory` API (typed
-  state transitions, no setup, Standard workflows only). `monitor` instead uses the state
+- **Step Functions has two log sources** — `sfn <alias> logs` uses the `GetExecutionHistory` API
+  (typed state transitions, no setup, Standard workflows only). `monitor` instead uses the state
   machine's CloudWatch **log group**, because it needs one uniform source it can merge with the
   Lambda groups — which is why a monitored state machine must have `log_group` set (Express
   workflows only log to CloudWatch and have no history API at all).

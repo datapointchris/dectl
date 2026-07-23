@@ -33,7 +33,7 @@ pipelines:
       my-function:
         name: my-{env}-lambda-function
         source_dir: modules/lambda/my_function/code
-        alias: live
+        live_alias: live
     step_functions:
       my-flow:
         name: my-{env}-state-machine
@@ -87,7 +87,9 @@ class GlueJobConfig(StrictModel):
 class LambdaConfig(StrictModel):
     name: str
     source_dir: str
-    alias: str | None = None
+    # The AWS Lambda alias (e.g. "live") that `deploy --publish` repoints to the new version.
+    # Named live_alias, not alias, to avoid colliding with the CLI "alias" (the config key you type).
+    live_alias: str | None = None
 
 
 class StepFunctionConfig(StrictModel):
@@ -108,8 +110,8 @@ class PipelineConfig(StrictModel):
     glue_jobs: dict[str, GlueJobConfig] = {}
     lambdas: dict[str, LambdaConfig] = {}
     step_functions: dict[str, StepFunctionConfig] = {}
-    # shortname -> real S3 bucket name. The shortname is what you reference on the CLI and
-    # what dectl uses to build the exported shell variable / mount path (pipeline_shortname).
+    # alias -> real S3 bucket name. The alias is what you reference on the CLI and what dectl
+    # uses to build the exported shell variable / mount path (pipeline_alias).
     buckets: dict[str, str] = {}
     monitor: MonitorConfig = MonitorConfig()
     jenkins: JenkinsJobConfig | None = None

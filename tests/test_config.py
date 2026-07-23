@@ -102,6 +102,27 @@ def test_glue_job_arguments_parsed_as_dict():
     assert job.arguments == {'FOO': 'bar', 'NUM': '4'}
 
 
+def test_lambda_live_alias_field_parsed():
+    raw = {
+        'defaults': {'account_id': '111'},
+        'pipelines': {'p': {'lambdas': {'fn': {'name': 'n', 'source_dir': 'd', 'live_alias': 'live'}}}},
+    }
+    config = DectlConfig.model_validate(raw)
+    assert config.pipelines['p'].lambdas['fn'].live_alias == 'live'
+
+
+def test_lambda_rejects_renamed_alias_key():
+    # The field was renamed alias -> live_alias; extra='forbid' turns the stale key into a loud
+    # error rather than a silent drop, so a not-yet-migrated config fails validate instead of
+    # silently never moving the alias on deploy --publish.
+    raw = {
+        'defaults': {'account_id': '111'},
+        'pipelines': {'p': {'lambdas': {'fn': {'name': 'n', 'source_dir': 'd', 'alias': 'live'}}}},
+    }
+    with pytest.raises(ValidationError):
+        DectlConfig.model_validate(raw)
+
+
 def test_buckets_parsed_as_shortname_mapping():
     raw = {
         'defaults': {'account_id': '111', 'region': 'us-east-1'},

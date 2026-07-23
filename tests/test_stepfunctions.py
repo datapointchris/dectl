@@ -31,11 +31,23 @@ def test_state_machine_arn_uses_env_substituted_name(monkeypatch):
     assert state_machine_arn(config, sfn) == 'arn:aws:states:us-east-2:123456789012:stateMachine:salesdata-prod-flow'
 
 
-def test_sfn_watch_rejects_unknown_alias():
+def test_sfn_unknown_alias_is_not_a_command():
+    # The alias is a sub-app now, so an unknown machine is an unknown command (Typer usage error),
+    # not a resolve_* failure. The configured aliases are discoverable via no-args / --help.
     config = make_config({'flow': {'name': 'my-flow'}})
     app = make_sfn_app('proj', config.pipelines['proj'], config)
 
-    result = runner.invoke(app, ['watch', 'nope'])
+    result = runner.invoke(app, ['nope', 'run'])
 
-    assert result.exit_code == 1
-    assert 'unknown state machine' in result.stdout
+    assert result.exit_code != 0
+
+
+def test_sfn_machine_exposes_run_logs_runs_verbs():
+    config = make_config({'flow': {'name': 'my-flow'}})
+    app = make_sfn_app('proj', config.pipelines['proj'], config)
+
+    result = runner.invoke(app, ['flow', '--help'])
+
+    assert result.exit_code == 0
+    for verb in ('run', 'logs', 'runs'):
+        assert verb in result.stdout
