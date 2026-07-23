@@ -1,9 +1,25 @@
+import json
+
 from typer.testing import CliRunner
 
 from dectl.commands.config_cmd import config_app
 from dectl.config import TEMPLATE_CONFIG
 
 runner = CliRunner()
+
+
+def test_show_json_emits_pipeline_shape(monkeypatch, tmp_path):
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(TEMPLATE_CONFIG)
+    monkeypatch.setattr('dectl.config.CONFIG_PATH', config_path)
+    monkeypatch.setattr('dectl.commands.config_cmd.CONFIG_PATH', config_path)
+
+    result = runner.invoke(config_app, ['show', '--json'])
+
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert data[0]['pipeline'] == 'example-pipeline'
+    assert 'source-copy' in data[0]['glue']
 
 
 def test_path_prints_config_path(monkeypatch, tmp_path):

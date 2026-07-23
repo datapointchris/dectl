@@ -2,6 +2,8 @@ import os
 import shlex
 import shutil
 import subprocess
+from itertools import starmap
+from typing import Annotated
 
 import typer
 import yaml
@@ -12,11 +14,13 @@ from dectl.config import CONFIG_PATH
 from dectl.config import TEMPLATE_CONFIG
 from dectl.config import init_config
 from dectl.config import load_config
-from dectl.env import substitute_env
 from dectl.output import console
+from dectl.output import emit_json
 from dectl.output import error
 from dectl.output import info
 from dectl.output import success
+from dectl.pipeline_view import pipeline_to_dict
+from dectl.pipeline_view import render_pipeline
 
 config_app = typer.Typer(
     no_args_is_help=True,
@@ -35,7 +39,9 @@ def config_init() -> None:
 
 
 @config_app.command('show')
-def config_show() -> None:
+def config_show(
+    as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
+) -> None:
     """Display the loaded pipelines and their resources (alias → AWS name)."""
     cfg = load_config()
     if cfg is None:
@@ -43,29 +49,14 @@ def config_show() -> None:
         info('run "dectl config init" to create one')
         raise typer.Exit(1)
 
+    if as_json:
+        emit_json(list(starmap(pipeline_to_dict, cfg.pipelines.items())))
+        return
+
     console.print(f'[bold]config:[/bold] {CONFIG_PATH}')
     console.print()
-
     for name, pipeline in cfg.pipelines.items():
-        types = []
-        if pipeline.glue_jobs:
-            types.append('glue')
-        if pipeline.lambdas:
-            types.append('lambda')
-        if pipeline.step_functions:
-            types.append('sfn')
-        if pipeline.buckets:
-            types.append('s3')
-        console.print(f'[bold]{name}[/bold] ({", ".join(types)})')
-        for alias, job in pipeline.glue_jobs.items():
-            console.print(f'  glue/{alias}: {substitute_env(job.name)}')
-        for alias, fn in pipeline.lambdas.items():
-            console.print(f'  lambda/{alias}: {substitute_env(fn.name)}')
-        for alias, sfn in pipeline.step_functions.items():
-            console.print(f'  sfn/{alias}: {substitute_env(sfn.name)}')
-        for shortname, bucket in pipeline.buckets.items():
-            console.print(f'  s3/{shortname}: {substitute_env(bucket)}')
-        console.print()
+        render_pipeline(name, pipeline)
 
 
 @config_app.command('path')

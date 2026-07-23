@@ -1,3 +1,4 @@
+from itertools import starmap
 from pathlib import Path
 from typing import Annotated
 
@@ -18,10 +19,12 @@ from dectl.config import PipelineConfig
 from dectl.config import load_config
 from dectl.env import active_environment
 from dectl.env import set_active_environment
-from dectl.env import substitute_env
+from dectl.output import emit_json
 from dectl.output import error
 from dectl.output import info
 from dectl.output import success
+from dectl.pipeline_view import pipeline_to_dict
+from dectl.pipeline_view import render_pipeline
 from dectl.session import make_session
 
 # no_args_is_help is intentionally omitted: it would short-circuit to help before the callback
@@ -44,31 +47,6 @@ def resolve_env_source(ctx: typer.Context) -> str:
     # A DEFAULT source means the option default fired — and that default is sourced from the
     # config's `environment` field (falling back to 'dev' only when there is no config at all).
     return ENV_SOURCE_LABELS.get(source_name, 'config' if cfg else 'default')
-
-
-def print_pipeline(name: str, p: PipelineConfig) -> None:
-    types = []
-    if p.glue_jobs:
-        types.append('glue')
-    if p.lambdas:
-        types.append('lambda')
-    if p.step_functions:
-        types.append('sfn')
-    if p.buckets:
-        types.append('s3')
-    info(f'[bold]{name}[/bold] ({", ".join(types)})')
-    for alias, job in p.glue_jobs.items():
-        info(f'  glue/{alias}: {substitute_env(job.name)}')
-        info(f'    bucket: s3://{substitute_env(job.script_bucket)}/{job.script_prefix}/')
-        for s in job.scripts:
-            info(f'      {s}')
-    for alias, fn in p.lambdas.items():
-        info(f'  lambda/{alias}: {substitute_env(fn.name)}')
-    for alias, sfn in p.step_functions.items():
-        info(f'  sfn/{alias}: {substitute_env(sfn.name)}')
-    for shortname, bucket in p.buckets.items():
-        info(f'  s3/{shortname}: {substitute_env(bucket)}')
-    info('')
 
 
 # A present-but-invalid config must not brick the CLI: without this guard the ValidationError
@@ -124,10 +102,15 @@ if cfg:
         if has_commands:
 
             def _make_list_cmd(papp: typer.Typer, pname: str, pconfig: PipelineConfig):
-                @papp.command('list', rich_help_panel='Info')
-                def list_resources() -> None:
+                @papp.command('list', rich_help_panel='Pipeline')
+                def list_resources(
+                    as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
+                ) -> None:
                     """Show this pipeline's jobs, functions, and buckets with their real AWS names."""
-                    print_pipeline(pname, pconfig)
+                    if as_json:
+                        emit_json(pipeline_to_dict(pname, pconfig))
+                    else:
+                        render_pipeline(pname, pconfig)
 
             _make_list_cmd(pipeline_app, name, pipeline)
 
@@ -210,6 +193,7 @@ def main(
 @app.command(rich_help_panel='Global commands')
 def search(
     keyword: Annotated[str, typer.Argument(help='Case-insensitive substring to match against resource names')],
+    as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
 ) -> None:
     """Search AWS by keyword across S3, Lambda, layers, Glue, Step Functions, IAM, and Secrets.
 
@@ -221,7 +205,7 @@ def search(
         error('no config loaded — run "dectl config init" first')
         raise typer.Exit(1)
     session = make_session(cfg)
-    run_search(session, keyword, cfg.defaults.region)
+    run_search(session, keyword, cfg.defaults.region, as_json=as_json)
 
 
 @app.command('env', rich_help_panel='Global commands')
@@ -231,11 +215,16 @@ def show_env() -> None:
 
 
 @app.command('list', rich_help_panel='Global commands')
-def list_all() -> None:
+def list_all(
+    as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
+) -> None:
     """List every pipeline with its jobs, functions, and buckets (alias → AWS name)."""
     if not cfg:
         error('no config loaded — run "dectl config init" first')
         raise typer.Exit(1)
 
+    if as_json:
+        emit_json(list(starmap(pipeline_to_dict, cfg.pipelines.items())))
+        return
     for name, p in cfg.pipelines.items():
-        print_pipeline(name, p)
+        render_pipeline(name, p)

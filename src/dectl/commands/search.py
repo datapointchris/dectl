@@ -2,6 +2,7 @@ import boto3
 from rich.table import Table
 
 from dectl.output import console
+from dectl.output import emit_json
 
 
 def search_service(session: boto3.Session, keyword: str, service: str, region: str) -> list[list[str]]:
@@ -80,14 +81,17 @@ def search_service(session: boto3.Session, keyword: str, service: str, region: s
 SERVICES = ['s3', 'lambda', 'lambda-layers', 'glue', 'stepfunctions', 'iam-roles', 'iam-policies', 'secrets']
 
 
-def run_search(session: boto3.Session, keyword: str, region: str) -> None:
-    for service in SERVICES:
-        results = search_service(session, keyword, service, region)
-        if not results:
-            continue
+def run_search(session: boto3.Session, keyword: str, region: str, as_json: bool = False) -> None:
+    matches = {service: search_service(session, keyword, service, region) for service in SERVICES}
+    matches = {service: rows for service, rows in matches.items() if rows}
 
+    if as_json:
+        emit_json({'keyword': keyword, 'region': region, 'matches': matches})
+        return
+
+    for service, rows in matches.items():
         table = Table(title=service, show_header=False, title_style='bold cyan')
-        for row in results:
+        for row in rows:
             table.add_row(*row)
         console.print(table)
         console.print()
