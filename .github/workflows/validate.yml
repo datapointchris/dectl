@@ -1,0 +1,51 @@
+# forge-toolchain: 5
+name: CI
+
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+
+      - uses: actions/checkout@v7
+
+      # generated:python
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - run: uv sync --all-extras --dev
+
+      - run: uv run ruff check .
+
+      - run: uv run ruff format --check .
+
+      # Only where mypy is configured — unconfigured it typechecks every
+      # dependency and fails on repos that never opted in.
+      - name: Type check
+        run: |
+          if grep -q '\[tool\.mypy\]' pyproject.toml; then
+            uv run mypy .
+          else
+            echo "mypy not configured; skipping"
+          fi
+
+      # pytest exits 5 when it collects nothing, which is not a failure for a
+      # repo that has no tests yet. Written explicitly rather than as an && chain
+      # because the runner uses `bash -e`, where the concise form depends on
+      # subtle errexit-exemption rules.
+      - name: Test
+        run: |
+          set +e
+          uv run pytest
+          code=$?
+          set -e
+          if [ "$code" -eq 0 ] || [ "$code" -eq 5 ]; then exit 0; fi
+          exit 1
