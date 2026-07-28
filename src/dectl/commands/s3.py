@@ -9,6 +9,7 @@ import typer
 
 from dectl.config import DectlConfig
 from dectl.env import substitute_env
+from dectl.env import warn_if_environment_had_no_effect
 from dectl.output import error
 from dectl.output import success
 
@@ -44,6 +45,7 @@ def make_s3_bucket_app(pipeline_name: str, alias: str, bucket_template: str, con
     )
 
     def resolved_bucket() -> str:
+        warn_if_environment_had_no_effect(bucket_template)
         return substitute_env(bucket_template)
 
     @bucket_app.command(epilog=f'Example:\n\naws s3 cp "$(dectl {pipeline_name} s3 {alias} uri)/file.txt" .')
@@ -142,6 +144,7 @@ def make_s3_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Type
         # Plain print(), not the rich console: this output is meant to be eval'd, so it must be
         # free of markup and ANSI escapes. Bucket names are DNS-safe, so single-quoting suffices.
         var_prefix = prefix if prefix is not None else pipeline_name
+        warn_if_environment_had_no_effect(list(buckets.values()))
         for alias, bucket in buckets.items():
             print(f"export {shell_variable_name(var_prefix, alias)}='s3://{substitute_env(bucket)}'")
 

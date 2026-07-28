@@ -112,6 +112,15 @@ flag would short-circuit to help before the callback could print the banner, so 
 help itself.) `--help` still shows Click's static `[default: dev]` regardless of the resolved env,
 which is why the banner and `dectl env` exist.
 
+Because substitution is a literal `{env}` replacement, a config that hardcodes its environment
+(`salesdata-dev-ds-thing`) ignores `--env`/`DECTL_ENV` entirely and acts on the wrong environment
+while succeeding — an invisible failure. `warn_if_environment_had_no_effect` closes that hole: when
+the env was set *explicitly* (source `--env` or `DECTL_ENV`, never a config default) and the
+resource carries no `{env}` token at all, it warns once per invocation. Every path that resolves
+names calls it — `render_env_model`, `s3`'s bare-string `resolved_bucket`/`export`, `monitor`, and
+both `pipeline_view` renderers. The warning goes to **stderr** (`output.warn`), so `--json` output
+and an eval'd `s3 export` stay clean.
+
 ## Cross-cutting modules
 
 | Module | Responsibility |

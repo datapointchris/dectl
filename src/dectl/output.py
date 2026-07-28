@@ -4,6 +4,9 @@ from typing import Any
 from rich.console import Console
 
 console = Console()
+# Warnings go to stderr so they never land in output a caller is consuming: `--json` piped into
+# jq, or `s3 export` inside eval "$(...)".
+warning_console = Console(stderr=True)
 
 
 def emit_json(data: Any) -> None:
@@ -25,3 +28,7 @@ def success(message: str) -> None:
 
 def info(message: str) -> None:
     console.print(message)
+
+
+def warn(message: str) -> None:
+    warning_console.print(f'[yellow]warning:[/yellow] {message}')

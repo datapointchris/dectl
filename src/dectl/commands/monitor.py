@@ -3,6 +3,7 @@ import typer
 from dectl.config import DectlConfig
 from dectl.config import PipelineConfig
 from dectl.env import substitute_env
+from dectl.env import warn_if_environment_had_no_effect
 from dectl.logs import tail_log_groups
 from dectl.output import console
 from dectl.output import error
@@ -42,6 +43,8 @@ def build_monitor_sources(pipeline: PipelineConfig) -> tuple[list[tuple[str, str
 
 
 def run_monitor(pipeline: PipelineConfig, config: DectlConfig) -> None:
+    monitored = [fn.name for fn in pipeline.lambdas.values()] + [sfn.log_group for sfn in pipeline.step_functions.values()]
+    warn_if_environment_had_no_effect(monitored)
     sources, warnings = build_monitor_sources(pipeline)
     for warning in warnings:
         console.print(f'[yellow]{warning}[/yellow]')

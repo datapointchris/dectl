@@ -2,6 +2,7 @@ from typing import Any
 
 from dectl.config import PipelineConfig
 from dectl.env import substitute_env
+from dectl.env import warn_if_environment_had_no_effect
 from dectl.output import info
 
 
@@ -24,6 +25,7 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
 
     Names are env-substituted so the JSON reflects the active environment, matching what the
     human view prints. This is the documented schema for `list --json` / `config show --json`."""
+    warn_if_environment_had_no_effect(pipeline.model_dump())
     return {
         'pipeline': name,
         'glue': {
@@ -46,6 +48,7 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
 
 def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
     """Print a pipeline's resources as human-readable, env-substituted alias -> AWS name lines."""
+    warn_if_environment_had_no_effect(pipeline.model_dump())
     types = resource_types(pipeline)
     info(f'[bold]{name}[/bold] ({", ".join(types) or "none configured"})')
     for alias, job in pipeline.glue_jobs.items():
