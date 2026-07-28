@@ -1,6 +1,6 @@
 [project]
 name = "dectl"
-version = "1.0.0"
+version = "1.1.0"
 description = "Data engineering control CLI for managing AWS pipelines"
 authors = [{ name = "Chris Birch", email = "datapointchris@gmail.com" }]
 license = { text = "MIT" }

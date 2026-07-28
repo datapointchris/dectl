@@ -1,12 +1,55 @@
 # CHANGELOG
 
 
+## v1.1.0 (2026-07-28)
+
+### Chores
+
+- Add .planning to gitignore
+  ([`3000d25`](https://github.com/datapointchris/dectl/commit/3000d2505487dbaef674e7e08c1682b29320a0e9))
+
+### Continuous Integration
+
+- Add generated validate.yml and gate release on it
+  ([`2a01156`](https://github.com/datapointchris/dectl/commit/2a01156faa3654d69546c68482034c0282138abb))
+
+Release triggered on push to main with no validation at all, so it published whatever was on main.
+  Adds the forge-generated CI block (ruff check, ruff format, mypy, pytest) and makes release depend
+  on it.
+
+Verified locally before wiring the gate: all four checks pass.
+
+- Regenerate validate.yml at toolchain 6
+  ([`ceda126`](https://github.com/datapointchris/dectl/commit/ceda126e16966811f411ceb2705e4e43c911b82d))
+
+Stamp only — the python block is unchanged. Toolchain 6 adds the pinned release-binary mechanism and
+  the shell CI block.
+
+### Features
+
+- Warn when an explicit --env substitutes nothing
+  ([`f640444`](https://github.com/datapointchris/dectl/commit/f640444d33c4b82067a528b86f141d4257150c9d))
+
+Substitution is a literal {env} replacement, so a config that hardcodes its environment
+  (salesdata-dev-ds-etl) ignores --env/DECTL_ENV entirely and acts on the wrong environment while
+  still succeeding. Nothing surfaced that, so the command looked like it worked.
+
+warn_if_environment_had_no_effect fires once per invocation when the env came from an explicit
+  source (--env or DECTL_ENV, never a config default, since a config without placeholders is a
+  legitimate single-env setup) and the resource carries no {env} token at all. Wired into every path
+  that resolves names: render_env_model, s3's bare-string resolved_bucket and export, monitor, and
+  both pipeline_view renderers.
+
+The warning goes to stderr via the new output.warn, so --json output piped to jq and an eval'd `s3
+  export` stay clean.
+
+
 ## v1.0.0 (2026-07-23)
 
 ### Chores
 
 - **pre-commit**: Restrict hooks to pre-commit stage
-  ([`b71294f`](https://github.com/datapointchris/dectl/commit/b71294f0fc4cbab442009e9c010c5066ede8a7d0))
+  ([`1643fd3`](https://github.com/datapointchris/dectl/commit/1643fd33cda73e9b2889d63d030021786fb2fb90))
 
 Add default_stages: [pre-commit] so hooks without an explicit stages: run only at the pre-commit
   stage. Without it, unrestricted hooks (ruff, codespell, bandit, etc.) also ran at the
@@ -14,14 +57,8 @@ Add default_stages: [pre-commit] so hooks without an explicit stages: run only a
 
 ### Documentation
 
-- Anonymize example resource names to salesdata
-  ([`7d9a1bb`](https://github.com/datapointchris/dectl/commit/7d9a1bb561cf4809961340ff23f67abb85478018))
-
-Replace the real internal name used in docstrings, README examples, and test fixtures with a generic
-  'salesdata' so no real system name ships in the repo.
-
 - Fix install command and document release model
-  ([`2a732fd`](https://github.com/datapointchris/dectl/commit/2a732fdaa4cfc9df51f8aa59afc9b184df88effa))
+  ([`b3efb92`](https://github.com/datapointchris/dectl/commit/b3efb9291bb5c4a1b8ba6689785a937e39371c99))
 
 The documented 'uv tool install ...@latest' failed because releases are semver tags with no moving
   'latest' ref. Point install at the default branch (always the latest release under
@@ -30,7 +67,7 @@ The documented 'uv tool install ...@latest' failed because releases are semver t
 ### Features
 
 - Add --json to read commands and unify pipeline rendering
-  ([`d8a8d76`](https://github.com/datapointchris/dectl/commit/d8a8d765152f43610634746e69db55d3dda1d9be))
+  ([`129a009`](https://github.com/datapointchris/dectl/commit/129a00953709fd607a85a9d8ff639bedcf8c6c6b))
 
 Add an emit_json output helper (bare print, no rich markup, so piped output stays clean for jq) and
   a stable JSON shape for pipeline listings. Wire --json onto 'dectl list', 'PIPELINE list', 'config
@@ -38,7 +75,7 @@ Add an emit_json output helper (bare print, no rich markup, so piped output stay
   a shared pipeline_view module (importable by both without the main<->config_cmd import cycle).
 
 - Verb-last CLI grammar and unified verbs
-  ([`ccc6911`](https://github.com/datapointchris/dectl/commit/ccc69112e00c3af526469eb26d540bdcc3715fb9))
+  ([`2d0fde0`](https://github.com/datapointchris/dectl/commit/2d0fde091892e610a689febec2f74163c4b3204d))
 
 Restructure the command surface to PIPELINE RESOURCE ALIAS VERB, with the verb last so a deploy ->
   run -> logs loop on one resource changes only the trailing word. The alias becomes a
@@ -76,7 +113,7 @@ BREAKING CHANGE: command grammar is now PIPELINE RESOURCE ALIAS VERB (verb last)
 ### Bug Fixes
 
 - **s3**: Mount buckets under ~/buckets instead of cache dir
-  ([`c80d336`](https://github.com/datapointchris/dectl/commit/c80d336542e8fa350d462c559ec28b2adf6af69c))
+  ([`531d6ae`](https://github.com/datapointchris/dectl/commit/531d6ae16e94036d2334c622b816a7593be3a245))
 
 The old ~/.cache/dectl/mounts/PIPELINE/SHORTNAME path was buried and impractical to cd into. Mount
   at ~/buckets/PIPELINE/SHORTNAME instead, keeping the pipeline segment so buckets sharing a
@@ -88,7 +125,7 @@ The old ~/.cache/dectl/mounts/PIPELINE/SHORTNAME path was buried and impractical
 ### Features
 
 - **config**: Add example, edit, validate, path
-  ([`cd3f3dd`](https://github.com/datapointchris/dectl/commit/cd3f3ddf09dce1ce383408951574f6f4bdce1f23))
+  ([`12d3652`](https://github.com/datapointchris/dectl/commit/12d3652a02697b3a26d801287a55facec6ea2d2b))
 
 Add four config-management commands to the always-present config app:
 
@@ -138,11 +175,11 @@ CHANGELOG.md is generated by semantic-release, which owns its format: per-versio
 ### Features
 
 - Add multi-environment {env} substitution
-  ([`6470fc7`](https://github.com/datapointchris/dectl/commit/6470fc7125f7c10b37801f4972e684b064791fb0))
+  ([`8abf620`](https://github.com/datapointchris/dectl/commit/8abf620da24ec24913a7383b3f75b255f85a5df6))
 
-Resource names in config carry an {env} placeholder (e.g. salesdata-{env}-ds-thing) that is substituted
-  at runtime, so one config drives dev/staging/prod by swapping a single token instead of
-  duplicating every name per environment. No derivation from inconsistent names; the substitution
+Resource names in config carry an {env} placeholder (e.g. salesdata-{env}-ds-thing) that is
+  substituted at runtime, so one config drives dev/staging/prod by swapping a single token instead
+  of duplicating every name per environment. No derivation from inconsistent names; the substitution
   point is marked explicitly.
 
 - --env option (envvar DECTL_ENV, default from defaults.environment) gives the priority chain --env
