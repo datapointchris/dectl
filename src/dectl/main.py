@@ -142,7 +142,7 @@ REFERENCE_INSTANCE_VERBS = [
 REFERENCE_DURABLE_VERBS = [
     'lambda  ALIAS  deploy [--publish]',
     '               run [--payload-file F|-] [--async] [--name N] [--follow] [--json]',
-    '               executions [--status S] [--limit N] [--qualifier Q] [--json]',
+    '               executions [--status S] [--limit N] [--qualifier Q] [--all-versions] [--json]',
     '               history [EXECUTION] [--follow] [--no-data] [--json]',
     '               logs [EXECUTION] [--follow] [--all]',
 ]

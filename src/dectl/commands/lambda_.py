@@ -12,11 +12,13 @@ from dectl.durable import EXECUTION_STATUSES
 from dectl.durable import epoch_millis
 from dectl.durable import execution_to_dict
 from dectl.durable import fetch_history
+from dectl.durable import invoke_qualifier
 from dectl.durable import list_executions
-from dectl.durable import qualifier_for
+from dectl.durable import listing_qualifier
 from dectl.durable import render_execution_header
 from dectl.durable import render_executions_table
 from dectl.durable import resolve_execution
+from dectl.durable import sweep_executions
 from dectl.durable import tail_durable_history
 from dectl.env import render_env_model
 from dectl.logs import tail_lambda_logs
@@ -241,7 +243,7 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         payload = read_payload(payload_file)
         client = make_session(config).client('lambda')
 
-        kwargs: dict = {'FunctionName': fn.name, 'Qualifier': qualifier_for(fn), 'Payload': payload.encode()}
+        kwargs: dict = {'FunctionName': fn.name, 'Qualifier': invoke_qualifier(fn), 'Payload': payload.encode()}
         if run_async:
             kwargs['InvocationType'] = 'Event'
         if name:
@@ -255,7 +257,7 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
             if execution_arn:
                 info(f'durable execution: {execution_arn}')
             else:
-                info(f'queued on {fn.name}:{qualifier_for(fn)} — see "{pipeline_name} lambda {alias} executions"')
+                info(f'queued on {fn.name}:{invoke_qualifier(fn)} — see "{pipeline_name} lambda {alias} executions"')
 
         report_invocation(resp, as_json)
 
@@ -266,7 +268,8 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         epilog=(
             'Examples:\n\n'
             f'dectl {pipeline_name} lambda {alias} executions\n\n'
-            f'dectl {pipeline_name} lambda {alias} executions --status FAILED --limit 20'
+            f'dectl {pipeline_name} lambda {alias} executions --status FAILED --limit 20\n\n'
+            f'dectl {pipeline_name} lambda {alias} executions --all-versions — across recent deploys'
         ),
     )
     def executions(
@@ -277,29 +280,45 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         limit: Annotated[int, typer.Option('--limit', '-n', help='Number of executions to show.')] = 10,
         qualifier: Annotated[
             str | None,
-            typer.Option('--qualifier', help='Version or alias to list. Defaults to the configured live alias, else $LATEST.'),
+            typer.Option('--qualifier', help='Version, $LATEST, or an alias to resolve. Defaults to the configured live alias.'),
         ] = None,
+        all_versions: Annotated[
+            bool,
+            typer.Option('--all-versions', help='Merge executions across recent published versions, not just the live one.'),
+        ] = False,
         as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
     ) -> None:
         """List this function's durable executions with their status and elapsed time.
 
-        Executions belong to the version or alias they started on, so this lists one qualifier at
-        a time — by default the live alias, which is what triggers invoke.
+        Executions are keyed by the function *version* they ran on — Lambda resolves an alias to a
+        version when the execution starts, so an alias cannot be listed directly and is resolved
+        here to whatever version it currently points at. That means `deploy --publish` moves the
+        listing to the new version and leaves earlier runs under the old one; `--all-versions`
+        merges recent versions to find them.
         """
         from dectl.session import make_session
 
         fn = resolved()
         client = make_session(config).client('lambda')
-        target = qualifier or qualifier_for(fn)
-        found = list_executions(client, fn.name, target, limit=limit, status=status)
+
+        if all_versions:
+            found, scanned = sweep_executions(client, fn.name, limit=limit, status=status)
+            scope = f'versions {", ".join(scanned)}'
+        else:
+            asked = qualifier or invoke_qualifier(fn)
+            version = listing_qualifier(client, fn.name, asked)
+            found = list_executions(client, fn.name, version, limit=limit, status=status)
+            scope = asked if asked == version else f'{asked} → version {version}'
 
         if as_json:
             emit_json([execution_to_dict(execution) for execution in found])
             return
         if not found:
-            info(f'no durable executions for {fn.name}:{target}')
+            info(f'no durable executions for {fn.name} ({scope})')
+            if not all_versions:
+                info('add --all-versions to look across earlier deploys')
             return
-        render_executions_table(alias, target, found)
+        render_executions_table(alias, scope, found)
 
     @fn_app.command(
         epilog=(
@@ -330,7 +349,8 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
 
         fn = resolved()
         client = make_session(config).client('lambda')
-        found = resolve_execution(client, fn.name, qualifier_for(fn), execution)
+        live_version = listing_qualifier(client, fn.name, invoke_qualifier(fn))
+        found = resolve_execution(client, fn.name, live_version, execution)
 
         if as_json:
             emit_json(fetch_history(client, found['DurableExecutionArn'], include_data=not no_data))
@@ -379,7 +399,9 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
             tail_lambda_logs(logs_client, fn.name, follow=follow)
             return
 
-        found = resolve_execution(session.client('lambda'), fn.name, qualifier_for(fn), execution)
+        lambda_client = session.client('lambda')
+        live_version = listing_qualifier(lambda_client, fn.name, invoke_qualifier(fn))
+        found = resolve_execution(lambda_client, fn.name, live_version, execution)
         render_execution_header(found)
 
         started = epoch_millis(found.get('StartTimestamp'))

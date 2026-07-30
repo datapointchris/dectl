@@ -182,13 +182,25 @@ and an eval'd `s3 export` stay clean.
   ingestion lags the run's end and the tail would otherwise cut off mid-traceback.
 - **A durable Lambda's unit of work is the execution, not the invocation** — so `durable: true`
   *swaps* `run`/`logs` for the execution-scoped set (`executions`, `history`, `logs EXECUTION`)
-  rather than adding to them; see `add_durable_verbs`. Two consequences worth knowing before
-  touching it: an unqualified `invoke` of a durable function is rejected outright (an execution
-  is pinned to the version it started on, so `qualifier_for` always sends one), and `history` and
-  `logs` read *different* sources — `history` is the checkpoint log via
-  `GetDurableExecutionHistory`, while `logs` is CloudWatch filtered on the execution ARN that the
-  SDK logger stamps onto every record. Note the two Error shapes: `GetDurableExecution` returns
-  `Error` unwrapped, history events wrap it in a `Payload`/`Truncated` envelope.
+  rather than adding to them; see `add_durable_verbs`. `history` and `logs` read *different*
+  sources: `history` is the checkpoint log via `GetDurableExecutionHistory`, while `logs` is
+  CloudWatch filtered on the execution ARN that the SDK logger stamps onto every record. Note the
+  two Error shapes — `GetDurableExecution` returns `Error` unwrapped, history events wrap it in a
+  `Payload`/`Truncated` envelope.
+- **Invoking and listing need *different* qualifiers, which is why there are two functions** —
+  `invoke_qualifier` returns the alias (Lambda rejects an unqualified invoke of a durable
+  function, and an alias is the right thing to send since it resolves to whatever is live).
+  `listing_qualifier` must return a *version*: Lambda resolves the alias to a version number when
+  the execution starts, so the alias never appears in the execution ARN and
+  `ListDurableExecutionsByFunction` refuses it with "cannot filter durable executions by alias".
+  The API reference claims `Qualifier` takes "the function version or alias" — for that operation
+  it is wrong. Collapsing these back into one function reintroduces the bug.
+- **Resolving the alias scopes the listing to one deploy** — `deploy --publish` moves the alias,
+  and earlier runs stay under the old version. `sweep_executions` is the escape hatch (one list
+  call per version, merged newest-first); `executions --all-versions` uses it, and
+  `resolve_execution` falls back to it automatically so a name from the console resolves whatever
+  version ran it. It is bounded by `VERSION_SWEEP_DEPTH` and returns the versions it scanned, so
+  callers report the span rather than presenting a bounded search as exhaustive.
 
 ## Tests
 

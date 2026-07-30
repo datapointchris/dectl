@@ -127,12 +127,31 @@ logger stamps the execution ARN onto every record, and `logs` filters the group 
 group carrying dozens of interleaved executions reads back as just the one. `--all` opts back
 out to the raw group.
 
-`executions` and `run` are qualified with the configured `live_alias` (falling back to
-`$LATEST`), because an execution is pinned to the version it started on — Lambda rejects an
-unqualified invoke of a durable function outright. Use `--qualifier` to list a different one.
-Synchronous invocation waits for the whole execution and is capped at 15 minutes, so anything
-longer needs `run --async`; `--name` makes the start idempotent and gives you a handle to pass
-to `history` and `logs`.
+`run` is qualified with the configured `live_alias` (falling back to `$LATEST`) — Lambda rejects
+an unqualified invoke of a durable function outright, since an execution is pinned to the
+version it starts on. Synchronous invocation waits for the whole execution and is capped at 15
+minutes, so anything longer needs `run --async`; `--name` makes the start idempotent and gives
+you a handle to pass to `history` and `logs`.
+
+**Executions are keyed by version, not by alias.** Lambda resolves an alias to a version number
+when the execution starts, so the alias name never appears in a durable execution ARN and
+listing by alias fails outright (`cannot filter durable executions by alias`). dectl resolves
+the alias to the version it currently points at and shows the resolution:
+
+```bash
+dectl salesdata lambda order-workflow executions
+# order-workflow durable executions (live → version 7)
+
+dectl salesdata lambda order-workflow executions --qualifier 6   # a specific version
+dectl salesdata lambda order-workflow executions --all-versions  # merged across recent deploys
+```
+
+The consequence worth knowing: `deploy --publish` moves the alias to a new version, so runs from
+before the deploy stay under the old one and drop out of the default list. `--all-versions`
+merges the most recent published versions (and `$LATEST`), newest execution first, naming the
+versions it scanned. `history` and `logs` already fall back to that sweep when a name isn't
+found under the live version, so a name copied from the console resolves regardless of which
+deploy ran it.
 
 ## Step Functions
 

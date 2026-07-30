@@ -3,33 +3,63 @@ from datetime import timedelta
 
 import pytest
 import typer
+from botocore.exceptions import ClientError
 
 from dectl.config import LambdaConfig
 from dectl.durable import epoch_millis
 from dectl.durable import format_duration
-from dectl.durable import qualifier_for
+from dectl.durable import invoke_qualifier
+from dectl.durable import listing_qualifier
+from dectl.durable import recent_versions
 from dectl.durable import render_durable_event
 from dectl.durable import render_execution_header
 from dectl.durable import resolve_execution
+from dectl.durable import sweep_executions
 from dectl.durable import tail_durable_history
+from dectl.durable import version_of
 from dectl.output import console
 
 STARTED = datetime(2026, 7, 30, 12)
 
 
 class FakeLambdaClient:
-    """Lambda stand-in for the durable execution APIs."""
+    """Lambda stand-in for the durable execution APIs.
 
-    def __init__(self, executions: list[dict] | None = None, history_pages: list[dict] | None = None) -> None:
+    Executions are keyed by the version in their ARN, matching the service: a list call filters to
+    exactly one qualifier, which is what makes an alias unusable there."""
+
+    def __init__(
+        self,
+        executions: list[dict] | None = None,
+        history_pages: list[dict] | None = None,
+        aliases: dict[str, str] | None = None,
+        versions: list[str] | None = None,
+    ) -> None:
         self.executions = executions or []
         self.history_pages = history_pages or []
+        self.aliases = aliases or {}
+        self.versions = versions or ['$LATEST', '1']
         self.list_calls: list[dict] = []
         self.get_calls: list[dict] = []
         self.history_calls: list[dict] = []
 
+    def get_alias(self, FunctionName, Name) -> dict:
+        if Name not in self.aliases:
+            raise ClientError({'Error': {'Code': 'ResourceNotFoundException', 'Message': 'no alias'}}, 'GetAlias')
+        return {'FunctionVersion': self.aliases[Name]}
+
+    def list_versions_by_function(self, **kwargs) -> dict:
+        return {'Versions': [{'Version': version} for version in self.versions]}
+
     def list_durable_executions_by_function(self, **kwargs) -> dict:
         self.list_calls.append(kwargs)
-        matches = self.executions
+        qualifier = kwargs.get('Qualifier')
+        if qualifier is not None and not (qualifier.startswith('$LATEST') or qualifier.isdigit()):
+            raise ClientError(
+                {'Error': {'Code': 'InvalidParameterValueException', 'Message': 'cannot filter durable executions by alias'}},
+                'ListDurableExecutionsByFunction',
+            )
+        matches = [e for e in self.executions if version_of(e) == qualifier]
         if kwargs.get('DurableExecutionName'):
             matches = [e for e in matches if e['DurableExecutionName'] == kwargs['DurableExecutionName']]
         return {'DurableExecutions': matches[: kwargs.get('MaxItems', 100)]}
@@ -48,12 +78,12 @@ class FakeLambdaClient:
         return {'Events': []}
 
 
-def execution(name: str, status: str = 'SUCCEEDED', ended: datetime | None = None) -> dict:
+def execution(name: str, status: str = 'SUCCEEDED', ended: datetime | None = None, version: str = '7', started=STARTED) -> dict:
     return {
-        'DurableExecutionArn': f'arn:aws:lambda:us-east-2:1:function:fn:live/durable-execution/{name}/x',
+        'DurableExecutionArn': f'arn:aws:lambda:us-east-2:1:function:fn:{version}/durable-execution/{name}/x',
         'DurableExecutionName': name,
         'Status': status,
-        'StartTimestamp': STARTED,
+        'StartTimestamp': started,
         'EndTimestamp': ended,
     }
 
@@ -64,41 +94,117 @@ def capture_durable_event(event: dict) -> str:
     return capture.get()
 
 
-def test_qualifier_prefers_the_live_alias():
+def test_invoke_qualifier_prefers_the_live_alias():
+    # An alias is the right qualifier to invoke through: it resolves to whatever is live.
     fn = LambdaConfig(name='fn', source_dir='code', live_alias='live', durable=True)
-    assert qualifier_for(fn) == 'live'
+    assert invoke_qualifier(fn) == 'live'
 
 
-def test_qualifier_falls_back_to_latest():
+def test_invoke_qualifier_falls_back_to_latest():
     # Durable invocations are always qualified; without a live alias, $LATEST is the qualifier.
     fn = LambdaConfig(name='fn', source_dir='code', durable=True)
-    assert qualifier_for(fn) == '$LATEST'
+    assert invoke_qualifier(fn) == '$LATEST'
+
+
+def test_listing_qualifier_resolves_an_alias_to_its_version():
+    # The bug: an alias name never appears in a durable execution ARN, so the list API refuses it
+    # with "cannot filter durable executions by alias". It has to be resolved first.
+    client = FakeLambdaClient(aliases={'live': '7'})
+
+    assert listing_qualifier(client, 'fn', 'live') == '7'
+
+
+def test_listing_qualifier_passes_versions_through_untouched():
+    client = FakeLambdaClient(aliases={'live': '7'})
+
+    assert listing_qualifier(client, 'fn', '$LATEST') == '$LATEST'
+    assert listing_qualifier(client, 'fn', '3') == '3'
+
+
+def test_listing_qualifier_exits_when_the_alias_does_not_exist():
+    client = FakeLambdaClient(aliases={})
+
+    with pytest.raises(typer.Exit):
+        listing_qualifier(client, 'fn', 'live')
+
+
+def test_listing_an_alias_directly_is_rejected_by_the_service():
+    # Guards the fake against drifting from the behaviour that caused the bug.
+    client = FakeLambdaClient([execution('order-9')], aliases={'live': '7'})
+
+    with pytest.raises(ClientError, match='cannot filter durable executions by alias'):
+        client.list_durable_executions_by_function(FunctionName='fn', Qualifier='live')
+
+
+def test_version_of_reads_the_version_out_of_an_execution_arn():
+    assert version_of(execution('order-9', version='3')) == '3'
+    assert version_of({}) == ''
+
+
+def test_recent_versions_are_newest_first_with_latest_last():
+    # ListVersionsByFunction pages oldest-first, so the newest are at the end of the response.
+    client = FakeLambdaClient(versions=['$LATEST', '1', '2', '3'])
+
+    assert recent_versions(client, 'fn') == ['3', '2', '1', '$LATEST']
+
+
+def test_recent_versions_are_bounded_by_depth():
+    client = FakeLambdaClient(versions=['$LATEST', '1', '2', '3', '4'])
+
+    assert recent_versions(client, 'fn', depth=2) == ['4', '3', '$LATEST']
+
+
+def test_sweep_merges_versions_newest_execution_first():
+    # After a deploy --publish the alias points at a new version, leaving the previous run's
+    # executions under the old one; a sweep is what finds them again.
+    client = FakeLambdaClient(
+        [
+            execution('old-run', version='6', started=datetime(2026, 7, 30, 10)),
+            execution('new-run', started=datetime(2026, 7, 30, 12)),
+        ],
+        versions=['$LATEST', '6', '7'],
+    )
+
+    found, scanned = sweep_executions(client, 'fn', limit=10)
+
+    assert [e['DurableExecutionName'] for e in found] == ['new-run', 'old-run']
+    assert scanned == ['7', '6', '$LATEST']
 
 
 def test_resolve_execution_defaults_to_the_most_recent():
-    client = FakeLambdaClient([execution('order-9'), execution('order-8')])
+    client = FakeLambdaClient([execution('order-9'), execution('order-8')], aliases={'live': '7'})
 
-    found = resolve_execution(client, 'fn', 'live')
+    found = resolve_execution(client, 'fn', '7')
 
     assert found['DurableExecutionName'] == 'order-9'
     assert client.list_calls[0]['MaxItems'] == 1
-    assert client.list_calls[0]['Qualifier'] == 'live'
+    assert client.list_calls[0]['Qualifier'] == '7'
 
 
 def test_resolve_execution_looks_up_a_bare_name():
-    client = FakeLambdaClient([execution('order-9'), execution('order-8')])
+    client = FakeLambdaClient([execution('order-9'), execution('order-8')], aliases={'live': '7'})
 
-    found = resolve_execution(client, 'fn', 'live', 'order-8')
+    found = resolve_execution(client, 'fn', '7', 'order-8')
 
     assert found['DurableExecutionName'] == 'order-8'
     assert client.list_calls[0]['DurableExecutionName'] == 'order-8'
+
+
+def test_resolve_execution_falls_back_to_older_versions_for_a_name():
+    # The name came from the console; which version ran it is not something you can be expected
+    # to know, and after a deploy it is no longer the one the alias points at.
+    client = FakeLambdaClient([execution('order-8', version='6')], versions=['$LATEST', '6', '7'])
+
+    found = resolve_execution(client, 'fn', '7', 'order-8')
+
+    assert found['DurableExecutionName'] == 'order-8'
 
 
 def test_resolve_execution_uses_an_arn_directly():
     client = FakeLambdaClient([execution('order-9')])
     arn = execution('order-9')['DurableExecutionArn']
 
-    found = resolve_execution(client, 'fn', 'live', arn)
+    found = resolve_execution(client, 'fn', '7', arn)
 
     assert found['DurableExecutionName'] == 'order-9'
     # An ARN identifies the execution outright, so there is nothing to search for.
@@ -109,7 +215,7 @@ def test_resolve_execution_exits_when_nothing_matches():
     client = FakeLambdaClient([])
 
     with pytest.raises(typer.Exit):
-        resolve_execution(client, 'fn', 'live', 'no-such-run')
+        resolve_execution(client, 'fn', '7', 'no-such-run')
 
 
 def test_format_duration_covers_a_suspended_workflow():

@@ -8,7 +8,9 @@ from dectl.config import DectlConfig
 
 runner = CliRunner()
 
-DURABLE_ARN = 'arn:aws:lambda:us-east-2:1:function:fn:live/durable-execution/abc/x'
+# Executions are keyed by the resolved version, never the alias — an alias name never appears in
+# a durable execution ARN.
+DURABLE_ARN = 'arn:aws:lambda:us-east-2:1:function:fn:7/durable-execution/abc/x'
 DURABLE_EXECUTION = {
     'DurableExecutionArn': DURABLE_ARN,
     'DurableExecutionName': 'order-1',
@@ -84,6 +86,12 @@ class FakeDurableLambda:
     def invoke(self, **kwargs):
         self.invoke_kwargs = kwargs
         return {'DurableExecutionArn': DURABLE_ARN, 'Payload': FakeEmptyPayload(self.payload)}
+
+    def get_alias(self, FunctionName, Name):
+        return {'FunctionVersion': '7'}
+
+    def list_versions_by_function(self, **kwargs):
+        return {'Versions': [{'Version': '$LATEST'}, {'Version': '7'}]}
 
     def list_durable_executions_by_function(self, **kwargs):
         self.list_kwargs = kwargs
@@ -182,11 +190,38 @@ def test_executions_json_emits_a_stable_shape(monkeypatch):
         {
             'name': 'order-1',
             'status': 'SUCCEEDED',
+            'version': '7',
             'started': '2026-07-30 12:00:00',
             'ended': '2026-07-30 12:01:00',
             'arn': DURABLE_ARN,
         }
     ]
+
+
+def test_executions_resolves_the_alias_before_listing(monkeypatch):
+    # The bug: listing with Qualifier=live fails with "cannot filter durable executions by alias",
+    # because Lambda resolves the alias to a version when the execution starts and the alias name
+    # never appears in the execution ARN.
+    client = FakeDurableLambda()
+    patch_session(monkeypatch, client)
+
+    result = runner.invoke(durable_app(), ['workflow', 'executions'])
+
+    assert result.exit_code == 0
+    assert client.list_kwargs['Qualifier'] == '7'
+    # The resolution is shown, so a list emptied by a deploy is not silently mysterious.
+    assert 'live' in result.stdout
+    assert '7' in result.stdout
+
+
+def test_executions_across_versions_names_what_it_scanned(monkeypatch):
+    client = FakeDurableLambda()
+    patch_session(monkeypatch, client)
+
+    result = runner.invoke(durable_app(), ['workflow', 'executions', '--all-versions'])
+
+    assert result.exit_code == 0
+    assert 'versions' in result.stdout
 
 
 def test_durable_logs_scope_to_the_resolved_execution(monkeypatch):

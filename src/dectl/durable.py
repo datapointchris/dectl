@@ -16,6 +16,7 @@ import time
 from typing import Any
 
 import typer
+from botocore.exceptions import ClientError
 from rich.markup import escape
 from rich.table import Table
 
@@ -36,19 +37,70 @@ EXECUTION_STATUSES = tuple(EXECUTION_STATUS_COLORS)
 TERMINAL_HISTORY_EVENTS = frozenset({'ExecutionSucceeded', 'ExecutionFailed', 'ExecutionTimedOut', 'ExecutionStopped'})
 
 
-def qualifier_for(fn: LambdaConfig) -> str:
-    """The version or alias a durable function's executions belong to.
+# How many published versions a sweep reaches back over. Executions are keyed by version, so a
+# function deployed often accumulates one bucket per deploy; the interesting ones are the newest.
+VERSION_SWEEP_DEPTH = 10
 
-    Durable executions are pinned to the version they started on, so both invoking and listing are
-    always qualified — Lambda rejects an unqualified identifier for a durable function rather than
-    defaulting it. The live alias is the right default because that is what triggers actually
-    invoke; without one, executions live under $LATEST."""
+
+def invoke_qualifier(fn: LambdaConfig) -> str:
+    """The qualifier to invoke through — an alias when one is configured, else $LATEST.
+
+    Lambda rejects an unqualified invoke of a durable function rather than defaulting it, because
+    the execution is pinned to the version it starts on. An alias is the *right* thing to send
+    here: it resolves to whatever version is live at that moment, which is what triggers do."""
     return fn.live_alias or '$LATEST'
+
+
+def is_version(qualifier: str) -> bool:
+    return qualifier.startswith('$LATEST') or qualifier.isdigit()
+
+
+def listing_qualifier(client, function_name: str, qualifier: str) -> str:
+    """The qualifier ListDurableExecutionsByFunction will accept — a version number or $LATEST.
+
+    An alias name never appears in a durable execution ARN: Lambda resolves it to a version number
+    at invoke time, so there is nothing for the list API to match and it refuses with "cannot
+    filter durable executions by alias". (The API reference says Qualifier takes "the function
+    version or alias"; for this operation that is wrong.) An alias therefore has to be resolved to
+    the version it currently points at — which is also why `deploy --publish` appears to empty the
+    list: it moves the alias to a new version and the previous runs stay under the old one. That
+    is what sweep_executions is for."""
+    if is_version(qualifier):
+        return qualifier
+    try:
+        return client.get_alias(FunctionName=function_name, Name=qualifier)['FunctionVersion']
+    except ClientError as exc:
+        if exc.response.get('Error', {}).get('Code') != 'ResourceNotFoundException':
+            raise
+        error(f'no alias "{qualifier}" on {function_name} — pass --qualifier with a version, or $LATEST')
+        raise typer.Exit(1) from exc
 
 
 def epoch_millis(timestamp) -> int | None:
     """boto3 parses these into datetimes; CloudWatch Logs wants epoch milliseconds."""
     return int(timestamp.timestamp() * 1000) if timestamp is not None else None
+
+
+def recent_versions(client, function_name: str, depth: int = VERSION_SWEEP_DEPTH) -> list[str]:
+    """The versions a sweep covers: the newest published ones, then $LATEST.
+
+    ListVersionsByFunction pages oldest-first, so the newest are at the end — a function published
+    on every deploy has hundreds of versions and only the last few still hold executions anyone is
+    looking for. $LATEST goes last because it only collects unpublished `run` invocations."""
+    versions: list[str] = []
+    marker = None
+    while True:
+        kwargs: dict[str, Any] = {'FunctionName': function_name, 'MaxItems': 50}
+        if marker:
+            kwargs['Marker'] = marker
+        resp = client.list_versions_by_function(**kwargs)
+        versions.extend(v['Version'] for v in resp.get('Versions', []))
+        marker = resp.get('NextMarker')
+        if not marker:
+            break
+
+    published = [version for version in versions if version != '$LATEST']
+    return published[-depth:][::-1] + ['$LATEST']
 
 
 def list_executions(
@@ -67,21 +119,67 @@ def list_executions(
     return client.list_durable_executions_by_function(**kwargs).get('DurableExecutions', [])
 
 
+def sweep_executions(
+    client,
+    function_name: str,
+    limit: int = 10,
+    status: str | None = None,
+    name: str | None = None,
+    depth: int = VERSION_SWEEP_DEPTH,
+) -> tuple[list[dict], list[str]]:
+    """List executions across recent versions, merged newest-first, with the versions scanned.
+
+    One list call per version is the only way to span them, since the API filters by exactly one
+    qualifier. Returning the scanned versions lets the caller say how far back it actually looked
+    rather than presenting a bounded search as an exhaustive one."""
+    versions = recent_versions(client, function_name, depth=depth)
+    found: list[dict] = []
+    for version in versions:
+        found.extend(list_executions(client, function_name, version, limit=limit, status=status, name=name))
+    # Sorted on the epoch value, not the datetime: boto3 returns timezone-aware timestamps and a
+    # naive fallback for the missing case would raise rather than sort.
+    found.sort(key=started_at, reverse=True)
+    return found[:limit], versions
+
+
+def started_at(execution: dict) -> float:
+    started = execution.get('StartTimestamp')
+    return started.timestamp() if started is not None else 0.0
+
+
 def resolve_execution(client, function_name: str, qualifier: str, execution: str | None = None) -> dict:
     """Resolve the execution argument — an ARN, a name, or nothing — to its full description.
 
     Names are what you actually have to hand: `run --name` sets one for idempotency, and it is
     what the console lists. Omitting the argument takes the most recent execution, matching
-    `glue logs` and `sfn logs`."""
+    `glue logs` and `sfn logs`.
+
+    A miss falls back to sweeping recent versions before giving up, because the version a name
+    ran under is not something you can be expected to know — and after a `deploy --publish` it is
+    no longer the one the alias points at."""
     if execution and execution.startswith('arn:'):
         return client.get_durable_execution(DurableExecutionArn=execution)
 
     matches = list_executions(client, function_name, qualifier, limit=1, name=execution)
     if not matches:
-        scope = f'named {execution}' if execution else f'for {function_name}:{qualifier}'
-        error(f'no durable execution {scope}')
-        raise typer.Exit(1)
+        matches, scanned = sweep_executions(client, function_name, limit=1, name=execution)
+        if not matches:
+            scope = f'named {execution}' if execution else f'for {function_name}'
+            error(f'no durable execution {scope} in versions {", ".join(scanned)}')
+            raise typer.Exit(1)
+        info(f'found under version {version_of(matches[0])}')
     return client.get_durable_execution(DurableExecutionArn=matches[0]['DurableExecutionArn'])
+
+
+def version_of(execution: dict) -> str:
+    """The version an execution ran on, read back out of its ARN.
+
+    The ARN is `...:function:<name>:<version>/durable-execution/<id>/<id>`, and the version in it
+    is always a number — the alias it was invoked through is already resolved away by this point,
+    which is the whole reason listing by alias does not work."""
+    arn = execution.get('DurableExecutionArn', '')
+    head = arn.split('/durable-execution/')[0]
+    return head.rsplit(':', 1)[-1] if ':' in head else ''
 
 
 def colored_status(status: str) -> str:
@@ -106,16 +204,22 @@ def execution_to_dict(execution: dict) -> dict:
     return {
         'name': execution.get('DurableExecutionName'),
         'status': execution.get('Status'),
+        'version': version_of(execution),
         'started': execution.get('StartTimestamp'),
         'ended': execution.get('EndTimestamp'),
         'arn': execution.get('DurableExecutionArn'),
     }
 
 
-def render_executions_table(alias: str, qualifier: str, executions: list[dict]) -> None:
-    table = Table(title=f'{alias} durable executions ({qualifier})')
+def render_executions_table(alias: str, scope: str, executions: list[dict]) -> None:
+    """Executions with the version each ran on, since that is what scopes the list.
+
+    scope names what was searched — an alias and the version it resolved to, or the span of a
+    sweep — so a short list reads as "this is where I looked" rather than "this is all there is"."""
+    table = Table(title=f'{alias} durable executions ({scope})')
     table.add_column('name')
     table.add_column('status')
+    table.add_column('version')
     table.add_column('started')
     table.add_column('duration')
     for execution in executions:
@@ -123,6 +227,7 @@ def render_executions_table(alias: str, qualifier: str, executions: list[dict]) 
         table.add_row(
             execution.get('DurableExecutionName', ''),
             colored_status(execution.get('Status', '')),
+            version_of(execution),
             started.isoformat() if started else '',
             format_duration(started, execution.get('EndTimestamp')),
         )
