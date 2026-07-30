@@ -1,3 +1,4 @@
+import time
 from typing import Annotated
 
 import boto3
@@ -156,6 +157,12 @@ def update_glue_job(session: boto3.Session, glue_job: GlueJobConfig, assume_yes:
     success(f'updated job {glue_job.name}')
 
 
+# How far before a run's recorded start to begin scanning for its log events. Glue's StartedOn
+# comes from the control plane while the events are stamped by the worker, so they are close but
+# not ordered; a few minutes of slack costs nothing against a window this narrow.
+LOG_START_SLACK_MS = 5 * 60 * 1000
+
+
 class GlueRunWatcher:
     """Polls one run's state so a tail knows when to stop, and remembers the state it stopped on.
 
@@ -174,14 +181,28 @@ class GlueRunWatcher:
         return self.state in TERMINAL_RUN_STATES
 
 
+def run_log_start(glue_client, job_name: str, run_id: str) -> int:
+    """Epoch-ms lower bound for a run's log events, from the run's own StartedOn.
+
+    Without this the tailer scans a group shared by every Glue job in the account from the start
+    of its retention, which is minutes of paging before anything prints. A run that has not
+    started yet has no StartedOn, so fall back to now — it has certainly written nothing earlier."""
+    run = glue_client.get_job_run(JobName=job_name, RunId=run_id)['JobRun']
+    started = run.get('StartedOn')
+    epoch_ms = int(started.timestamp() * 1000) if started is not None else int(time.time() * 1000)
+    return epoch_ms - LOG_START_SLACK_MS
+
+
 def follow_glue_run(session: boto3.Session, glue_job: GlueJobConfig, run_id: str) -> None:
     """Tail a run to completion and exit non-zero if it did not succeed.
 
     Tailing starts immediately rather than waiting for the run to reach RUNNING: the log groups
     are polled by run-id prefix, so an unstarted run simply returns nothing until it has written
     something, and the first line lands the moment it exists instead of one status poll later."""
-    watcher = GlueRunWatcher(session.client('glue'), glue_job.name, run_id)
-    tail_glue_run(session.client('logs'), run_id, follow=True, run_finished=watcher.finished)
+    glue = session.client('glue')
+    watcher = GlueRunWatcher(glue, glue_job.name, run_id)
+    started_at = run_log_start(glue, glue_job.name, run_id)
+    tail_glue_run(session.client('logs'), run_id, started_at, follow=True, run_finished=watcher.finished)
 
     if watcher.state in FAILED_RUN_STATES:
         error(f'run {run_id} finished {watcher.state}')
@@ -294,7 +315,8 @@ def make_glue_job_app(pipeline_name: str, alias: str, job_config: GlueJobConfig,
         if follow:
             follow_glue_run(session, job, run_id)
         else:
-            tail_glue_run(session.client('logs'), run_id, follow=False)
+            started_at = run_log_start(session.client('glue'), job.name, run_id)
+            tail_glue_run(session.client('logs'), run_id, started_at, follow=False)
 
     @job_app.command(epilog=f'Example:\n\ndectl {pipeline_name} glue {alias} runs --limit 5')
     def runs(

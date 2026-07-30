@@ -193,7 +193,13 @@ class LogGroupCursor:
 
     startTime is inclusive, so the newest events come back again on the next poll. Advancing past
     them would drop any sibling sharing that millisecond, so the boundary is instead deduped by
-    eventId."""
+    eventId.
+
+    **start_time is not optional in practice.** filter_log_events scans the group forward from
+    startTime, defaulting to the beginning of its retention, and returns empty pages with a
+    nextToken while it scans. On a group shared by every job in the account — which both Glue
+    groups are — an unbounded scan pages for minutes before the first event surfaces. Always pass
+    a lower bound: the run started, the execution started, now."""
 
     def __init__(self, log_group: str, start_time: int | None = None, **filters) -> None:
         self.log_group = log_group
@@ -201,8 +207,8 @@ class LogGroupCursor:
         self.filters = {key: value for key, value in filters.items() if value}
         self.seen_at_boundary: set[str] = set()
         # A group nothing has ever written to does not exist; that is an ordinary state for a
-        # Glue error group, not an error, so it is reported once and then polled on in case it
-        # is created mid-run.
+        # Glue error group, not an error, so callers report it rather than failing, and polling
+        # continues in case the group is created mid-run.
         self.missing = False
 
     def poll(self, logs_client) -> list[dict]:
@@ -236,7 +242,12 @@ class LogGroupCursor:
 
 
 def render_merged(batch: list[tuple[int, str, str]]) -> None:
-    """Render events pooled from several cursors in timestamp order, each with its source prefix."""
+    """Render events pooled from several cursors in timestamp order, each with its source prefix.
+
+    Timestamp order is not program order across groups, and cannot be made so: a CloudWatch
+    timestamp records when a line was shipped, and Glue's stdout and stderr go through
+    independent agents. A job that prints, raises, then prints again routinely renders both
+    stdout lines before the traceback. The err prefix is what makes that readable."""
     for _, prefix, message in sorted(batch, key=operator.itemgetter(0)):
         render_event(message, prefix=prefix)
 
@@ -263,32 +274,37 @@ def tail_log_groups(logs_client, sources: list[tuple[str, str]], follow: bool = 
             time.sleep(POLL_SECONDS)
 
 
-def tail_glue_run(logs_client, run_id: str, follow: bool = True, run_finished=None) -> None:
+def tail_glue_run(logs_client, run_id: str, started_at: int, follow: bool = True, run_finished=None) -> None:
     """Tail a Glue run's output and error logs, printing each event as soon as it is readable.
 
-    Both Glue log groups are shared by every job in the account, so a run is isolated by filtering
-    on its stream-name prefix (the run id) rather than by naming a stream. That is what keeps the
-    first line prompt: the previous approach called describe_log_streams in a 5-second poll for
-    the output stream and then, sequentially, for the error stream — and a job that never writes
-    to stderr has no error stream to find, so it burned the full 120-second timeout in silence
-    before printing anything. Prefix filtering asks for the run's events directly, so a group with
-    nothing in it yet costs one empty response instead of blocking the other group.
+    Both Glue log groups are shared by every job in the account, so a run is isolated two ways
+    that are each load-bearing:
 
-    It also fixes what that pinning hid: the stream list was fixed at start-up, so a traceback
-    landing in an error stream created later in the run was never displayed at all.
+    * `logStreamNamePrefix=<run id>` picks out this run's streams without naming them, so nothing
+      waits for a stream to be created. The previous approach polled describe_log_streams for the
+      output stream and then, sequentially, for the error stream — and a job that never writes to
+      stderr has no error stream to find, so it burned a 120-second timeout in silence. Pinning
+      the stream list up front also meant a traceback landing in an error stream created later in
+      the run was never shown at all.
+    * `started_at` bounds the scan. Filtering by prefix alone is *not* enough: filter_log_events
+      scans forward from startTime, and left unset that is the start of the group's retention.
+      Against a group holding every Glue run in the account it pages through months of other
+      jobs' logs — several minutes before the first line of yours appears, all at once. This is
+      the run's own start time, so the window is the length of the run.
 
     run_finished is an optional predicate polled alongside the logs; when it reports the run over,
     a few more passes drain whatever CloudWatch was still ingesting and the tail returns."""
     info(f'tailing logs for run {run_id}')
     cursors = [
-        (stream_prefix(group), LogGroupCursor(group, logStreamNamePrefix=run_id)) for group in (GLUE_OUTPUT_LOG_GROUP, GLUE_ERROR_LOG_GROUP)
+        (group, stream_prefix(group), LogGroupCursor(group, start_time=started_at, logStreamNamePrefix=run_id))
+        for group in (GLUE_OUTPUT_LOG_GROUP, GLUE_ERROR_LOG_GROUP)
     ]
 
     printed_anything = False
     drained_passes = 0
     while True:
         batch = []
-        for prefix, cursor in cursors:
+        for _, prefix, cursor in cursors:
             for event in cursor.poll(logs_client):
                 batch.append((event['timestamp'], prefix, event['message']))
         render_merged(batch)
@@ -302,8 +318,15 @@ def tail_glue_run(logs_client, run_id: str, follow: bool = True, run_finished=No
                 break
         time.sleep(POLL_SECONDS)
 
-    if not printed_anything:
-        console.print('[yellow]no log events for this run[/yellow]')
+    if printed_anything:
+        return
+    console.print('[yellow]no log events for this run[/yellow]')
+    # Distinguish "the job printed nothing" from "there is nowhere for it to print": a missing
+    # group means no job in this account has ever written there, which usually means the run
+    # failed before the script started, or the job is Spark and logs to /aws-glue/jobs/*.
+    for group, _, cursor in cursors:
+        if cursor.missing:
+            info(f'log group {group} does not exist')
 
 
 def tail_lambda_logs(
