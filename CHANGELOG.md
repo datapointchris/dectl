@@ -1,6 +1,24 @@
 # CHANGELOG
 
 
+## v1.1.1 (2026-07-30)
+
+### Bug Fixes
+
+- Label only the Glue error stream, align expansions
+  ([`c279f08`](https://github.com/datapointchris/dectl/commit/c279f086d7fe42712d78fc16121f1a44a32e52ee))
+
+Every line carried out or err, but out is a constant on a well-configured job (one stdout handler)
+  so it spent width carrying no information. Worse, render_event prefixed only the header line,
+  leaving expanded JSON fields and tracebacks orphaned at column 0 four columns left of the line
+  they belong to.
+
+stdout is now bare and err marks the exceptional stream — a traceback, the warnings module, a
+  library writing direct. Continuation lines indent by the prefix's visible width (markup tags
+  stripped) so a prefixed record reads as one block. monitor's per-resource prefixes are untouched:
+  there many sources interleave, so every line needs its source.
+
+
 ## v1.1.0 (2026-07-28)
 
 ### Chores
