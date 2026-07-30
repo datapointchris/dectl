@@ -26,6 +26,12 @@ pipelines:
         scripts:
           - my-source-copy.py
         role: "arn:aws:iam::123456789012:role/my-{env}-glue-role"
+        # Authoritative: a connection dropped from this list is detached on the next deploy.
+        # Omit the key entirely to leave the job's connections alone.
+        connections:
+          - my-{env}-vpc-connection
+        # Python shell: 0.0625 (1 GB) or 1 (16 GB). Omit for Spark jobs, which size by WorkerType.
+        max_capacity: 1
         arguments:
           SOURCE_BUCKET: my-{env}-source-bucket
           SOURCE_PREFIX: incoming
@@ -80,8 +86,14 @@ class GlueJobConfig(StrictModel):
     script_prefix: str = 'scripts'
     scripts: list[str]
     role: str
-    connections: list[str] = []
+    # Authoritative when set, so a connection removed here is detached from the job. None means
+    # "dectl does not manage connections" and leaves whatever the job already has — a merge
+    # instead would make a stale entry here immortal, silently reattaching a renamed connection
+    # on every deploy.
+    connections: list[str] | None = None
     arguments: dict[str, str] = {}
+    # Python shell jobs accept 0.0625 (1 GB) or 1 (16 GB); Spark jobs use WorkerType instead.
+    max_capacity: float | None = None
 
 
 class LambdaConfig(StrictModel):

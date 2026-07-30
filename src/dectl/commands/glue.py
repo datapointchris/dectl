@@ -11,10 +11,15 @@ from dectl.env import render_env_model
 from dectl.logs import tail_glue_run
 from dectl.output import console
 from dectl.output import emit_json
+from dectl.output import error
 from dectl.output import info
 from dectl.output import success
 
 RUN_STATE_COLORS = {'SUCCEEDED': 'green', 'FAILED': 'red', 'STOPPED': 'red', 'TIMEOUT': 'red', 'RUNNING': 'cyan'}
+
+# Read-only outputs of GetJob that UpdateJob rejects. AllocatedCapacity is a deprecated
+# server-derived mirror of MaxCapacity that conflicts with WorkerType if echoed back.
+READ_ONLY_KEYS = ('Name', 'CreatedOn', 'LastModifiedOn', 'ProfileName', 'AllocatedCapacity')
 
 
 def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig) -> None:
@@ -25,24 +30,25 @@ def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig) -> None:
         success(f'uploaded {script} -> s3://{glue_job.script_bucket}/{key}')
 
 
-def update_glue_job(session: boto3.Session, glue_job: GlueJobConfig) -> None:
-    glue = session.client('glue')
-    resp = glue.get_job(JobName=glue_job.name)
-    existing = resp['Job']
+def build_job_update(existing: dict, glue_job: GlueJobConfig) -> dict:
+    """Reconstruct the full job definition with dectl's managed fields applied.
 
-    # UpdateJob replaces the whole job definition rather than patching it, so start from
-    # the existing definition and override only what dectl manages. Otherwise every deploy
-    # silently resets omitted fields (Timeout, GlueVersion, WorkerType, MaxRetries, ...) to
-    # their defaults. Name/CreatedOn/LastModifiedOn/ProfileName are read-only and rejected by
-    # UpdateJob; AllocatedCapacity is a deprecated server-derived mirror of MaxCapacity that
-    # conflicts with WorkerType if echoed back, so drop all five.
-    read_only_keys = ('Name', 'CreatedOn', 'LastModifiedOn', 'ProfileName', 'AllocatedCapacity')
-    job_update = {key: value for key, value in existing.items() if key not in read_only_keys}
+    UpdateJob replaces the whole definition rather than patching it, so this starts from the
+    existing definition and overrides only what dectl manages. Otherwise every deploy silently
+    resets omitted fields (Timeout, GlueVersion, WorkerType, MaxRetries, ...) to their defaults."""
+    job_update = {key: value for key, value in existing.items() if key not in READ_ONLY_KEYS}
 
     # Spark jobs (glueetl) report a derived MaxCapacity alongside WorkerType/NumberOfWorkers, but
     # UpdateJob rejects setting both. Drop MaxCapacity when the job uses the worker-based model.
-    if 'WorkerType' in job_update or 'NumberOfWorkers' in job_update:
+    worker_based = 'WorkerType' in job_update or 'NumberOfWorkers' in job_update
+    if worker_based:
         job_update.pop('MaxCapacity', None)
+
+    if glue_job.max_capacity is not None:
+        if worker_based:
+            error(f'{glue_job.name} sizes by WorkerType/NumberOfWorkers; remove max_capacity from its config')
+            raise typer.Exit(1)
+        job_update['MaxCapacity'] = glue_job.max_capacity
 
     job_update['Role'] = glue_job.role
 
@@ -51,10 +57,10 @@ def update_glue_job(session: boto3.Session, glue_job: GlueJobConfig) -> None:
     command['ScriptLocation'] = f's3://{glue_job.script_bucket}/{script_key}'
     job_update['Command'] = command
 
-    connections = list(existing.get('Connections', {}).get('Connections', []))
-    for connection in glue_job.connections:
-        if connection not in connections:
-            connections.append(connection)
+    if glue_job.connections is None:
+        connections = list(existing.get('Connections', {}).get('Connections', []))
+    else:
+        connections = list(glue_job.connections)
     # Glue rejects UpdateJob when Connections is present but its list is empty, so only
     # include it when the job actually has connections.
     if connections:
@@ -73,6 +79,76 @@ def update_glue_job(session: boto3.Session, glue_job: GlueJobConfig) -> None:
         arg_key = key if key.startswith('--') else f'--{key}'
         default_args[arg_key] = value
     job_update['DefaultArguments'] = default_args
+
+    return job_update
+
+
+def render_value(value) -> str:
+    return '(unset)' if value is None else str(value)
+
+
+def diff_mappings(existing: dict, updated: dict) -> dict:
+    keys = sorted(set(existing) | set(updated))
+    return {key: (existing.get(key), updated.get(key)) for key in keys if existing.get(key) != updated.get(key)}
+
+
+def job_definition_changes(existing: dict, job_update: dict) -> list[tuple[str, str, str]]:
+    """Field-level diff of what UpdateJob would change, for review before it is applied.
+
+    Nested dicts (Command, DefaultArguments, Connections) are expanded one level: whole-dict
+    before/after blobs are unreadable, and the interesting change is almost always a single key."""
+    changes = []
+    for key, new_value in job_update.items():
+        old_value = existing.get(key)
+        if old_value == new_value:
+            continue
+        if isinstance(new_value, dict) and (old_value is None or isinstance(old_value, dict)):
+            for sub_key, (old_sub, new_sub) in diff_mappings(old_value or {}, new_value).items():
+                changes.append((f'{key}.{sub_key}', render_value(old_sub), render_value(new_sub)))
+        else:
+            changes.append((key, render_value(old_value), render_value(new_value)))
+
+    # Keys dectl drops (a detached connection, MaxCapacity on a Spark job) are absent from
+    # job_update, so the loop above cannot see them — removals matter as much as changes here.
+    for key, old_value in existing.items():
+        if key not in job_update and key not in READ_ONLY_KEYS:
+            changes.append((key, render_value(old_value), '(removed)'))
+
+    return sorted(changes)
+
+
+def render_job_changes(job_name: str, changes: list[tuple[str, str, str]]) -> None:
+    table = Table(title=f'{job_name} job definition changes')
+    table.add_column('field')
+    table.add_column('current', style='red')
+    table.add_column('after deploy', style='green')
+    for field, old_value, new_value in changes:
+        table.add_row(field, old_value, new_value)
+    console.print(table)
+
+
+def update_glue_job(session: boto3.Session, glue_job: GlueJobConfig, assume_yes: bool = False, plan: bool = False) -> None:
+    """Apply dectl's managed fields to the Glue job definition, after showing what would change.
+
+    Terraform owns these jobs once a pipeline is established, so an UpdateJob that silently
+    rewrites Role/Connections/DefaultArguments is how dectl's config drifts from the real
+    definition. When nothing dectl manages differs, skip the call entirely — the steady state
+    is then a pure code push with no drift surface at all."""
+    glue = session.client('glue')
+    existing = glue.get_job(JobName=glue_job.name)['Job']
+    job_update = build_job_update(existing, glue_job)
+
+    changes = job_definition_changes(existing, job_update)
+    if not changes:
+        info(f'{glue_job.name}: job definition unchanged')
+        return
+
+    render_job_changes(glue_job.name, changes)
+
+    if plan:
+        return
+    if not assume_yes and not typer.confirm('apply these job definition changes?'):
+        raise typer.Abort()
 
     glue.update_job(JobName=glue_job.name, JobUpdate=job_update)
     success(f'updated job {glue_job.name}')
@@ -130,15 +206,30 @@ def make_glue_job_app(pipeline_name: str, alias: str, job_config: GlueJobConfig,
     def resolved() -> GlueJobConfig:
         return render_env_model(job_config)
 
-    @job_app.command(epilog=f'Example:\n\ndectl {pipeline_name} glue {alias} deploy')
-    def deploy() -> None:
-        """Upload the job's scripts to S3 and point the Glue job at them (does not run it)."""
+    @job_app.command(
+        epilog=(
+            'Examples:\n\n'
+            f'dectl {pipeline_name} glue {alias} deploy — upload scripts, confirm any definition changes\n\n'
+            f'dectl {pipeline_name} glue {alias} deploy --plan — show what would change, touch nothing\n\n'
+            f'dectl {pipeline_name} glue {alias} deploy --yes — no prompt, for the pre-Terraform loop'
+        ),
+    )
+    def deploy(
+        plan: Annotated[bool, typer.Option('--plan', help='Show pending job definition changes and exit without applying.')] = False,
+        yes: Annotated[bool, typer.Option('--yes', '-y', help='Apply job definition changes without confirming.')] = False,
+    ) -> None:
+        """Upload the job's scripts to S3 and point the Glue job at them (does not run it).
+
+        Changes to the job definition itself — role, connections, capacity, arguments — are shown
+        and confirmed before they are applied, since Terraform owns those once a pipeline is
+        established. When nothing differs, the definition is left untouched."""
         from dectl.session import make_session
 
         job = resolved()
         session = make_session(config)
-        upload_scripts(session, job)
-        update_glue_job(session, job)
+        if not plan:
+            upload_scripts(session, job)
+        update_glue_job(session, job, assume_yes=yes, plan=plan)
 
     @job_app.command(epilog=f'Example:\n\ndectl {pipeline_name} glue {alias} run --follow')
     def run(

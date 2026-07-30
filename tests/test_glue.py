@@ -1,5 +1,9 @@
+import pytest
+import typer
 from typer.testing import CliRunner
 
+from dectl.commands.glue import build_job_update
+from dectl.commands.glue import job_definition_changes
 from dectl.commands.glue import make_glue_app
 from dectl.commands.glue import update_glue_job
 from dectl.config import DectlConfig
@@ -46,38 +50,110 @@ class FakeSession:
         return self.glue_client
 
 
-def make_job(connections=None, arguments=None):
+def make_job(connections=None, arguments=None, max_capacity=None):
     return GlueJobConfig(
         name='my-job',
         script_bucket='my-bucket',
         scripts=['main.py'],
         role='arn:aws:iam::123456789012:role/glue',
-        connections=connections or [],
+        connections=connections,
         arguments=arguments or {},
+        max_capacity=max_capacity,
     )
+
+
+def apply(glue, job):
+    update_glue_job(FakeSession(glue), job, assume_yes=True)
 
 
 def test_update_omits_connections_when_job_has_none():
     # Glue's get_job omits the Connections key entirely for a job with no connections.
     glue = FakeGlueClient(existing_job={'Command': {'Name': 'pythonshell'}})
-    update_glue_job(FakeSession(glue), make_job())
+    apply(glue, make_job())
 
     assert 'Connections' not in glue.captured_update
 
 
 def test_update_includes_connections_when_configured():
     glue = FakeGlueClient(existing_job={'Command': {'Name': 'pythonshell'}})
-    update_glue_job(FakeSession(glue), make_job(connections=['vpc-conn']))
+    apply(glue, make_job(connections=['vpc-conn']))
 
     assert glue.captured_update['Connections'] == {'Connections': ['vpc-conn']}
 
 
-def test_update_merges_existing_and_configured_connections_without_duplicates():
+def test_configured_connections_replace_rather_than_merge():
+    # A merge would make a stale config entry immortal: a connection renamed in Terraform would
+    # be silently reattached under its old name on every deploy.
+    existing = {'Command': {'Name': 'pythonshell'}, 'Connections': {'Connections': ['old-conn']}}
+    glue = FakeGlueClient(existing_job=existing)
+    apply(glue, make_job(connections=['new-conn']))
+
+    assert glue.captured_update['Connections'] == {'Connections': ['new-conn']}
+
+
+def test_empty_connections_list_detaches_every_connection():
     existing = {'Command': {'Name': 'pythonshell'}, 'Connections': {'Connections': ['vpc-conn']}}
     glue = FakeGlueClient(existing_job=existing)
-    update_glue_job(FakeSession(glue), make_job(connections=['vpc-conn', 'redshift-conn']))
+    apply(glue, make_job(connections=[]))
 
-    assert glue.captured_update['Connections'] == {'Connections': ['vpc-conn', 'redshift-conn']}
+    assert 'Connections' not in glue.captured_update
+
+
+def test_unset_connections_leaves_the_jobs_own_connections_alone():
+    existing = {'Command': {'Name': 'pythonshell'}, 'Connections': {'Connections': ['vpc-conn']}}
+    glue = FakeGlueClient(existing_job=existing)
+    apply(glue, make_job())
+
+    assert glue.captured_update['Connections'] == {'Connections': ['vpc-conn']}
+
+
+def test_max_capacity_is_set_when_configured():
+    glue = FakeGlueClient(existing_job={'Command': {'Name': 'pythonshell'}, 'MaxCapacity': 0.0625})
+    apply(glue, make_job(max_capacity=1.0))
+
+    assert glue.captured_update['MaxCapacity'] == 1.0
+
+
+def test_max_capacity_on_a_worker_based_job_is_rejected():
+    existing = {'Command': {'Name': 'glueetl'}, 'WorkerType': 'G.1X', 'NumberOfWorkers': 2}
+    glue = FakeGlueClient(existing_job=existing)
+
+    with pytest.raises(typer.Exit):
+        apply(glue, make_job(max_capacity=1.0))
+
+
+def test_update_is_skipped_when_nothing_dectl_manages_changed():
+    # The steady state once Terraform owns the job: deploy becomes a pure code push.
+    job = make_job(connections=['vpc-conn'], arguments={'SOURCE': 'b'}, max_capacity=1.0)
+    existing = {
+        'Command': {'Name': 'pythonshell', 'ScriptLocation': 's3://my-bucket/scripts/main.py'},
+        'Role': 'arn:aws:iam::123456789012:role/glue',
+        'Connections': {'Connections': ['vpc-conn']},
+        'DefaultArguments': {'--JOB_NAME': 'my-job', '--SOURCE': 'b'},
+        'MaxCapacity': 1.0,
+    }
+    glue = FakeGlueClient(existing_job=existing)
+    update_glue_job(FakeSession(glue), job)
+
+    assert glue.captured_update is None
+
+
+def test_changes_report_a_detached_connection_as_a_removal():
+    existing = {'Command': {'Name': 'pythonshell'}, 'Connections': {'Connections': ['old-conn']}}
+    job_update = build_job_update(existing, make_job(connections=[]))
+
+    changes = job_definition_changes(existing, job_update)
+
+    assert ('Connections', "{'Connections': ['old-conn']}", '(removed)') in changes
+
+
+def test_changes_expand_default_arguments_per_key():
+    existing = {'Command': {'Name': 'pythonshell'}, 'DefaultArguments': {'--SOURCE_PREFIX': 'incoming'}}
+    job_update = build_job_update(existing, make_job(arguments={'SOURCE_PREFIX': 'landing'}))
+
+    changes = job_definition_changes(existing, job_update)
+
+    assert ('DefaultArguments.--SOURCE_PREFIX', 'incoming', 'landing') in changes
 
 
 def test_update_preserves_unmanaged_job_fields():
@@ -91,7 +167,7 @@ def test_update_preserves_unmanaged_job_fields():
         'ExecutionProperty': {'MaxConcurrentRuns': 5},
     }
     glue = FakeGlueClient(existing_job=existing)
-    update_glue_job(FakeSession(glue), make_job())
+    apply(glue, make_job())
 
     update = glue.captured_update
     assert update['Timeout'] == 60
@@ -111,7 +187,7 @@ def test_update_strips_read_only_keys():
         'AllocatedCapacity': 2,
     }
     glue = FakeGlueClient(existing_job=existing)
-    update_glue_job(FakeSession(glue), make_job())
+    apply(glue, make_job())
 
     for key in ('Name', 'CreatedOn', 'LastModifiedOn', 'ProfileName', 'AllocatedCapacity'):
         assert key not in glue.captured_update
@@ -120,7 +196,7 @@ def test_update_strips_read_only_keys():
 def test_update_overrides_role_and_script_location():
     existing = {'Role': 'old-role', 'Command': {'Name': 'pythonshell', 'ScriptLocation': 's3://old/x.py'}}
     glue = FakeGlueClient(existing_job=existing)
-    update_glue_job(FakeSession(glue), make_job())
+    apply(glue, make_job())
 
     assert glue.captured_update['Role'] == 'arn:aws:iam::123456789012:role/glue'
     assert glue.captured_update['Command']['ScriptLocation'] == 's3://my-bucket/scripts/main.py'
@@ -132,7 +208,7 @@ def test_update_merges_default_arguments_onto_existing():
         'DefaultArguments': {'--TempDir': 's3://tmp/', '--enable-glue-datacatalog': 'true'},
     }
     glue = FakeGlueClient(existing_job=existing)
-    update_glue_job(FakeSession(glue), make_job(arguments={'extra-flag': 'on'}))
+    apply(glue, make_job(arguments={'extra-flag': 'on'}))
 
     args = glue.captured_update['DefaultArguments']
     assert args['--TempDir'] == 's3://tmp/'  # preserved from existing

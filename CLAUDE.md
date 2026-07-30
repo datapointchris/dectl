@@ -133,9 +133,22 @@ and an eval'd `s3 export` stay clean.
 
 ## Gotchas
 
-- **Glue `UpdateJob` replaces the whole job definition** — it does not patch. `glue.py`
+- **Glue `UpdateJob` replaces the whole job definition** — it does not patch. `build_job_update`
   reconstructs the update from the existing definition and overrides only what dectl manages, so
   fields set outside dectl survive a deploy. See the comments there before touching it.
+- **`glue deploy` is two writes with different owners** — the script upload is always yours, but
+  the job *definition* (role, connections, capacity, arguments) is Terraform's once a pipeline is
+  established. dectl can still write it, because that is the whole point before Terraform exists:
+  set arguments and deploy from the shell instead of commit → Jenkins → console. So `deploy` diffs
+  its computed update against the live definition, skips `UpdateJob` entirely when nothing differs
+  (the steady state — a pure code push, no drift surface), and otherwise renders the field-level
+  diff and confirms. `--plan` shows it and exits without uploading; `--yes` skips the prompt for
+  the pre-Terraform loop. `job_definition_changes` also reports keys dectl *drops*, since a
+  detached connection is invisible in a diff that only walks the new definition.
+- **`connections` in config is authoritative, not additive** — it used to union with whatever the
+  job already had, which meant a stale entry could never be removed and a connection renamed in
+  Terraform got silently reattached under its old name on every deploy. `None` (key absent) means
+  dectl does not manage connections; `[]` detaches all.
 - **Lambda `$LATEST` vs. published alias** — `deploy` without `--publish` only moves `$LATEST`;
   alias-following triggers keep running the old published version until you `--publish` (which
   moves the configured `live_alias`). `run` always targets `$LATEST`.
