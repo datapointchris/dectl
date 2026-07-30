@@ -93,6 +93,47 @@ dectl salesdata release                                   # add --plan for terra
 touches `$LATEST` and alias-triggered functions keep running old code. `run` always targets
 `$LATEST`, so it exercises the code from `deploy` even before you publish.
 
+## Durable functions
+
+A Lambda durable function's unit of work is the *execution*, not the invocation: one execution
+checkpoints its way across many invocations and can suspend for up to a year between them. So a
+function flagged `durable: true` in config swaps `run` and `logs` for an execution-scoped set —
+the invocation-shaped views answer nothing useful, since `Invocations` counts replays and a
+single log stream holds fragments of whichever executions that environment happened to serve.
+
+```yaml
+lambdas:
+  order-workflow:
+    name: salesdata-{env}-order-workflow
+    source_dir: modules/lambda/order_workflow/code
+    live_alias: live
+    durable: true
+```
+
+```bash
+dectl salesdata lambda order-workflow executions                 # which ones succeeded or failed
+dectl salesdata lambda order-workflow executions --status FAILED
+dectl salesdata lambda order-workflow history                    # steps/waits/retries of the latest
+dectl salesdata lambda order-workflow history order-123 --follow
+dectl salesdata lambda order-workflow logs                       # logger output for the latest
+dectl salesdata lambda order-workflow logs order-123             # ...or for one named execution
+dectl salesdata lambda order-workflow run --async --name order-123
+```
+
+`history` and `logs` are complements, and match the two console tabs: `history` is the
+checkpoint log Lambda replays from — which step failed, what it returned, how long a wait
+suspended for — while `logs` is what the function's own logger printed while doing it. The SDK
+logger stamps the execution ARN onto every record, and `logs` filters the group on it, so a log
+group carrying dozens of interleaved executions reads back as just the one. `--all` opts back
+out to the raw group.
+
+`executions` and `run` are qualified with the configured `live_alias` (falling back to
+`$LATEST`), because an execution is pinned to the version it started on — Lambda rejects an
+unqualified invoke of a durable function outright. Use `--qualifier` to list a different one.
+Synchronous invocation waits for the whole execution and is capped at 15 minutes, so anything
+longer needs `run --async`; `--name` makes the start idempotent and gives you a handle to pass
+to `history` and `logs`.
+
 ## Step Functions
 
 ```bash

@@ -137,6 +137,15 @@ REFERENCE_INSTANCE_VERBS = [
     'sfn     ALIAS  run [--payload-file F|-] [--follow] · logs [ARN] [--follow] · runs [--limit N] [--json]',
     's3      ALIAS  mount · unmount · uri',
 ]
+# A lambda flagged `durable` swaps run/logs for the execution-scoped set: its unit of work is the
+# durable execution, which spans many invocations, so invocation-shaped verbs answer nothing.
+REFERENCE_DURABLE_VERBS = [
+    'lambda  ALIAS  deploy [--publish]',
+    '               run [--payload-file F|-] [--async] [--name N] [--follow] [--json]',
+    '               executions [--status S] [--limit N] [--qualifier Q] [--json]',
+    '               history [EXECUTION] [--follow] [--no-data] [--json]',
+    '               logs [EXECUTION] [--follow] [--all]',
+]
 REFERENCE_SET_VERBS = [
     's3 export [--prefix STR]',
     'release [--plan] [--follow] · release status [--json] · release logs [--follow]',
@@ -161,6 +170,10 @@ def reference() -> None:
     console.print()
     console.print('Instance verbs  (dectl PIPELINE RESOURCE ALIAS VERB)', style='bold cyan')
     for line in REFERENCE_INSTANCE_VERBS:
+        console.print(f'  {line}', markup=False)
+    console.print()
+    console.print('Durable lambda verbs  (a lambda configured durable: true)', style='bold cyan')
+    for line in REFERENCE_DURABLE_VERBS:
         console.print(f'  {line}', markup=False)
     console.print()
     console.print('Set / pipeline verbs  (no alias)', style='bold magenta')

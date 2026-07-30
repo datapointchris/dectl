@@ -40,6 +40,13 @@ pipelines:
         name: my-{env}-lambda-function
         source_dir: modules/lambda/my_function/code
         live_alias: live
+      my-workflow:
+        name: my-{env}-durable-workflow
+        source_dir: modules/lambda/my_workflow/code
+        live_alias: live
+        # Adds the durable execution verbs (executions, history) and qualifies every invoke,
+        # which Lambda requires for durable functions.
+        durable: true
     step_functions:
       my-flow:
         name: my-{env}-state-machine
@@ -102,6 +109,11 @@ class LambdaConfig(StrictModel):
     # The AWS Lambda alias (e.g. "live") that `deploy --publish` repoints to the new version.
     # Named live_alias, not alias, to avoid colliding with the CLI "alias" (the config key you type).
     live_alias: str | None = None
+    # A durable function keeps a checkpointed execution log of its own, so it gets the extra
+    # execution verbs (`executions`, `history`) and its invocations are qualified — Lambda rejects
+    # an unqualified invoke of a durable function outright. Flagged in config rather than probed
+    # at runtime so the command surface stays assembled at import, like every other resource.
+    durable: bool = False
 
 
 class StepFunctionConfig(StrictModel):

@@ -68,7 +68,8 @@ selected resource's CloudWatch log group as one interleaved, time-ordered stream
 `~/.config/dectl/config.yaml`. `buckets` is an `alias -> real-bucket-name` mapping (same
 alias→name shape as `glue_jobs` and `lambdas`), not a fixed set of roles. A lambda's
 `live_alias` (renamed from `alias` to avoid colliding with the CLI "alias" = the config key) is
-the AWS Lambda alias that `deploy --publish` repoints. `step_functions` maps
+the AWS Lambda alias that `deploy --publish` repoints; its `durable` flag selects the durable
+verb set and doubles as the invocation qualifier's source. `step_functions` maps
 alias → `{name, log_group}` (the log group is optional, needed only for `monitor`). `monitor` is
 its own block listing which lambdas / step machines to tail, kept separate so the monitored view
 is defined in one scannable place. When you change a model, update `TEMPLATE_CONFIG` in the same
@@ -130,6 +131,7 @@ and an eval'd `s3 export` stay clean.
 | `pipeline_view.py` | Shared pipeline rendering — `render_pipeline` (human) and `pipeline_to_dict` (the stable `--json` shape). Used by both `main.py` (`list`) and `config_cmd.py` (`show`); lives outside both to avoid the `main` ↔ `config_cmd` import cycle. |
 | `payloads.py` | `read_payload` — resolves a `--payload-file` path or `-` (stdin) to a JSON string for `lambda`/`sfn` `run`. |
 | `logs.py` | CloudWatch log tailing (Glue, Lambda, and the multi-group `monitor` stream) plus Step Functions execution-history rendering, including structured-JSON pretty-printing. `LogGroupCursor` is the shared primitive all three tailers poll through. |
+| `durable.py` | The Lambda durable-functions domain: qualifier resolution, execution lookup by name/ARN, and execution-history rendering. Kept out of `logs.py` because it is the Lambda API, not CloudWatch. |
 
 ## Gotchas
 
@@ -178,6 +180,15 @@ and an eval'd `s3 export` stay clean.
   anything), and the watcher keeps the last state so the caller can set the exit code without a
   second `get_job_run`. A few drain passes run past the terminal state, because CloudWatch
   ingestion lags the run's end and the tail would otherwise cut off mid-traceback.
+- **A durable Lambda's unit of work is the execution, not the invocation** — so `durable: true`
+  *swaps* `run`/`logs` for the execution-scoped set (`executions`, `history`, `logs EXECUTION`)
+  rather than adding to them; see `add_durable_verbs`. Two consequences worth knowing before
+  touching it: an unqualified `invoke` of a durable function is rejected outright (an execution
+  is pinned to the version it started on, so `qualifier_for` always sends one), and `history` and
+  `logs` read *different* sources — `history` is the checkpoint log via
+  `GetDurableExecutionHistory`, while `logs` is CloudWatch filtered on the execution ARN that the
+  SDK logger stamps onto every record. Note the two Error shapes: `GetDurableExecution` returns
+  `Error` unwrapped, history events wrap it in a `Payload`/`Truncated` envelope.
 
 ## Tests
 

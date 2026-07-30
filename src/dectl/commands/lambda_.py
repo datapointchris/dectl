@@ -8,6 +8,16 @@ import typer
 
 from dectl.config import DectlConfig
 from dectl.config import LambdaConfig
+from dectl.durable import EXECUTION_STATUSES
+from dectl.durable import epoch_millis
+from dectl.durable import execution_to_dict
+from dectl.durable import fetch_history
+from dectl.durable import list_executions
+from dectl.durable import qualifier_for
+from dectl.durable import render_execution_header
+from dectl.durable import render_executions_table
+from dectl.durable import resolve_execution
+from dectl.durable import tail_durable_history
 from dectl.env import render_env_model
 from dectl.logs import tail_lambda_logs
 from dectl.output import console
@@ -16,6 +26,11 @@ from dectl.output import error
 from dectl.output import info
 from dectl.output import success
 from dectl.payloads import read_payload
+
+# Widen the CloudWatch window around an execution's recorded start and end. The records are
+# written by the function while the timestamps come from the control plane, so the two are close
+# but not ordered; a minute either side costs nothing and never clips the first or last line.
+LOG_WINDOW_BUFFER_MS = 60_000
 
 
 def zip_lambda(source_dir: str) -> Path:
@@ -32,13 +47,41 @@ def zip_lambda(source_dir: str) -> Path:
     return zip_path
 
 
+def report_invocation(response: dict, as_json: bool) -> None:
+    """Print an invoke response, exiting non-zero when the function itself failed.
+
+    A handled or unhandled exception in the function still returns HTTP 200 with the error in the
+    payload; FunctionError is the only signal it failed. Surfacing it as a non-zero exit is what
+    lets a script (or an LLM) tell a failed invocation from a successful one."""
+    raw = response['Payload'].read()
+    if not raw:
+        return
+    result = json.loads(raw)
+
+    if response.get('FunctionError'):
+        if as_json:
+            emit_json(result)
+        else:
+            error(f'function returned an error ({response["FunctionError"]}):')
+            console.print_json(json.dumps(result, indent=2))
+        raise typer.Exit(1)
+
+    if as_json:
+        emit_json(result)
+    else:
+        console.print_json(json.dumps(result, indent=2))
+
+
 def make_lambda_function_app(pipeline_name: str, alias: str, fn_config: LambdaConfig, config: DectlConfig) -> typer.Typer:
     """Build the per-function sub-app: `dectl PIPELINE lambda <alias> <verb>`.
 
-    Verbs close over this function's config and resolve {env} at call time."""
+    Verbs close over this function's config and resolve {env} at call time. A function flagged
+    `durable` gets a different set of them — see add_durable_verbs — because its unit of work is
+    the execution rather than the invocation."""
+    kind = 'Durable function' if fn_config.durable else 'Lambda function'
     fn_app = typer.Typer(
         no_args_is_help=True,
-        help=f'Lambda function [bold]{alias}[/bold] → {fn_config.name}',
+        help=f'{kind} [bold]{alias}[/bold] → {fn_config.name}',
     )
 
     def resolved() -> LambdaConfig:
@@ -101,6 +144,17 @@ def make_lambda_function_app(pipeline_name: str, alias: str, fn_config: LambdaCo
         client.update_alias(FunctionName=fn.name, Name=fn.live_alias, FunctionVersion=version)
         success(f'deployed {fn.name}: alias {fn.live_alias} -> version {version}')
 
+    if fn_config.durable:
+        add_durable_verbs(fn_app, pipeline_name, alias, config, resolved)
+    else:
+        add_standard_verbs(fn_app, pipeline_name, alias, config, resolved)
+
+    return fn_app
+
+
+def add_standard_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, config: DectlConfig, resolved) -> None:
+    """run and logs for an ordinary function, where one invocation is the whole unit of work."""
+
     @fn_app.command(
         epilog=(
             'Examples:\n\n'
@@ -127,24 +181,7 @@ def make_lambda_function_app(pipeline_name: str, alias: str, fn_config: LambdaCo
         payload = read_payload(payload_file)
         client = make_session(config).client('lambda')
 
-        resp = client.invoke(FunctionName=fn.name, Payload=payload.encode())
-        result = json.loads(resp['Payload'].read())
-
-        # A handled/unhandled exception in the function still returns 200 with the error payload;
-        # FunctionError is the only signal it failed. Surface it and exit non-zero so a script
-        # (or an LLM) can tell a failed invocation from a successful one.
-        if resp.get('FunctionError'):
-            if as_json:
-                emit_json(result)
-            else:
-                error(f'function returned an error ({resp["FunctionError"]}):')
-                console.print_json(json.dumps(result, indent=2))
-            raise typer.Exit(1)
-
-        if as_json:
-            emit_json(result)
-        else:
-            console.print_json(json.dumps(result, indent=2))
+        report_invocation(client.invoke(FunctionName=fn.name, Payload=payload.encode()), as_json)
 
     @fn_app.command(epilog=f'Example:\n\ndectl {pipeline_name} lambda {alias} logs --follow')
     def logs(
@@ -157,7 +194,204 @@ def make_lambda_function_app(pipeline_name: str, alias: str, fn_config: LambdaCo
         logs_client = make_session(config).client('logs')
         tail_lambda_logs(logs_client, fn.name, follow=follow)
 
-    return fn_app
+
+def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, config: DectlConfig, resolved) -> None:
+    """run, executions, history and logs for a durable function.
+
+    These replace the ordinary run/logs rather than sitting beside them, because for a durable
+    function neither of those questions has an invocation-shaped answer: one execution spans many
+    invocations, so `executions` is what tells you whether the work succeeded, and `logs` is only
+    legible once scoped to a single execution."""
+
+    @fn_app.command(
+        epilog=(
+            'Examples:\n\n'
+            f'dectl {pipeline_name} lambda {alias} run --payload-file event.json\n\n'
+            f'dectl {pipeline_name} lambda {alias} run --async --name order-123 — start and return\n\n'
+            f'dectl {pipeline_name} lambda {alias} run --async --follow — start and watch the steps'
+        ),
+    )
+    def run(
+        payload_file: Annotated[
+            str | None,
+            typer.Option('--payload-file', help='JSON event: a file path, or - for stdin. Defaults to {}.'),
+        ] = None,
+        run_async: Annotated[
+            bool,
+            typer.Option('--async', help='Queue the event and return immediately, lifting the 15-minute synchronous cap.'),
+        ] = False,
+        name: Annotated[
+            str | None,
+            typer.Option('--name', help='Execution name. Re-running with the same name resumes rather than starting again.'),
+        ] = None,
+        follow: Annotated[bool, typer.Option('--follow', '-f', help="Tail the execution's step history until it finishes.")] = False,
+        as_json: Annotated[bool, typer.Option('--json', help='Emit the response as machine-readable JSON to stdout.')] = False,
+    ) -> None:
+        """Start a durable execution and print its ARN.
+
+        The invocation is qualified with the live alias when one is configured, falling back to
+        $LATEST: Lambda rejects an unqualified invoke of a durable function, because an execution
+        is pinned to the version it starts on so that a replay hours or days later runs the same
+        code. Synchronous invocation waits for the whole execution and is capped at 15 minutes —
+        use --async for anything longer.
+        """
+        from dectl.session import make_session
+
+        fn = resolved()
+        payload = read_payload(payload_file)
+        client = make_session(config).client('lambda')
+
+        kwargs: dict = {'FunctionName': fn.name, 'Qualifier': qualifier_for(fn), 'Payload': payload.encode()}
+        if run_async:
+            kwargs['InvocationType'] = 'Event'
+        if name:
+            kwargs['DurableExecutionName'] = name
+
+        resp = client.invoke(**kwargs)
+        execution_arn = resp.get('DurableExecutionArn')
+        # Suppressed under --json so the response payload stays the only thing on stdout, the
+        # same reason warnings go to stderr elsewhere. The ARN is in `executions --json`.
+        if not as_json:
+            if execution_arn:
+                info(f'durable execution: {execution_arn}')
+            else:
+                info(f'queued on {fn.name}:{qualifier_for(fn)} — see "{pipeline_name} lambda {alias} executions"')
+
+        report_invocation(resp, as_json)
+
+        if follow and execution_arn:
+            tail_durable_history(client, execution_arn, follow=True)
+
+    @fn_app.command(
+        epilog=(
+            'Examples:\n\n'
+            f'dectl {pipeline_name} lambda {alias} executions\n\n'
+            f'dectl {pipeline_name} lambda {alias} executions --status FAILED --limit 20'
+        ),
+    )
+    def executions(
+        status: Annotated[
+            str | None,
+            typer.Option('--status', help=f'Only executions in this state: {", ".join(EXECUTION_STATUSES)}.'),
+        ] = None,
+        limit: Annotated[int, typer.Option('--limit', '-n', help='Number of executions to show.')] = 10,
+        qualifier: Annotated[
+            str | None,
+            typer.Option('--qualifier', help='Version or alias to list. Defaults to the configured live alias, else $LATEST.'),
+        ] = None,
+        as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
+    ) -> None:
+        """List this function's durable executions with their status and elapsed time.
+
+        Executions belong to the version or alias they started on, so this lists one qualifier at
+        a time — by default the live alias, which is what triggers invoke.
+        """
+        from dectl.session import make_session
+
+        fn = resolved()
+        client = make_session(config).client('lambda')
+        target = qualifier or qualifier_for(fn)
+        found = list_executions(client, fn.name, target, limit=limit, status=status)
+
+        if as_json:
+            emit_json([execution_to_dict(execution) for execution in found])
+            return
+        if not found:
+            info(f'no durable executions for {fn.name}:{target}')
+            return
+        render_executions_table(alias, target, found)
+
+    @fn_app.command(
+        epilog=(
+            'Examples:\n\n'
+            f'dectl {pipeline_name} lambda {alias} history — the most recent execution\n\n'
+            f'dectl {pipeline_name} lambda {alias} history order-123 --follow'
+        ),
+    )
+    def history(
+        execution: Annotated[
+            str | None,
+            typer.Argument(help='Execution name or ARN. Defaults to the most recent execution.'),
+        ] = None,
+        follow: Annotated[bool, typer.Option('--follow', '-f', help='Keep polling while the execution runs.')] = False,
+        no_data: Annotated[
+            bool,
+            typer.Option('--no-data', help='Omit step results and callback payloads, for a workflow with large ones.'),
+        ] = False,
+        as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
+    ) -> None:
+        """Show one execution's steps, waits, retries and failures in order.
+
+        This is the checkpoint log Lambda replays from, so it is the record of what the workflow
+        actually did — which step failed, what it returned, how long a wait suspended for. The
+        `logs` verb is the complement: what the function's own logger printed while doing it.
+        """
+        from dectl.session import make_session
+
+        fn = resolved()
+        client = make_session(config).client('lambda')
+        found = resolve_execution(client, fn.name, qualifier_for(fn), execution)
+
+        if as_json:
+            emit_json(fetch_history(client, found['DurableExecutionArn'], include_data=not no_data))
+            return
+
+        render_execution_header(found)
+        # A finished execution has nothing further to poll for, so --follow on one would spin
+        # forever rather than terminate on the event it is already showing.
+        still_running = found.get('EndTimestamp') is None
+        tail_durable_history(client, found['DurableExecutionArn'], follow=follow and still_running, include_data=not no_data)
+
+    @fn_app.command(
+        epilog=(
+            'Examples:\n\n'
+            f'dectl {pipeline_name} lambda {alias} logs — logger output for the most recent execution\n\n'
+            f'dectl {pipeline_name} lambda {alias} logs order-123\n\n'
+            f'dectl {pipeline_name} lambda {alias} logs --all — the whole log group, unscoped'
+        ),
+    )
+    def logs(
+        execution: Annotated[
+            str | None,
+            typer.Argument(help='Execution name or ARN. Defaults to the most recent execution.'),
+        ] = None,
+        follow: Annotated[bool, typer.Option('--follow', '-f', help='Keep tailing while the execution runs.')] = False,
+        every: Annotated[
+            bool,
+            typer.Option('--all', help='Tail the raw log group instead, across every execution.'),
+        ] = False,
+    ) -> None:
+        """Show the function's own logger output for one durable execution.
+
+        The SDK logger stamps the execution ARN onto every record, which is what the console's
+        "Logger output" tab filters on and what this filters on too — so a log group carrying
+        dozens of interleaved executions reads back as just this one. Platform START/END/REPORT
+        lines carry no ARN and are excluded with everything else; the checkpointed step
+        transitions are in `history`, not here.
+        """
+        from dectl.session import make_session
+
+        fn = resolved()
+        session = make_session(config)
+        logs_client = session.client('logs')
+
+        if every:
+            tail_lambda_logs(logs_client, fn.name, follow=follow)
+            return
+
+        found = resolve_execution(session.client('lambda'), fn.name, qualifier_for(fn), execution)
+        render_execution_header(found)
+
+        started = epoch_millis(found.get('StartTimestamp'))
+        ended = epoch_millis(found.get('EndTimestamp'))
+        tail_lambda_logs(
+            logs_client,
+            fn.name,
+            follow=follow and ended is None,
+            filter_pattern=f'"{found["DurableExecutionArn"]}"',
+            start_time=started - LOG_WINDOW_BUFFER_MS if started else None,
+            end_time=ended + LOG_WINDOW_BUFFER_MS if ended else None,
+        )
 
 
 def make_lambda_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Typer:

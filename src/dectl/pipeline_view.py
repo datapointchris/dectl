@@ -37,7 +37,7 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
             }
             for alias, job in pipeline.glue_jobs.items()
         },
-        'lambda': {alias: {'name': substitute_env(fn.name)} for alias, fn in pipeline.lambdas.items()},
+        'lambda': {alias: {'name': substitute_env(fn.name), 'durable': fn.durable} for alias, fn in pipeline.lambdas.items()},
         'sfn': {
             alias: {'name': substitute_env(sfn.name), 'log_group': substitute_env(sfn.log_group)}
             for alias, sfn in pipeline.step_functions.items()
@@ -57,7 +57,9 @@ def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
         for script in job.scripts:
             info(f'      {script}')
     for alias, fn in pipeline.lambdas.items():
-        info(f'  lambda/{alias}: {substitute_env(fn.name)}')
+        # Worth calling out inline: a durable function carries a different set of verbs.
+        marker = ' (durable)' if fn.durable else ''
+        info(f'  lambda/{alias}: {substitute_env(fn.name)}{marker}')
     for alias, sfn in pipeline.step_functions.items():
         info(f'  sfn/{alias}: {substitute_env(sfn.name)}')
     for alias, bucket in pipeline.buckets.items():
