@@ -1,4 +1,3 @@
-import time
 from typing import Annotated
 
 import boto3
@@ -16,6 +15,9 @@ from dectl.output import info
 from dectl.output import success
 
 RUN_STATE_COLORS = {'SUCCEEDED': 'green', 'FAILED': 'red', 'STOPPED': 'red', 'TIMEOUT': 'red', 'RUNNING': 'cyan'}
+
+TERMINAL_RUN_STATES = frozenset({'SUCCEEDED', 'FAILED', 'STOPPED', 'TIMEOUT', 'ERROR'})
+FAILED_RUN_STATES = TERMINAL_RUN_STATES - {'SUCCEEDED'}
 
 # Read-only outputs of GetJob that UpdateJob rejects. AllocatedCapacity is a deprecated
 # server-derived mirror of MaxCapacity that conflicts with WorkerType if echoed back.
@@ -154,27 +156,49 @@ def update_glue_job(session: boto3.Session, glue_job: GlueJobConfig, assume_yes:
     success(f'updated job {glue_job.name}')
 
 
+class GlueRunWatcher:
+    """Polls one run's state so a tail knows when to stop, and remembers the state it stopped on.
+
+    The tailer cannot ask Glue anything itself — it only holds a logs client — so it takes this
+    as a predicate. Keeping the last observed state here is what lets the caller exit non-zero on
+    a failed run without a second get_job_run after the fact."""
+
+    def __init__(self, glue_client, job_name: str, run_id: str) -> None:
+        self.glue_client = glue_client
+        self.job_name = job_name
+        self.run_id = run_id
+        self.state = ''
+
+    def finished(self) -> bool:
+        self.state = self.glue_client.get_job_run(JobName=self.job_name, RunId=self.run_id)['JobRun']['JobRunState']
+        return self.state in TERMINAL_RUN_STATES
+
+
+def follow_glue_run(session: boto3.Session, glue_job: GlueJobConfig, run_id: str) -> None:
+    """Tail a run to completion and exit non-zero if it did not succeed.
+
+    Tailing starts immediately rather than waiting for the run to reach RUNNING: the log groups
+    are polled by run-id prefix, so an unstarted run simply returns nothing until it has written
+    something, and the first line lands the moment it exists instead of one status poll later."""
+    watcher = GlueRunWatcher(session.client('glue'), glue_job.name, run_id)
+    tail_glue_run(session.client('logs'), run_id, follow=True, run_finished=watcher.finished)
+
+    if watcher.state in FAILED_RUN_STATES:
+        error(f'run {run_id} finished {watcher.state}')
+        raise typer.Exit(1)
+    success(f'run {run_id} {watcher.state}')
+
+
 def start_glue_run(session: boto3.Session, glue_job: GlueJobConfig, follow: bool) -> None:
-    """Start a Glue job run. With follow, wait for it to reach RUNNING then tail its logs;
+    """Start a Glue job run. With follow, tail its logs until the run reaches a terminal state;
     otherwise just print the run id and return (the default — streaming is an explicit opt-in)."""
     glue = session.client('glue')
     resp = glue.start_job_run(JobName=glue_job.name)
     run_id = resp['JobRunId']
     info(f'started job run: {run_id}')
 
-    if not follow:
-        return
-
-    info('waiting for job to start...')
-    while True:
-        run = glue.get_job_run(JobName=glue_job.name, RunId=run_id)
-        status = run['JobRun']['JobRunState']
-        info(f'status: {status}')
-        if status in ('RUNNING', 'SUCCEEDED', 'FAILED', 'STOPPED'):
-            break
-        time.sleep(5)
-
-    tail_glue_run(session.client('logs'), run_id, follow=True)
+    if follow:
+        follow_glue_run(session, glue_job, run_id)
 
 
 def job_run_to_row(run: dict) -> list[str]:
@@ -267,7 +291,10 @@ def make_glue_job_app(pipeline_name: str, alias: str, job_config: GlueJobConfig,
             run_id = recent[0]['Id']
             info(f'using most recent run: {run_id}')
 
-        tail_glue_run(session.client('logs'), run_id, follow=follow)
+        if follow:
+            follow_glue_run(session, job, run_id)
+        else:
+            tail_glue_run(session.client('logs'), run_id, follow=False)
 
     @job_app.command(epilog=f'Example:\n\ndectl {pipeline_name} glue {alias} runs --limit 5')
     def runs(

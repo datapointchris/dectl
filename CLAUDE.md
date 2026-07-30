@@ -129,7 +129,7 @@ and an eval'd `s3 export` stay clean.
 | `output.py` | The `rich` console and the `error`/`success`/`info` helpers, plus `emit_json` (bare-print JSON for `--json`). Use these, not bare `print`, for anything human-facing. |
 | `pipeline_view.py` | Shared pipeline rendering — `render_pipeline` (human) and `pipeline_to_dict` (the stable `--json` shape). Used by both `main.py` (`list`) and `config_cmd.py` (`show`); lives outside both to avoid the `main` ↔ `config_cmd` import cycle. |
 | `payloads.py` | `read_payload` — resolves a `--payload-file` path or `-` (stdin) to a JSON string for `lambda`/`sfn` `run`. |
-| `logs.py` | CloudWatch log tailing (Glue, Lambda, and the multi-group `monitor` stream) plus Step Functions execution-history rendering, including structured-JSON pretty-printing. |
+| `logs.py` | CloudWatch log tailing (Glue, Lambda, and the multi-group `monitor` stream) plus Step Functions execution-history rendering, including structured-JSON pretty-printing. `LogGroupCursor` is the shared primitive all three tailers poll through. |
 
 ## Gotchas
 
@@ -165,10 +165,19 @@ and an eval'd `s3 export` stay clean.
   machine's CloudWatch **log group**, because it needs one uniform source it can merge with the
   Lambda groups — which is why a monitored state machine must have `log_group` set (Express
   workflows only log to CloudWatch and have no history API at all).
-- **Log tailing follows by time, not by stream** — Lambda writes each execution environment to a
-  new stream, so `tail_lambda_logs` and `tail_log_groups` poll the whole log group with a moving
-  `startTime` and dedup boundary events by `eventId`, rather than pinning to one stream. Glue is
-  the exception: `tail_glue_run` pins to the run's streams because they are created up front.
+- **Log tailing follows by time, not by stream** — every tailer polls whole log groups through
+  `LogGroupCursor` (moving `startTime`, boundary dedup by `eventId`), never a named stream.
+  Lambda writes each execution environment to a new stream; Glue creates its *error* stream only
+  when something first writes to stderr. `tail_glue_run` isolates a run with
+  `logStreamNamePrefix=<run id>` on the two shared Glue groups. It used to wait for the streams
+  to exist via `describe_log_streams` — sequentially, output then error — which cost up to two
+  minutes of silence before the first line whenever a job never wrote to stderr, and pinned the
+  stream list so a traceback landing in a later-created error stream was never shown at all.
+- **`glue run --follow` stops on its own and exits non-zero on failure** — `GlueRunWatcher.finished`
+  is handed to the tailer as a predicate (it only holds a logs client and cannot ask Glue
+  anything), and the watcher keeps the last state so the caller can set the exit code without a
+  second `get_job_run`. A few drain passes run past the terminal state, because CloudWatch
+  ingestion lags the run's end and the tail would otherwise cut off mid-traceback.
 
 ## Tests
 

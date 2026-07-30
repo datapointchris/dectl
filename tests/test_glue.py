@@ -2,7 +2,9 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from dectl.commands.glue import GlueRunWatcher
 from dectl.commands.glue import build_job_update
+from dectl.commands.glue import follow_glue_run
 from dectl.commands.glue import job_definition_changes
 from dectl.commands.glue import make_glue_app
 from dectl.commands.glue import update_glue_job
@@ -215,3 +217,62 @@ def test_update_merges_default_arguments_onto_existing():
     assert args['--enable-glue-datacatalog'] == 'true'  # preserved from existing
     assert args['--JOB_NAME'] == 'my-job'  # always set by dectl
     assert args['--extra-flag'] == 'on'  # added from config, -- prefix applied
+
+
+class FakeRunGlueClient:
+    """Glue stand-in that walks a run through a scripted sequence of states."""
+
+    def __init__(self, states: list[str]) -> None:
+        self.states = states
+        self.get_run_calls = 0
+
+    def start_job_run(self, JobName):
+        return {'JobRunId': 'jr_test'}
+
+    def get_job_run(self, JobName, RunId):
+        self.get_run_calls += 1
+        state = self.states[min(self.get_run_calls - 1, len(self.states) - 1)]
+        return {'JobRun': {'JobRunState': state}}
+
+
+class FakeRunSession:
+    def __init__(self, glue_client) -> None:
+        self.glue_client = glue_client
+
+    def client(self, name):
+        if name == 'glue':
+            return self.glue_client
+        return FakeEmptyLogsClient()
+
+
+class FakeEmptyLogsClient:
+    def filter_log_events(self, **kwargs):
+        return {'events': []}
+
+
+def test_watcher_reports_a_run_as_finished_only_in_a_terminal_state():
+    glue = FakeRunGlueClient(['RUNNING', 'SUCCEEDED'])
+    watcher = GlueRunWatcher(glue, 'my-job', 'jr_test')
+
+    assert watcher.finished() is False
+    assert watcher.finished() is True
+    assert watcher.state == 'SUCCEEDED'
+
+
+def test_following_a_failed_run_exits_non_zero(monkeypatch):
+    # A followed run that fails must be distinguishable from one that succeeded without reading
+    # the log text, so `dectl ... run --follow && next-step` behaves.
+    monkeypatch.setattr('dectl.logs.time.sleep', lambda _seconds: None)
+    session = FakeRunSession(FakeRunGlueClient(['FAILED']))
+
+    with pytest.raises(typer.Exit) as exit_info:
+        follow_glue_run(session, make_job(), 'jr_test')
+
+    assert exit_info.value.exit_code == 1
+
+
+def test_following_a_successful_run_returns_cleanly(monkeypatch):
+    monkeypatch.setattr('dectl.logs.time.sleep', lambda _seconds: None)
+    session = FakeRunSession(FakeRunGlueClient(['SUCCEEDED']))
+
+    follow_glue_run(session, make_job(), 'jr_test')

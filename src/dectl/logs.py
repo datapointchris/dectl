@@ -1,7 +1,9 @@
 import json
+import operator
 import re
 import time
 
+from botocore.exceptions import ClientError
 from rich.markup import escape
 from rich.padding import Padding
 from rich.syntax import Syntax
@@ -11,6 +13,13 @@ from dectl.output import info
 
 GLUE_OUTPUT_LOG_GROUP = '/aws-glue/python-jobs/output'
 GLUE_ERROR_LOG_GROUP = '/aws-glue/python-jobs/error'
+
+POLL_SECONDS = 2
+
+# CloudWatch ingestion lags the process that wrote the line, so a run's last few events land
+# after the API already reports it finished. Keep polling for a few intervals past the terminal
+# state rather than cutting the tail off mid-traceback.
+DRAIN_PASSES = 3
 
 TIMESTAMP_KEYS = ('timestamp', 'asctime', 'time')
 LEVEL_KEYS = ('level', 'levelname', 'severity')
@@ -173,19 +182,63 @@ def tail_execution_history(sfn_client, execution_arn: str, follow: bool = True) 
         time.sleep(2)
 
 
-def wait_for_log_stream(logs_client, log_group: str, stream_prefix: str, timeout: int = 120) -> str | None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        resp = logs_client.describe_log_streams(
-            logGroupName=log_group,
-            logStreamNamePrefix=stream_prefix,
-            limit=1,
-        )
-        streams = resp.get('logStreams', [])
-        if streams:
-            return streams[0]['logStreamName']
-        time.sleep(5)
-    return None
+class LogGroupCursor:
+    """A resumable position in one CloudWatch log group, polled with filter_log_events.
+
+    filter_log_events spans every stream in the group, which is what makes it the right primitive
+    for all three tailers here: Lambda spreads invocations across per-environment streams, Glue
+    creates its error stream only when something first writes to stderr, and monitor merges whole
+    groups. Following streams individually means missing every stream created after the tail
+    started.
+
+    startTime is inclusive, so the newest events come back again on the next poll. Advancing past
+    them would drop any sibling sharing that millisecond, so the boundary is instead deduped by
+    eventId."""
+
+    def __init__(self, log_group: str, start_time: int | None = None, **filters) -> None:
+        self.log_group = log_group
+        self.start_time = start_time
+        self.filters = {key: value for key, value in filters.items() if value}
+        self.seen_at_boundary: set[str] = set()
+        # A group nothing has ever written to does not exist; that is an ordinary state for a
+        # Glue error group, not an error, so it is reported once and then polled on in case it
+        # is created mid-run.
+        self.missing = False
+
+    def poll(self, logs_client) -> list[dict]:
+        fetched: list[dict] = []
+        next_token = None
+        while True:
+            kwargs: dict = {'logGroupName': self.log_group} | self.filters
+            if self.start_time is not None:
+                kwargs['startTime'] = self.start_time
+            if next_token:
+                kwargs['nextToken'] = next_token
+            try:
+                page = logs_client.filter_log_events(**kwargs)
+            except ClientError as exc:
+                if exc.response.get('Error', {}).get('Code') != 'ResourceNotFoundException':
+                    raise
+                self.missing = True
+                return []
+            fetched.extend(page.get('events', []))
+            next_token = page.get('nextToken')
+            if not next_token:
+                break
+
+        self.missing = False
+        new_events = [event for event in fetched if event['eventId'] not in self.seen_at_boundary]
+        if new_events:
+            newest = max(event['timestamp'] for event in new_events)
+            self.start_time = newest
+            self.seen_at_boundary = {event['eventId'] for event in fetched if event['timestamp'] == newest}
+        return new_events
+
+
+def render_merged(batch: list[tuple[int, str, str]]) -> None:
+    """Render events pooled from several cursors in timestamp order, each with its source prefix."""
+    for _, prefix, message in sorted(batch, key=operator.itemgetter(0)):
+        render_event(message, prefix=prefix)
 
 
 def tail_log_groups(logs_client, sources: list[tuple[str, str]], follow: bool = True) -> None:
@@ -193,93 +246,78 @@ def tail_log_groups(logs_client, sources: list[tuple[str, str]], follow: bool = 
 
     sources is a list of (prefix, log_group). Each poll fetches new events from every group,
     merges them, and renders in timestamp order so the cross-source causal sequence (lambda A
-    fires -> state machine transitions -> lambda B fires) reads top to bottom. Uses the same
-    moving-startTime + boundary dedup as the single-group Lambda tailer, per group."""
+    fires -> state machine transitions -> lambda B fires) reads top to bottom."""
     now = int(time.time() * 1000)
-    prefixes = {group: prefix for prefix, group in sources}
-    start_times = {group: now for group in prefixes}
-    seen_at_boundary: dict[str, set] = {group: set() for group in prefixes}
+    cursors = [(prefix, LogGroupCursor(group, start_time=now)) for prefix, group in sources]
 
     while True:
         batch = []
-        for group in prefixes:
-            fetched = []
-            next_token = None
-            while True:
-                kwargs: dict = {'logGroupName': group, 'startTime': start_times[group]}
-                if next_token:
-                    kwargs['nextToken'] = next_token
-                page = logs_client.filter_log_events(**kwargs)
-                fetched.extend(page.get('events', []))
-                next_token = page.get('nextToken')
-                if not next_token:
-                    break
-
-            new_events = [event for event in fetched if event['eventId'] not in seen_at_boundary[group]]
-            for event in new_events:
-                batch.append((event['timestamp'], prefixes[group], event['message']))
-
-            if new_events:
-                max_timestamp = max(event['timestamp'] for event in new_events)
-                start_times[group] = max_timestamp
-                seen_at_boundary[group] = {event['eventId'] for event in fetched if event['timestamp'] == max_timestamp}
-
-        for event in sorted(batch):
-            render_event(event[2], prefix=event[1])
+        for prefix, cursor in cursors:
+            for event in cursor.poll(logs_client):
+                batch.append((event['timestamp'], prefix, event['message']))
+        render_merged(batch)
 
         if not follow:
             break
         if not batch:
-            time.sleep(2)
+            time.sleep(POLL_SECONDS)
 
 
-def tail_glue_run(logs_client, run_id: str, follow: bool = True) -> None:
-    info(f'waiting for log streams for run {run_id}...')
+def tail_glue_run(logs_client, run_id: str, follow: bool = True, run_finished=None) -> None:
+    """Tail a Glue run's output and error logs, printing each event as soon as it is readable.
 
-    output_stream = wait_for_log_stream(logs_client, GLUE_OUTPUT_LOG_GROUP, run_id)
-    error_stream = wait_for_log_stream(logs_client, GLUE_ERROR_LOG_GROUP, run_id)
+    Both Glue log groups are shared by every job in the account, so a run is isolated by filtering
+    on its stream-name prefix (the run id) rather than by naming a stream. That is what keeps the
+    first line prompt: the previous approach called describe_log_streams in a 5-second poll for
+    the output stream and then, sequentially, for the error stream — and a job that never writes
+    to stderr has no error stream to find, so it burned the full 120-second timeout in silence
+    before printing anything. Prefix filtering asks for the run's events directly, so a group with
+    nothing in it yet costs one empty response instead of blocking the other group.
 
-    if not output_stream and not error_stream:
-        console.print('[yellow]no log streams found[/yellow]')
-        return
+    It also fixes what that pinning hid: the stream list was fixed at start-up, so a traceback
+    landing in an error stream created later in the run was never displayed at all.
 
-    streams = []
-    if output_stream:
-        info(f'tailing {GLUE_OUTPUT_LOG_GROUP}/{output_stream}')
-        streams.append((GLUE_OUTPUT_LOG_GROUP, output_stream))
-    if error_stream:
-        info(f'tailing {GLUE_ERROR_LOG_GROUP}/{error_stream}')
-        streams.append((GLUE_ERROR_LOG_GROUP, error_stream))
+    run_finished is an optional predicate polled alongside the logs; when it reports the run over,
+    a few more passes drain whatever CloudWatch was still ingesting and the tail returns."""
+    info(f'tailing logs for run {run_id}')
+    cursors = [
+        (stream_prefix(group), LogGroupCursor(group, logStreamNamePrefix=run_id)) for group in (GLUE_OUTPUT_LOG_GROUP, GLUE_ERROR_LOG_GROUP)
+    ]
 
-    tokens = {s: None for s in streams}
-
+    printed_anything = False
+    drained_passes = 0
     while True:
-        got_events = False
-        for log_group, stream_name in streams:
-            kwargs: dict = {
-                'logGroupName': log_group,
-                'logStreamName': stream_name,
-                'startFromHead': True,
-            }
-            token = tokens[(log_group, stream_name)]
-            if token:
-                kwargs['nextToken'] = token
-                kwargs.pop('startFromHead', None)
+        batch = []
+        for prefix, cursor in cursors:
+            for event in cursor.poll(logs_client):
+                batch.append((event['timestamp'], prefix, event['message']))
+        render_merged(batch)
+        printed_anything = printed_anything or bool(batch)
 
-            resp = logs_client.get_log_events(**kwargs)
-            for event in resp.get('events', []):
-                render_event(event['message'], prefix=stream_prefix(log_group))
-                got_events = True
-
-            tokens[(log_group, stream_name)] = resp.get('nextForwardToken')
-
-        if not got_events:
-            if not follow:
+        if not follow:
+            break
+        if run_finished is not None and run_finished():
+            drained_passes += 1
+            if drained_passes >= DRAIN_PASSES:
                 break
-            time.sleep(2)
+        time.sleep(POLL_SECONDS)
+
+    if not printed_anything:
+        console.print('[yellow]no log events for this run[/yellow]')
 
 
-def tail_lambda_logs(logs_client, function_name: str, follow: bool = True) -> None:
+def tail_lambda_logs(
+    logs_client,
+    function_name: str,
+    follow: bool = True,
+    filter_pattern: str = '',
+    start_time: int | None = None,
+    end_time: int | None = None,
+) -> None:
+    """Tail a Lambda function's log group.
+
+    filter_pattern / start_time / end_time narrow the tail to one durable execution's records;
+    left at their defaults the whole group is followed from the current invocation onwards."""
     log_group = f'/aws/lambda/{function_name}'
     info(f'tailing {log_group}')
 
@@ -287,44 +325,27 @@ def tail_lambda_logs(logs_client, function_name: str, follow: bool = True) -> No
     # cold-starts (after the previous warm environment is reaped, ~5-15 min idle) lands in a
     # brand-new stream. Following a single stream would silently miss those later runs, so poll
     # the whole log group by time with filter_log_events, which spans every stream.
-    stream_resp = logs_client.describe_log_streams(
-        logGroupName=log_group,
-        orderBy='LastEventTime',
-        descending=True,
-        limit=1,
-    )
-    streams = stream_resp.get('logStreams', [])
-    # Seed from the newest stream's first event so existing output for the current run shows
-    # before we start following; fall back to now when the function has never run.
-    start_time = streams[0].get('firstEventTimestamp') if streams else None
     if start_time is None:
-        start_time = int(time.time() * 1000)
+        stream_resp = logs_client.describe_log_streams(
+            logGroupName=log_group,
+            orderBy='LastEventTime',
+            descending=True,
+            limit=1,
+        )
+        streams = stream_resp.get('logStreams', [])
+        # Seed from the newest stream's first event so existing output for the current run shows
+        # before we start following; fall back to now when the function has never run.
+        start_time = streams[0].get('firstEventTimestamp') if streams else None
+        if start_time is None:
+            start_time = int(time.time() * 1000)
 
-    # eventIds already rendered at exactly start_time. filter_log_events treats startTime as
-    # inclusive, so those events come back on the next poll and must be skipped to avoid dupes.
-    seen_at_boundary: set[str] = set()
+    cursor = LogGroupCursor(log_group, start_time=start_time, filterPattern=filter_pattern, endTime=end_time)
     while True:
-        fetched = []
-        next_token = None
-        while True:
-            kwargs: dict = {'logGroupName': log_group, 'startTime': start_time}
-            if next_token:
-                kwargs['nextToken'] = next_token
-            page = logs_client.filter_log_events(**kwargs)
-            fetched.extend(page.get('events', []))
-            next_token = page.get('nextToken')
-            if not next_token:
-                break
-
-        new_events = [event for event in fetched if event['eventId'] not in seen_at_boundary]
+        new_events = cursor.poll(logs_client)
         for event in new_events:
             render_event(event['message'])
 
-        if new_events:
-            max_timestamp = max(event['timestamp'] for event in new_events)
-            start_time = max_timestamp
-            seen_at_boundary = {event['eventId'] for event in fetched if event['timestamp'] == max_timestamp}
-        else:
+        if not new_events:
             if not follow:
                 break
-            time.sleep(2)
+            time.sleep(POLL_SECONDS)

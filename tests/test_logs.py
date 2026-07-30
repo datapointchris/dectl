@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 
 import pytest
+from botocore.exceptions import ClientError
 
 from dectl.logs import GLUE_ERROR_LOG_GROUP
 from dectl.logs import GLUE_OUTPUT_LOG_GROUP
@@ -9,6 +10,7 @@ from dectl.logs import render_event
 from dectl.logs import render_history_event
 from dectl.logs import stream_prefix
 from dectl.logs import tail_execution_history
+from dectl.logs import tail_glue_run
 from dectl.logs import tail_lambda_logs
 from dectl.logs import tail_log_groups
 from dectl.output import console
@@ -27,8 +29,10 @@ class FakeLogsClient:
         self.streams = streams
         self.filter_pages = filter_pages
         self.filter_calls: list[dict] = []
+        self.describe_calls: list[dict] = []
 
     def describe_log_streams(self, **kwargs) -> dict:
+        self.describe_calls.append(kwargs)
         return {'logStreams': self.streams}
 
     def filter_log_events(self, **kwargs) -> dict:
@@ -36,6 +40,22 @@ class FakeLogsClient:
         if self.filter_pages:
             return self.filter_pages.pop(0)
         return {'events': []}
+
+
+class FakeGroupedLogsClient:
+    """CloudWatch Logs stand-in that answers per log group, and can report one as missing."""
+
+    def __init__(self, events_by_group: dict[str, list[dict]], missing_groups: tuple[str, ...] = ()) -> None:
+        self.events_by_group = events_by_group
+        self.missing_groups = missing_groups
+        self.filter_calls: list[dict] = []
+
+    def filter_log_events(self, **kwargs) -> dict:
+        self.filter_calls.append(kwargs)
+        group = kwargs['logGroupName']
+        if group in self.missing_groups:
+            raise ClientError({'Error': {'Code': 'ResourceNotFoundException', 'Message': 'no such group'}}, 'FilterLogEvents')
+        return {'events': self.events_by_group.pop(group, [])}
 
 
 class FakeSfnClient:
@@ -212,6 +232,95 @@ def test_tail_execution_history_stops_at_terminal_event():
     assert 'ExecutionSucceeded' in output
     # Terminal event reached on the first fetch, so it must not poll again.
     assert len(client.history_calls) == 1
+
+
+def glue_event(event_id: str, timestamp: int, message: str) -> dict:
+    return {'eventId': event_id, 'timestamp': timestamp, 'message': message}
+
+
+def test_glue_tail_filters_both_groups_by_run_id_without_waiting_for_streams():
+    # The regression: tailing used to poll describe_log_streams for the output stream and then,
+    # sequentially, for the error stream — up to two minutes of silence before the first line for
+    # a job that never writes to stderr. Nothing may block on a stream existing.
+    client = FakeGroupedLogsClient({GLUE_OUTPUT_LOG_GROUP: [glue_event('a', 1000, 'first line')]})
+
+    with console.capture() as capture:
+        tail_glue_run(client, 'jr_abc123', follow=False)
+    output = capture.get()
+
+    assert 'first line' in output
+    assert not hasattr(client, 'describe_calls')
+    groups = {call['logGroupName'] for call in client.filter_calls}
+    assert groups == {GLUE_OUTPUT_LOG_GROUP, GLUE_ERROR_LOG_GROUP}
+    assert all(call['logStreamNamePrefix'] == 'jr_abc123' for call in client.filter_calls)
+
+
+def test_glue_tail_prints_output_when_the_error_group_does_not_exist():
+    # A Glue error group with nothing ever written to it is 404, not a failure — the run's stdout
+    # must still stream.
+    client = FakeGroupedLogsClient(
+        {GLUE_OUTPUT_LOG_GROUP: [glue_event('a', 1000, 'still working')]},
+        missing_groups=(GLUE_ERROR_LOG_GROUP,),
+    )
+
+    with console.capture() as capture:
+        tail_glue_run(client, 'jr_abc123', follow=False)
+
+    assert 'still working' in capture.get()
+
+
+def test_glue_tail_merges_the_two_groups_in_timestamp_order():
+    client = FakeGroupedLogsClient(
+        {
+            GLUE_OUTPUT_LOG_GROUP: [glue_event('a', 2000, 'after-the-error')],
+            GLUE_ERROR_LOG_GROUP: [glue_event('b', 1000, 'the-traceback')],
+        }
+    )
+
+    with console.capture() as capture:
+        tail_glue_run(client, 'jr_abc123', follow=False)
+    output = capture.get()
+
+    assert output.index('the-traceback') < output.index('after-the-error')
+    assert 'err the-traceback' in output
+
+
+def test_glue_tail_stops_once_the_run_reaches_a_terminal_state(monkeypatch):
+    # Following used to loop forever, so `run --follow` never returned on its own.
+    monkeypatch.setattr('dectl.logs.time.sleep', lambda _seconds: None)
+    client = FakeGroupedLogsClient({GLUE_OUTPUT_LOG_GROUP: [glue_event('a', 1000, 'done')]})
+
+    with console.capture():
+        tail_glue_run(client, 'jr_abc123', follow=True, run_finished=lambda: True)
+
+    # Two groups per pass, drained for a fixed number of passes rather than indefinitely.
+    assert len(client.filter_calls) == 2 * 3
+
+
+def test_glue_tail_reports_a_run_with_no_events():
+    client = FakeGroupedLogsClient({})
+
+    with console.capture() as capture:
+        tail_glue_run(client, 'jr_abc123', follow=False)
+
+    assert 'no log events' in capture.get()
+
+
+def test_lambda_tail_scopes_to_one_durable_execution():
+    # The durable case: same log group, narrowed to the records the SDK logger stamped with this
+    # execution's ARN and to the window the execution ran in.
+    client = FakeLogsClient(streams=[], filter_pages=[{'events': [{'eventId': 'a', 'timestamp': 5, 'message': 'step ran'}]}])
+
+    with console.capture() as capture:
+        tail_lambda_logs(client, 'my-fn', follow=False, filter_pattern='"arn:exec"', start_time=100, end_time=900)
+    output = capture.get()
+
+    assert 'step ran' in output
+    assert client.filter_calls[0]['filterPattern'] == '"arn:exec"'
+    assert client.filter_calls[0]['startTime'] == 100
+    assert client.filter_calls[0]['endTime'] == 900
+    # An explicit window means no need to guess a start from the newest stream.
+    assert client.describe_calls == []
 
 
 def test_tail_log_groups_interleaves_sources_by_timestamp():
