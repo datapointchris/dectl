@@ -1,6 +1,31 @@
 # CHANGELOG
 
 
+## v2.1.1 (2026-07-30)
+
+### Bug Fixes
+
+- Resolve the alias to a version before listing executions
+  ([`049b837`](https://github.com/datapointchris/dectl/commit/049b8376e37b9811f0ed2c7b1ddb78a2ecb85b09))
+
+Listing durable executions with the live alias as the qualifier fails with "cannot filter durable
+  executions by alias". Lambda resolves an alias to a version number when an execution starts, so
+  the alias name never appears in a durable execution ARN and there is nothing for the list API to
+  match. The API reference says Qualifier takes "the function version or alias"; for
+  ListDurableExecutionsByFunction that is wrong.
+
+Invoking and listing therefore need different qualifiers, so qualifier_for splits: invoke_qualifier
+  still sends the alias, which is correct and what triggers do, while listing_qualifier resolves it
+  through GetAlias.
+
+Resolving pins the listing to whichever version the alias points at now, so deploy --publish would
+  silently drop every run from before it. The resolved version is shown alongside the alias, each
+  execution's version is a column, and --all-versions merges recent published versions newest-first,
+  naming the ones it scanned. Name lookups for history and logs fall back to that sweep
+  automatically, since which version ran a given execution is not something you can be expected to
+  know.
+
+
 ## v2.1.0 (2026-07-30)
 
 ### Bug Fixes
