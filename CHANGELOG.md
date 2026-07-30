@@ -1,6 +1,37 @@
 # CHANGELOG
 
 
+## v2.0.0 (2026-07-30)
+
+### Features
+
+- Diff and confirm glue job definition changes
+  ([`b2b2129`](https://github.com/datapointchris/dectl/commit/b2b2129d29cd92e0c9090d6f27a6f98b266c3079))
+
+dectl and Terraform both write the Glue job definition. Terraform owns it once a pipeline is
+  established, but dectl keeps write access because that is the point before Terraform exists: set
+  arguments and deploy from the shell instead of commit -> Jenkins -> console. Nothing marked the
+  seam, so every deploy silently reasserted a config Terraform may have moved past.
+
+deploy now diffs its computed update against the live definition, skips UpdateJob entirely when
+  nothing differs, and otherwise renders a field-level table and confirms. --plan shows it and
+  exits; --yes skips the prompt for the pre-Terraform loop. Removals are reported too, since a
+  detached connection is invisible in a diff that only walks the new definition.
+
+BREAKING CHANGE: connections is authoritative rather than additive. The union could only add, so a
+  stale entry silently reattached a Terraform-renamed connection on every deploy and could not be
+  removed from config. Absent means unmanaged, [] detaches all.
+
+Also adds max_capacity, rejected on worker-based Spark jobs since UpdateJob will not accept it
+  alongside WorkerType.
+
+### Breaking Changes
+
+- Connections is authoritative rather than additive. The union could only add, so a stale entry
+  silently reattached a Terraform-renamed connection on every deploy and could not be removed from
+  config. Absent means unmanaged, [] detaches all.
+
+
 ## v1.1.1 (2026-07-30)
 
 ### Bug Fixes
