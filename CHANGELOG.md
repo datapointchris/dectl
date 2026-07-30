@@ -1,6 +1,55 @@
 # CHANGELOG
 
 
+## v2.1.0 (2026-07-30)
+
+### Bug Fixes
+
+- Stream Glue run logs the moment they exist
+  ([`a4af837`](https://github.com/datapointchris/dectl/commit/a4af837eaacc30f967f79210ac71ad70855d520b))
+
+Tailing a Glue run waited for its CloudWatch streams to be created before reading anything:
+  describe_log_streams on a 5-second poll for the output stream, then sequentially for the error
+  stream. A job that never writes to stderr has no error stream to find, so that second wait burned
+  its full 120-second timeout in silence while the output the console was already showing went
+  unprinted.
+
+Pinning the stream list at start-up also meant a traceback landing in an error stream created later
+  in the run was never displayed at all.
+
+Both groups are now filtered by stream-name prefix (the run id) instead, so an empty group costs one
+  empty response rather than blocking the other, and a stream appearing mid-run is picked up on the
+  next poll. All three tailers share one LogGroupCursor, which also gains the scoping and
+  time-bounding a per-execution tail needs.
+
+Following now ends when the run reaches a terminal state, draining a few passes past it since
+  CloudWatch ingestion lags the run's end, and exits non-zero when the run did not succeed.
+
+### Features
+
+- Add durable execution verbs for durable Lambda functions
+  ([`bf27d16`](https://github.com/datapointchris/dectl/commit/bf27d16d61037d88a313f5b54edef8564afa4fe5))
+
+A durable function's unit of work is the execution, not the invocation: one execution checkpoints
+  across many invocations and can suspend for up to a year between them. None of the
+  invocation-shaped views answer "did this run succeed" — Invocations counts replays, and a log
+  stream holds interleaved fragments of whichever executions that environment served.
+
+A lambda flagged durable: true in config therefore swaps run and logs for an execution-scoped set:
+
+executions which ones succeeded or failed, with elapsed time history [EXECUTION] its steps, waits,
+  retries and failures logs [EXECUTION] its own logger output, filtered by execution ARN
+
+history and logs are complements and mirror the two console tabs: history is the checkpoint log
+  Lambda replays from, logs is what the function printed while doing it. The SDK logger stamps the
+  execution ARN onto every record, which is what both the console and this filter on.
+
+run is now qualified with the live alias, falling back to $LATEST — Lambda rejects an unqualified
+  invoke of a durable function, since an execution is pinned to the version it starts on. It also
+  gains --async, lifting the 15-minute synchronous cap, and --name for an idempotent start that
+  doubles as the handle for history and logs.
+
+
 ## v2.0.0 (2026-07-30)
 
 ### Features
