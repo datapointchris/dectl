@@ -67,8 +67,15 @@ def test_stream_prefix_tags_error_group():
     assert stream_prefix(GLUE_ERROR_LOG_GROUP) == '[red]err[/red] '
 
 
-def test_stream_prefix_tags_output_group():
-    assert stream_prefix(GLUE_OUTPUT_LOG_GROUP) == '[cyan]out[/cyan] '
+def test_stream_prefix_leaves_output_group_untagged():
+    assert stream_prefix(GLUE_OUTPUT_LOG_GROUP) == ''
+
+
+def test_render_event_hangs_expanded_fields_under_a_prefixed_header():
+    message = json.dumps({'level': 'ERROR', 'message': 'boom', 'object_key': 'raw/x.parquet'})
+    header, field = capture_event(message, prefix=stream_prefix(GLUE_ERROR_LOG_GROUP)).splitlines()[:2]
+    assert header.startswith('err ')
+    assert field.startswith(' ' * len('err '))
 
 
 def test_render_event_passes_plain_text_through():

@@ -1,7 +1,9 @@
 import json
+import re
 import time
 
 from rich.markup import escape
+from rich.padding import Padding
 from rich.syntax import Syntax
 
 from dectl.output import console
@@ -16,6 +18,8 @@ MESSAGE_KEYS = ('message', 'msg', 'event')
 TRACEBACK_KEYS = ('exc_info', 'exception', 'stack_trace', 'stacktrace', 'traceback')
 HEADER_KEYS = frozenset(TIMESTAMP_KEYS + LEVEL_KEYS + MESSAGE_KEYS)
 
+MARKUP_TAG = re.compile(r'\[/?[^\[\]]+\]')
+
 LEVEL_COLORS = {
     'CRITICAL': 'red',
     'ERROR': 'red',
@@ -27,11 +31,19 @@ LEVEL_COLORS = {
 
 
 def stream_prefix(log_group: str) -> str:
-    """Tag each event with its source stream so a line duplicated across the
-    output and error groups (a propagating logger in the job) is obvious."""
+    """Tag only the error group. A well-configured job logs through one stdout
+    handler, so stderr is the exceptional case (tracebacks, the warnings module,
+    a library writing direct) and worth marking; labelling every ordinary line
+    would spend width on a constant. A line tagged err that also appears
+    untagged means the job has a duplicate handler."""
     if log_group == GLUE_ERROR_LOG_GROUP:
         return '[red]err[/red] '
-    return '[cyan]out[/cyan] '
+    return ''
+
+
+def visible_width(markup: str) -> int:
+    """Width of rich markup once the tags are stripped, for aligning continuation lines."""
+    return len(MARKUP_TAG.sub('', markup))
 
 
 def first_value(data: dict, keys: tuple[str, ...]) -> str:
@@ -71,13 +83,19 @@ def render_event(message: str, prefix: str = '') -> None:
         header_parts.append(escape(body))
     console.print(f'{prefix}{" ".join(header_parts)}' if header_parts else f'{prefix}{escape(text)}')
 
+    # Hang the expanded fields under the header rather than at column 0, so a prefixed
+    # record reads as one block instead of a labelled line followed by orphans.
+    indent_width = visible_width(prefix)
+    indent = ' ' * indent_width
+
     for key, value in data.items():
         if key in HEADER_KEYS:
             continue
         if key.lower() in TRACEBACK_KEYS and isinstance(value, str) and value.strip():
-            console.print(Syntax(value, 'pytb', theme='ansi_dark', word_wrap=True))
+            frames = Syntax(value, 'pytb', theme='ansi_dark', word_wrap=True)
+            console.print(Padding(frames, (0, 0, 0, indent_width)))
         else:
-            console.print(f'  [bold]{escape(key)}[/bold]: {escape(str(value))}')
+            console.print(f'{indent}  [bold]{escape(key)}[/bold]: {escape(str(value))}')
 
 
 # Execution-history event types that mean the state machine run is over, so tailing can stop.
