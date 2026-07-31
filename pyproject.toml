@@ -48,8 +48,17 @@ line-ending = "auto"
 docstring-code-format = true
 
 [tool.ruff.lint]
-select = ["E", "F", "UP", "B", "SIM", "I"]
-ignore = ["SIM108"]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "I",    # isort
+]
+ignore = [
+    "SIM108",  # ternary operator — often less readable
+]
 
 [tool.ruff.lint.isort]
 force-single-line = true
@@ -62,6 +71,10 @@ pretty = true
 ignore_missing_imports = true
 check_untyped_defs = false
 warn_return_any = false
+
+# `standard` replaces the per-rule opt-outs repos used to accumulate; basedpyright
+# defaults to `recommended`, which turns every one of them back on. Named
+# `pyright` so both basedpyright and Pylance read it.
 
 [tool.pytest.ini_options]
 addopts = "-vv"
@@ -92,3 +105,7 @@ build_command = """
     uv lock --upgrade-package dectl
     git add uv.lock
 """
+
+[tool.pyright]
+typeCheckingMode = "standard"
+analyzeUnannotatedFunctions = true  # or pylance stops analyzing in vscode
