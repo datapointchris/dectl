@@ -6,7 +6,7 @@
 ### Features
 
 - Update from GitHub releases instead of local source
-  ([`f3db914`](https://github.com/datapointchris/dectl/commit/f3db914ecd84f996af431ec0a40e5a1ddf0823e8))
+  ([`d5bc350`](https://github.com/datapointchris/dectl/commit/d5bc350ac694e51b455e2b29f550cb441b245a7f))
 
 dectl update reinstalled from a hardcoded ~/tools/dectl checkout, which was right while the tool
   only existed on the dev machine and wrong everywhere else: no source there means no update, and a
@@ -22,7 +22,7 @@ Adopt pyselfupdate like the rest of the fleet — update installs the latest Git
 ### Bug Fixes
 
 - Bound the Glue log scan to the run's own start time
-  ([`4b8aa9f`](https://github.com/datapointchris/dectl/commit/4b8aa9fbc41cd82c9d58af383f9691c022d570be))
+  ([`f9be5f4`](https://github.com/datapointchris/dectl/commit/f9be5f4969e8359dede30491141371f5e297be2e))
 
 Tailing a Glue run printed nothing for several minutes, then everything at once. Filtering the two
   shared groups by stream-name prefix isolates the run's streams but does not bound the scan:
@@ -41,7 +41,7 @@ Verified against a real Python Shell run: both groups readable in under a second
 ### Chores
 
 - **config**: Adopt the standard pyright section
-  ([`3f669e9`](https://github.com/datapointchris/dectl/commit/3f669e90a984609cb9354faa163666e997a9053f))
+  ([`ed08e2e`](https://github.com/datapointchris/dectl/commit/ed08e2e07cad3a9df9ec0a80232a3ba3fd9df693))
 
 Synced from forge pyproject template. With no [tool.pyright] section the editor LSP settings
   applied, and their ignore = ["*"] suppressed every diagnostic. A config file takes precedence over
@@ -54,7 +54,7 @@ Synced from forge pyproject template. With no [tool.pyright] section the editor 
 ### Bug Fixes
 
 - Resolve the alias to a version before listing executions
-  ([`049b837`](https://github.com/datapointchris/dectl/commit/049b8376e37b9811f0ed2c7b1ddb78a2ecb85b09))
+  ([`adf6df6`](https://github.com/datapointchris/dectl/commit/adf6df69ddf14a6d83b6735f17bc2ac232bc70f0))
 
 Listing durable executions with the live alias as the qualifier fails with "cannot filter durable
   executions by alias". Lambda resolves an alias to a version number when an execution starts, so
@@ -79,7 +79,7 @@ Resolving pins the listing to whichever version the alias points at now, so depl
 ### Bug Fixes
 
 - Stream Glue run logs the moment they exist
-  ([`a4af837`](https://github.com/datapointchris/dectl/commit/a4af837eaacc30f967f79210ac71ad70855d520b))
+  ([`32879dc`](https://github.com/datapointchris/dectl/commit/32879dca7e93b84bce84975cee2e67cd43cb63f6))
 
 Tailing a Glue run waited for its CloudWatch streams to be created before reading anything:
   describe_log_streams on a 5-second poll for the output stream, then sequentially for the error
@@ -101,7 +101,7 @@ Following now ends when the run reaches a terminal state, draining a few passes 
 ### Features
 
 - Add durable execution verbs for durable Lambda functions
-  ([`bf27d16`](https://github.com/datapointchris/dectl/commit/bf27d16d61037d88a313f5b54edef8564afa4fe5))
+  ([`c315d70`](https://github.com/datapointchris/dectl/commit/c315d702cef643b14736d9b15ca0af3412bcd533))
 
 A durable function's unit of work is the execution, not the invocation: one execution checkpoints
   across many invocations and can suspend for up to a year between them. None of the
@@ -128,7 +128,7 @@ run is now qualified with the live alias, falling back to $LATEST — Lambda rej
 ### Features
 
 - Diff and confirm glue job definition changes
-  ([`b2b2129`](https://github.com/datapointchris/dectl/commit/b2b2129d29cd92e0c9090d6f27a6f98b266c3079))
+  ([`140e61d`](https://github.com/datapointchris/dectl/commit/140e61d3640a6c8b079c57c047dbdeb5adf2b877))
 
 dectl and Terraform both write the Glue job definition. Terraform owns it once a pipeline is
   established, but dectl keeps write access because that is the point before Terraform exists: set
@@ -159,7 +159,7 @@ Also adds max_capacity, rejected on worker-based Spark jobs since UpdateJob will
 ### Bug Fixes
 
 - Label only the Glue error stream, align expansions
-  ([`c279f08`](https://github.com/datapointchris/dectl/commit/c279f086d7fe42712d78fc16121f1a44a32e52ee))
+  ([`f363d27`](https://github.com/datapointchris/dectl/commit/f363d27b5d9a5911cab7d3db4b6306d5fe59b25f))
 
 Every line carried out or err, but out is a constant on a well-configured job (one stdout handler)
   so it spent width carrying no information. Worse, render_event prefixed only the header line,
@@ -177,12 +177,12 @@ stdout is now bare and err marks the exceptional stream — a traceback, the war
 ### Chores
 
 - Add .planning to gitignore
-  ([`3000d25`](https://github.com/datapointchris/dectl/commit/3000d2505487dbaef674e7e08c1682b29320a0e9))
+  ([`193a7b3`](https://github.com/datapointchris/dectl/commit/193a7b31dfdd377e653157898d92f6231d304dbf))
 
 ### Continuous Integration
 
 - Add generated validate.yml and gate release on it
-  ([`2a01156`](https://github.com/datapointchris/dectl/commit/2a01156faa3654d69546c68482034c0282138abb))
+  ([`3f754c6`](https://github.com/datapointchris/dectl/commit/3f754c6ac3eff23dcd50b007bf4bd25f721128eb))
 
 Release triggered on push to main with no validation at all, so it published whatever was on main.
   Adds the forge-generated CI block (ruff check, ruff format, mypy, pytest) and makes release depend
@@ -191,7 +191,7 @@ Release triggered on push to main with no validation at all, so it published wha
 Verified locally before wiring the gate: all four checks pass.
 
 - Regenerate validate.yml at toolchain 6
-  ([`ceda126`](https://github.com/datapointchris/dectl/commit/ceda126e16966811f411ceb2705e4e43c911b82d))
+  ([`5e44601`](https://github.com/datapointchris/dectl/commit/5e44601f4aae8aa4a0c9566618327e71d16721f2))
 
 Stamp only — the python block is unchanged. Toolchain 6 adds the pinned release-binary mechanism and
   the shell CI block.
@@ -199,7 +199,7 @@ Stamp only — the python block is unchanged. Toolchain 6 adds the pinned releas
 ### Features
 
 - Warn when an explicit --env substitutes nothing
-  ([`f640444`](https://github.com/datapointchris/dectl/commit/f640444d33c4b82067a528b86f141d4257150c9d))
+  ([`ae15f5a`](https://github.com/datapointchris/dectl/commit/ae15f5ab8a41c0e7f8aa5b0897e9cfcafcc15a8d))
 
 Substitution is a literal {env} replacement, so a config that hardcodes its environment
   (salesdata-dev-ds-etl) ignores --env/DECTL_ENV entirely and acts on the wrong environment while
@@ -220,7 +220,7 @@ The warning goes to stderr via the new output.warn, so --json output piped to jq
 ### Chores
 
 - **pre-commit**: Restrict hooks to pre-commit stage
-  ([`1643fd3`](https://github.com/datapointchris/dectl/commit/1643fd33cda73e9b2889d63d030021786fb2fb90))
+  ([`65f76d7`](https://github.com/datapointchris/dectl/commit/65f76d79aadc0f000ee2d3c18c178ec867490424))
 
 Add default_stages: [pre-commit] so hooks without an explicit stages: run only at the pre-commit
   stage. Without it, unrestricted hooks (ruff, codespell, bandit, etc.) also ran at the
@@ -229,7 +229,7 @@ Add default_stages: [pre-commit] so hooks without an explicit stages: run only a
 ### Documentation
 
 - Fix install command and document release model
-  ([`b3efb92`](https://github.com/datapointchris/dectl/commit/b3efb9291bb5c4a1b8ba6689785a937e39371c99))
+  ([`545c31b`](https://github.com/datapointchris/dectl/commit/545c31b6c44f42dc2aba48408dec044c13cd1639))
 
 The documented 'uv tool install ...@latest' failed because releases are semver tags with no moving
   'latest' ref. Point install at the default branch (always the latest release under
@@ -238,7 +238,7 @@ The documented 'uv tool install ...@latest' failed because releases are semver t
 ### Features
 
 - Add --json to read commands and unify pipeline rendering
-  ([`129a009`](https://github.com/datapointchris/dectl/commit/129a00953709fd607a85a9d8ff639bedcf8c6c6b))
+  ([`c734463`](https://github.com/datapointchris/dectl/commit/c7344638d16cb0258884dc96f8d02805f5d4af9e))
 
 Add an emit_json output helper (bare print, no rich markup, so piped output stays clean for jq) and
   a stable JSON shape for pipeline listings. Wire --json onto 'dectl list', 'PIPELINE list', 'config
@@ -246,7 +246,7 @@ Add an emit_json output helper (bare print, no rich markup, so piped output stay
   a shared pipeline_view module (importable by both without the main<->config_cmd import cycle).
 
 - Verb-last CLI grammar and unified verbs
-  ([`2d0fde0`](https://github.com/datapointchris/dectl/commit/2d0fde091892e610a689febec2f74163c4b3204d))
+  ([`76436aa`](https://github.com/datapointchris/dectl/commit/76436aabf25a5be4da77556b2b3231b8d667b836))
 
 Restructure the command surface to PIPELINE RESOURCE ALIAS VERB, with the verb last so a deploy ->
   run -> logs loop on one resource changes only the trailing word. The alias becomes a
@@ -284,7 +284,7 @@ BREAKING CHANGE: command grammar is now PIPELINE RESOURCE ALIAS VERB (verb last)
 ### Bug Fixes
 
 - **s3**: Mount buckets under ~/buckets instead of cache dir
-  ([`531d6ae`](https://github.com/datapointchris/dectl/commit/531d6ae16e94036d2334c622b816a7593be3a245))
+  ([`467c3ab`](https://github.com/datapointchris/dectl/commit/467c3abc4af17b6e35ae5e6d838b50cdfe100797))
 
 The old ~/.cache/dectl/mounts/PIPELINE/SHORTNAME path was buried and impractical to cd into. Mount
   at ~/buckets/PIPELINE/SHORTNAME instead, keeping the pipeline segment so buckets sharing a
@@ -296,7 +296,7 @@ The old ~/.cache/dectl/mounts/PIPELINE/SHORTNAME path was buried and impractical
 ### Features
 
 - **config**: Add example, edit, validate, path
-  ([`12d3652`](https://github.com/datapointchris/dectl/commit/12d3652a02697b3a26d801287a55facec6ea2d2b))
+  ([`0d4af51`](https://github.com/datapointchris/dectl/commit/0d4af51835c4b0b3defa176a91859d08bee2f602))
 
 Add four config-management commands to the always-present config app:
 
@@ -323,7 +323,7 @@ Models now inherit StrictModel (extra='forbid'), so an unknown key is a loud val
 ### Bug Fixes
 
 - **lambda**: Follow all log streams when tailing
-  ([`9bc4549`](https://github.com/datapointchris/dectl/commit/9bc454937ddd3955eb4da618ef4f32b466081584))
+  ([`616256a`](https://github.com/datapointchris/dectl/commit/616256a10320a798a61f1b5b45350e60d79f4474))
 
 Lambda writes each execution environment to its own CloudWatch log stream, so an invocation that
   cold-starts after the warm environment is reaped (~5-15 min idle) lands in a new stream.
@@ -337,7 +337,7 @@ Follow the whole log group with filter_log_events instead, advancing a moving st
 ### Continuous Integration
 
 - Skip generated CHANGELOG in markdownlint
-  ([`92c7827`](https://github.com/datapointchris/dectl/commit/92c782705805f4575841ce4071b69a8b39ea3ae1))
+  ([`97353b3`](https://github.com/datapointchris/dectl/commit/97353b3be41f53e9744ce14d182e46b8161b18d6))
 
 CHANGELOG.md is generated by semantic-release, which owns its format: per-version duplicate section
   headings (MD024) and blank-line spacing (MD012). Style-linting it produced an unfixable failure
@@ -346,7 +346,7 @@ CHANGELOG.md is generated by semantic-release, which owns its format: per-versio
 ### Features
 
 - Add multi-environment {env} substitution
-  ([`8abf620`](https://github.com/datapointchris/dectl/commit/8abf620da24ec24913a7383b3f75b255f85a5df6))
+  ([`05e8ded`](https://github.com/datapointchris/dectl/commit/05e8ded35110098976bb2fe5ca5c708d24f21ba3))
 
 Resource names in config carry an {env} placeholder (e.g. salesdata-{env}-ds-thing) that is
   substituted at runtime, so one config drives dev/staging/prod by swapping a single token instead
@@ -363,7 +363,7 @@ Resource names in config carry an {env} placeholder (e.g. salesdata-{env}-ds-thi
   drop top-level no_args_is_help so the callback can print the banner before help
 
 - Add step functions and pipeline monitor
-  ([`a521be7`](https://github.com/datapointchris/dectl/commit/a521be7e578cf77f0070bcfee32a94e31cfbf4c9))
+  ([`89b6f2b`](https://github.com/datapointchris/dectl/commit/89b6f2b33b308e1a13cfe2b0565a794635b3745a))
 
 Step Functions resource (sfn), mirroring the glue/lambda factory pattern: - start (with --follow),
   watch, and list executions - watch tails the GetExecutionHistory API, rendering typed state
@@ -381,7 +381,7 @@ Pipeline-level monitor command: - tails several resources at once as one timesta
   it is missing
 
 - **s3**: Add bucket export and mount commands
-  ([`c44ce55`](https://github.com/datapointchris/dectl/commit/c44ce556096368c8923cf622e2fd2e35b9b3e287))
+  ([`155c829`](https://github.com/datapointchris/dectl/commit/155c8297124df337d1f069c006aebcb0ece5737b))
 
 Buckets become a shortname -> bucket-name mapping (matching the glue/lambda alias shape) instead of
   a fixed raw/curated/error schema, so a pipeline can declare any buckets it wants. Old configs
@@ -398,7 +398,7 @@ The new s3 resource exposes: - export: prints eval-able 'export pipeline_shortna
 ### Bug Fixes
 
 - **glue**: Preserve existing job definition on deploy
-  ([`92b9ea8`](https://github.com/datapointchris/dectl/commit/92b9ea8bc7d20818e31b5e5e0ad9f88401d6f752))
+  ([`aeb2d4e`](https://github.com/datapointchris/dectl/commit/aeb2d4eb548f0cceed5ede1fd291c74ac7f9cc1d))
 
 update_glue_job built a minimal JobUpdate from scratch, which broke deploys in three ways, since
   Glue's UpdateJob replaces the whole definition rather than patching it:
@@ -421,7 +421,7 @@ Add unit tests for the payload logic plus an opt-in live AWS round-trip test (--
   tears everything down.
 
 - **lambda**: Surface function errors from invoke
-  ([`f76540f`](https://github.com/datapointchris/dectl/commit/f76540fc32e146958df0f41362c205f35b4c2154))
+  ([`502e513`](https://github.com/datapointchris/dectl/commit/502e513c63d09b5ddd51df84510753d3625482cc))
 
 A handled or unhandled exception in a Lambda still returns HTTP 200 with an error payload;
   FunctionError is the only signal it failed. invoke printed that payload as though it were a
@@ -434,7 +434,7 @@ A handled or unhandled exception in a Lambda still returns HTTP 200 with an erro
 ### Features
 
 - **logs**: Pretty-print structured json log events
-  ([`1178791`](https://github.com/datapointchris/dectl/commit/1178791a297d5726228a688d2bed8e1d12b3c030))
+  ([`5bffee4`](https://github.com/datapointchris/dectl/commit/5bffee4063af9936d25cc4e3a1d684cc9d5d301c))
 
 Structured loggers (durable functions, python-json-logger) emit each event as one dense JSON line
   with any traceback collapsed into a single \n-escaped field, which is unreadable when tailed
@@ -445,7 +445,7 @@ Structured loggers (durable functions, python-json-logger) emit each event as on
   input. Wired into both the Glue and Lambda tail loops.
 
 - **logs**: Tag glue events with source stream
-  ([`b4f2212`](https://github.com/datapointchris/dectl/commit/b4f22122ab51d274651621122a4065a257cfc73b))
+  ([`e2a791e`](https://github.com/datapointchris/dectl/commit/e2a791e0def3a13578c40a9378b673a9c5f16eae))
 
 Both the output and error log groups are tailed, but only the error group was tagged, and its
   [ERROR] label conflated the error stream with error-level logs -- misleading on Glue where INFO
@@ -459,7 +459,7 @@ Both the output and error log groups are tailed, but only the error group was ta
 ### Documentation
 
 - Rewrite README around command grammar and dev loop
-  ([`3e464a0`](https://github.com/datapointchris/dectl/commit/3e464a0660544c5fadf9e25905e6438bd8dd8a00))
+  ([`8528fb9`](https://github.com/datapointchris/dectl/commit/8528fb9de3e3059f6d50c30e3bc7867fc6e68d20))
 
 Replace stale usage examples (that did not match the actual command tree) with the PIPELINE RESOURCE
   ACTION grammar, the lambda dev-loop vs --publish release distinction, and config guidance.
@@ -467,7 +467,7 @@ Replace stale usage examples (that did not match the actual command tree) with t
 ### Features
 
 - **cli**: Make help config-aware at every level
-  ([`7811ec5`](https://github.com/datapointchris/dectl/commit/7811ec562b1c418dd01823fc602008723f4104bc))
+  ([`26ee53a`](https://github.com/datapointchris/dectl/commit/26ee53a5f6472b39770e896f3dc1351867dcd330))
 
 The command tree is generated from config, but help never showed which pipelines, resources, or
   aliases existed, forcing reliance on shell history. Surface the config in help everywhere:
@@ -482,7 +482,7 @@ Also fixes two bugs found during review: the update command pointed at ~/code/de
   tailer.
 
 - **lambda**: Publish and promote alias on deploy
-  ([`3cd21ba`](https://github.com/datapointchris/dectl/commit/3cd21ba510d409a609ff546a3f0b746a173b7ecd))
+  ([`bf88ea9`](https://github.com/datapointchris/dectl/commit/bf88ea99a8f4df7898e106d83c04a74842c597cd))
 
 deploy previously only updated $LATEST, so functions invoked through an alias (S3 triggers, durable
   functions) kept running the last published version. Add --publish to update $LATEST, wait for it
@@ -496,7 +496,7 @@ Add an optional alias field to LambdaConfig; when set, --publish moves it.
 ### Bug Fixes
 
 - Interleave output and error streams in Glue log tailing
-  ([`0b7c45b`](https://github.com/datapointchris/dectl/commit/0b7c45b77a4d1ca04646d130790bf9bb4a46e5c2))
+  ([`45101bc`](https://github.com/datapointchris/dectl/commit/45101bc71972346af71004b4a1eea1d3a4d02510))
 
 Previously output stream was tailed with follow=True, blocking until it stopped before ever showing
   the error stream. Now both streams are polled in the same loop so errors appear immediately
@@ -505,7 +505,7 @@ Previously output stream was tailed with follow=True, blocking until it stopped 
 ### Documentation
 
 - Add CHANGELOG from v0.1.0 release
-  ([`9d86953`](https://github.com/datapointchris/dectl/commit/9d8695387366b5117aa7f347bd130c6638926e11))
+  ([`b9c4ec5`](https://github.com/datapointchris/dectl/commit/b9c4ec599d66566b93c29a35c83c52f5ec2df97e))
 
 Ports the changelog that previously existed only on the orphaned main history. Commit link updated
   to 33ce5cf (the initial commit in this canonical history) since main's df445a9 root will be
@@ -514,15 +514,15 @@ Ports the changelog that previously existed only on the orphaned main history. C
 ### Features
 
 - Add glue option for Connections
-  ([`1ad588e`](https://github.com/datapointchris/dectl/commit/1ad588e096f853d37ae8e72d863b2a51614ef47f))
+  ([`0d35773`](https://github.com/datapointchris/dectl/commit/0d35773e548e43c22bea0860bf92e976eefb3cdc))
 
 - Add httpx dependency for Jenkins API integration
-  ([`893242b`](https://github.com/datapointchris/dectl/commit/893242b64d6307eaa63dcc57ad60477899110381))
+  ([`ad182ed`](https://github.com/datapointchris/dectl/commit/ad182ed853a575c6878915fed8cd81f9db809aa6))
 
 ### Refactoring
 
 - Restructure pipelines to support multiple resource types
-  ([`c6c6093`](https://github.com/datapointchris/dectl/commit/c6c6093e0d8ffae4938593fc747c93e1613b6c79))
+  ([`59b5cb8`](https://github.com/datapointchris/dectl/commit/59b5cb8b2991cbd14b2510afee04e9c18ee06b4c))
 
 Pipelines can now have both glue_jobs and lambdas (and Jenkins deploy) registered as sub-commands.
   Removes the single-type constraint. Adds per-pipeline list command and dectl update for
@@ -534,7 +534,7 @@ Pipelines can now have both glue_jobs and lambdas (and Jenkins deploy) registere
 ### Features
 
 - Initial dectl project
-  ([`33ce5cf`](https://github.com/datapointchris/dectl/commit/33ce5cfd8de4394698014cc1477d002f65656196))
+  ([`c906d27`](https://github.com/datapointchris/dectl/commit/c906d278a9d214206df7b916d164114003be2c9f))
 
 Config-driven CLI for managing AWS data engineering pipelines. Consolidates repeated justfile
   operations (Glue deploy/run/logs, Lambda deploy/invoke/logs) into a single tool with YAML config
