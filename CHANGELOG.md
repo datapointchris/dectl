@@ -1,6 +1,28 @@
 # CHANGELOG
 
 
+## v2.1.2 (2026-07-30)
+
+### Bug Fixes
+
+- Bound the Glue log scan to the run's own start time
+  ([`4b8aa9f`](https://github.com/datapointchris/dectl/commit/4b8aa9fbc41cd82c9d58af383f9691c022d570be))
+
+Tailing a Glue run printed nothing for several minutes, then everything at once. Filtering the two
+  shared groups by stream-name prefix isolates the run's streams but does not bound the scan:
+  filter_log_events pages forward from startTime, and unset that is the start of the group's
+  retention. Both Glue groups hold every Python Shell run in the account, so the tailer was paging
+  through months of unrelated logs before reaching this run's, and it drained every page before
+  rendering a line.
+
+The run's StartedOn is the natural lower bound, so run_log_start reads it and the tailer now
+  requires it. A missing log group is also reported rather than silently swallowed, since "printed
+  nothing" and "nowhere to print" are different diagnoses.
+
+Verified against a real Python Shell run: both groups readable in under a second, where before the
+  same assertions would have waited minutes.
+
+
 ## v2.1.1 (2026-07-30)
 
 ### Bug Fixes
