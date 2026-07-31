@@ -1,6 +1,22 @@
 # CHANGELOG
 
 
+## v2.2.0 (2026-07-31)
+
+### Features
+
+- Update from GitHub releases instead of local source
+  ([`f3db914`](https://github.com/datapointchris/dectl/commit/f3db914ecd84f996af431ec0a40e5a1ddf0823e8))
+
+dectl update reinstalled from a hardcoded ~/tools/dectl checkout, which was right while the tool
+  only existed on the dev machine and wrong everywhere else: no source there means no update, and a
+  dirty tree installs itself.
+
+Adopt pyselfupdate like the rest of the fleet — update installs the latest GitHub release over the
+  running one, --check reports without installing, and the root callback runs the once-a-day notice.
+  The repo is private, so a token_func hands pyselfupdate a gh credential for the release lookup.
+
+
 ## v2.1.2 (2026-07-30)
 
 ### Bug Fixes
@@ -21,6 +37,16 @@ The run's StartedOn is the natural lower bound, so run_log_start reads it and th
 
 Verified against a real Python Shell run: both groups readable in under a second, where before the
   same assertions would have waited minutes.
+
+### Chores
+
+- **config**: Adopt the standard pyright section
+  ([`3f669e9`](https://github.com/datapointchris/dectl/commit/3f669e90a984609cb9354faa163666e997a9053f))
+
+Synced from forge pyproject template. With no [tool.pyright] section the editor LSP settings
+  applied, and their ignore = ["*"] suppressed every diagnostic. A config file takes precedence over
+  those settings, so basedpyright now reports against the same "standard" mode as the rest of the
+  portfolio instead of reporting nothing.
 
 
 ## v2.1.1 (2026-07-30)
