@@ -1,10 +1,13 @@
+import subprocess
 from itertools import starmap
-from pathlib import Path
 from typing import Annotated
 
 import typer
 import yaml
 from pydantic import ValidationError
+from pyselfupdate import Config
+from pyselfupdate import notify
+from pyselfupdate.typercmd import run_update
 
 from dectl.commands.config_cmd import config_app
 from dectl.commands.glue import make_glue_app
@@ -23,7 +26,6 @@ from dectl.output import console
 from dectl.output import emit_json
 from dectl.output import error
 from dectl.output import info
-from dectl.output import success
 from dectl.pipeline_view import pipeline_to_dict
 from dectl.pipeline_view import render_pipeline
 from dectl.pipeline_view import resource_types
@@ -152,7 +154,7 @@ REFERENCE_SET_VERBS = [
     'list [--json] · monitor',
 ]
 REFERENCE_GLOBAL = [
-    'reference · env · list [--json] · search KEYWORD [--json] · update',
+    'reference · env · list [--json] · search KEYWORD [--json] · update [--check]',
     'config  init · show [--json] · path · example · edit · validate',
 ]
 
@@ -194,22 +196,33 @@ def reference() -> None:
         info('No config on this machine yet — run "dectl config init".')
 
 
-@app.command(rich_help_panel='Global commands')
-def update() -> None:
-    """Reinstall dectl from your local source checkout."""
-    import subprocess
+def github_token() -> str:
+    """A GitHub credential from the gh CLI.
 
-    source_dir = Path.home() / 'tools' / 'dectl'
-    if not (source_dir / 'pyproject.toml').exists():
-        error(f'source not found at {source_dir}')
-        raise typer.Exit(1)
-    info(f'reinstalling from {source_dir}')
-    result = subprocess.run(['uv', 'tool', 'install', '--reinstall', str(source_dir)], capture_output=True, text=True)  # nosec B607
-    if result.returncode == 0:
-        success('dectl updated')
-    else:
-        error(result.stderr.strip())
-        raise typer.Exit(1)
+    dectl's repository is private, so the release lookup is a 404 without one and
+    pyselfupdate reads that as "no release". pyselfupdate already checks
+    $GITHUB_TOKEN and $GH_TOKEN itself, so this only adds the third source.
+
+    Passed as `token_func` rather than `token` because it spawns a subprocess.
+    This config is built at import, and the notify gate resolves it on every
+    invocation to decline most of them in microseconds — an eager `gh auth
+    token` would put a process spawn in front of every dectl command.
+    """
+    result = subprocess.run(['gh', 'auth', 'token'], capture_output=True, text=True)  # nosec B603 B607
+    return result.stdout.strip() if result.returncode == 0 else ''
+
+
+# Shared by the `update` command and the daily check in the root callback, so the
+# notice cannot name a release the update command would not install.
+UPDATE_CONFIG = Config(tool='dectl', owner='datapointchris', token_func=github_token)
+
+
+@app.command(rich_help_panel='Global commands')
+def update(
+    check_only: Annotated[bool, typer.Option('--check', help='Report whether an update is available without installing it')] = False,
+) -> None:
+    """Update dectl to the latest published GitHub release."""
+    run_update(UPDATE_CONFIG, check_only=check_only)
 
 
 @app.callback(
@@ -252,6 +265,11 @@ def main(
     substitutes it, so one config drives every environment.
     """
     set_active_environment(env, resolve_env_source(ctx))
+    # Never raises and never prints an error; the notice is deferred to exit so it lands after the
+    # command's own output. `dectl update` is the only place an update failure is reported, and is
+    # skipped here because it is about to do the thing the notice would suggest.
+    if ctx.invoked_subcommand != 'update':
+        notify(UPDATE_CONFIG)
     if ctx.invoked_subcommand is None:
         print_environment_banner()
         if CONFIG_LOAD_ERROR:

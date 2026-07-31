@@ -10,8 +10,11 @@ uv tool install git+https://github.com/datapointchris/dectl.git
 
 Releases are cut from `main` by python-semantic-release, so the default branch is
 always the latest release. Pin a specific version with `@v0.6.1` if you need to.
-On your dev machine, `dectl update` reinstalls from your local `~/tools/dectl`
-checkout instead.
+
+`dectl update` installs the latest GitHub release over the running one, and
+`dectl update --check` reports whether one exists without installing it. Once a
+day, a command that finds a newer release prints a one-line notice to stderr;
+`NO_AUTO_UPDATE=1` (or `DECTL_NO_AUTO_UPDATE=1`) turns that off.
 
 ## Command grammar
 
