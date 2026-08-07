@@ -1,6 +1,35 @@
 # CHANGELOG
 
 
+## v2.5.1 (2026-08-07)
+
+### Bug Fixes
+
+- Release the one-stroke shortcut form
+  ([`3832a2a`](https://github.com/datapointchris/dectl/commit/3832a2abab957363521256a22747f15a5976df84))
+
+The dependency bump to pyclisteno 0.8.0 went in as `build:`, which semantic-release does not
+  release, so the installed dectl kept writing the spaced index and the shell hint kept offering
+  `dectl ex g s r`. The change is user-visible and needed a releasing type.
+
+### Build System
+
+- Take the one-stroke short form
+  ([`8cab6d3`](https://github.com/datapointchris/dectl/commit/8cab6d3cfe918a9439ee5878c9ed0c15061cad55))
+
+0.8.0 runs the per-level prefixes together, so the shortcut is `dectl exgsr` rather than `dectl ex g
+  s r`. Long form and real command names are unaffected — `dectl env` still reaches env.
+
+### Documentation
+
+- Describe the shortcut grammar clisteno adds
+  ([`116f239`](https://github.com/datapointchris/dectl/commit/116f239178e845cc806d6785c363167bc06e341d))
+
+The compressed form is part of dectl's surface now, and the two things a future reader would
+  otherwise have to rediscover: attach() must be the last line of main.py, and a sequence that is
+  also a command name is withheld.
+
+
 ## v2.5.0 (2026-08-07)
 
 ### Build System
