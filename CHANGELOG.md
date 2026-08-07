@@ -1,6 +1,33 @@
 # CHANGELOG
 
 
+## v2.3.0 (2026-08-07)
+
+### Chores
+
+- **lint**: Disable SC1091/SC1090 from the forge toolchain
+  ([`324c94b`](https://github.com/datapointchris/dectl/commit/324c94bd9167f4bcf1714f2a707b8637d1406825))
+
+### Features
+
+- Publish the command grammar through clisteno
+  ([`8bde711`](https://github.com/datapointchris/dectl/commit/8bde71119a7df19320119ba1a19e4df7835afc14))
+
+Stage 0 of adopting clisteno: enrollment only. The grammar dump and its flat index appear under
+  ~/.cache/clisteno, and nothing else changes — every node's --help is byte-identical with and
+  without the call, checked across the whole tree rather than assumed.
+
+attach(app) is the last line of main.py rather than sitting after the pipeline loop, because the
+  global commands are registered below it and a walk that ran earlier would publish a grammar
+  missing them. It cannot be lazier either: the tree does not exist until config is read, which is
+  what makes this one call instead of a decorator per command.
+
+The {env} token survives into the dump unsubstituted, so a cached grammar never teaches a name that
+  only holds under one --env.
+
+Teaching, ghost text and the resolver are the later stages and are deliberately not started here.
+
+
 ## v2.2.2 (2026-08-04)
 
 ### Bug Fixes
