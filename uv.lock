@@ -186,7 +186,7 @@ dev = [
 requires-dist = [
     { name = "boto3", specifier = ">=1.35.0" },
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "pyclisteno", specifier = ">=0.6.2" },
+    { name = "pyclisteno", specifier = ">=0.7.1" },
     { name = "pydantic", specifier = ">=2.6.0" },
     { name = "pyselfupdate", extras = ["typer"], specifier = ">=0.2.2" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -471,11 +471,11 @@ wheels = [
 
 [[package]]
 name = "pyclisteno"
-version = "0.6.2"
+version = "0.7.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/43/6e/b6b40b87423aa9eaff685ba4ce5d3b997cc4cb64b30d37ab8ba14d32f757/pyclisteno-0.6.2.tar.gz", hash = "sha256:805f048b962773d15f8fcbbfd67d6095f512d47ab25e203d577e7b36811229d8", size = 20673, upload-time = "2026-08-07T01:21:42.431Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/15/02/3aa78023aaf24d010c415a802a44e5fb0088fcfe9a1c1d32976fb1077650/pyclisteno-0.7.1.tar.gz", hash = "sha256:bc9dc2df74056bd2dd3b4213a01adaaf43359d3137c1c2b60975e79c9a4d07dc", size = 21579, upload-time = "2026-08-07T01:36:50.639Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c0/d5/a05d3633fd30ee8743d9984276a3ac4e64a08d31a033e2c1faf23d6919e7/pyclisteno-0.6.2-py3-none-any.whl", hash = "sha256:f4bcf65a53d6f5070612dedb78f7114207894aa7df53e48ffe97ae60ec39641c", size = 25607, upload-time = "2026-08-07T01:21:41.594Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/8a/673463d7fc787ddb4bd5d19f2cd59fc731a36846fc82d20e1f16d01d9a33/pyclisteno-0.7.1-py3-none-any.whl", hash = "sha256:418a1d0f7825cf19561e5d7ec83aefa5adf6bf74c27e734a865500ed8a1e2227", size = 26620, upload-time = "2026-08-07T01:36:49.387Z" },
 ]
 
 [[package]]

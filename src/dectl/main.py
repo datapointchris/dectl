@@ -307,4 +307,4 @@ def list_all(
 # would publish a grammar missing half of them. It cannot move to a lazier point
 # either — the tree does not exist until config is read, which is why enrollment
 # is this one call rather than a decorator per command.
-attach(app, teaching=True)
+attach(app, teaching=True, expanding=True)
