@@ -1,6 +1,26 @@
 # CHANGELOG
 
 
+## v2.4.0 (2026-08-07)
+
+### Features
+
+- Show each command's short form in help
+  ([`9ecc7e8`](https://github.com/datapointchris/dectl/commit/9ecc7e8254780e491d1cce56e72ba301f4909d21))
+
+Stage 1 of adopting clisteno. Every row in every listing now carries the prefix that reaches it, so
+  reading help trains the fast path instead of only answering the question that opened it.
+
+reference (r) Print the full command grammar, independent of config. config (c) Manage dectl
+  configuration at ~/.config/dectl/...
+
+source-copy (s) Glue job source-copy → my-{env}-source-copy-job
+
+Render-time only: nothing about parsing, argument handling or exit codes changes, and the rich
+  markup in the pipeline and alias summaries renders as it always did. dectl example-pipeline glue
+  source-copy run is now dectl ex g s r.
+
+
 ## v2.3.0 (2026-08-07)
 
 ### Chores
