@@ -165,6 +165,7 @@ source = { editable = "." }
 dependencies = [
     { name = "boto3" },
     { name = "httpx" },
+    { name = "pyclisteno" },
     { name = "pydantic" },
     { name = "pyselfupdate", extra = ["typer"] },
     { name = "pyyaml" },
@@ -185,6 +186,7 @@ dev = [
 requires-dist = [
     { name = "boto3", specifier = ">=1.35.0" },
     { name = "httpx", specifier = ">=0.27.0" },
+    { name = "pyclisteno", specifier = ">=0.5.0" },
     { name = "pydantic", specifier = ">=2.6.0" },
     { name = "pyselfupdate", extras = ["typer"], specifier = ">=0.2.2" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -465,6 +467,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/8e/22/2de9408ac81acbb8a7d05d4cc064a152ccf33b3d480ebe0cd292153db239/pre_commit-4.6.0.tar.gz", hash = "sha256:718d2208cef53fdc38206e40524a6d4d9576d103eb16f0fec11c875e7716e9d9", size = 198525, upload-time = "2026-04-21T20:31:41.613Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/80/6e/4b28b62ecb6aae56769c34a8ff1d661473ec1e9519e2d5f8b2c150086b26/pre_commit-4.6.0-py2.py3-none-any.whl", hash = "sha256:e2cf246f7299edcabcf15f9b0571fdce06058527f0a06535068a86d38089f29b", size = 226472, upload-time = "2026-04-21T20:31:40.092Z" },
+]
+
+[[package]]
+name = "pyclisteno"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4c/df/ad73366f323f7fddb7504e4a7f34bc40bb3f0a514b6599ceb02bcdf183f4/pyclisteno-0.5.0.tar.gz", hash = "sha256:c1cca33c9279f23bc7ff4b711b839d0f0cdbe8699578c5c05c1cf0331f2fe2cf", size = 17273, upload-time = "2026-08-07T00:53:59.174Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/06/0b/51d3dbff37a0c311c2cba999f12ac6bec0cc70389673f8ecf842780eebf4/pyclisteno-0.5.0-py3-none-any.whl", hash = "sha256:93705f9c5ee961c4c4fa9d03d864d402fb3e51cd879b8f38d0b7d1a3e247e0d1", size = 21058, upload-time = "2026-08-07T00:53:58.029Z" },
 ]
 
 [[package]]

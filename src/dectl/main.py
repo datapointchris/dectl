@@ -3,6 +3,7 @@ from typing import Annotated
 
 import typer
 import yaml
+from pyclisteno import attach
 from pydantic import ValidationError
 from pyselfupdate import Config
 from pyselfupdate import notify
@@ -299,3 +300,11 @@ def list_all(
         return
     for name, p in cfg.pipelines.items():
         render_pipeline(name, p)
+
+
+# Last line of the module, not after the pipeline loop: the tree is not finished
+# until the global commands below it are registered, and a walk that runs earlier
+# would publish a grammar missing half of them. It cannot move to a lazier point
+# either — the tree does not exist until config is read, which is why enrollment
+# is this one call rather than a decorator per command.
+attach(app)
