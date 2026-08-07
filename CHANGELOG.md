@@ -1,6 +1,37 @@
 # CHANGELOG
 
 
+## v2.5.0 (2026-08-07)
+
+### Build System
+
+- Take the clisteno index fix
+  ([`e963a82`](https://github.com/datapointchris/dectl/commit/e963a827acb416a706aad3fef55bf013de985c60))
+
+0.6.1 strips rich tags from the flat index, so the hint rows no longer read
+  "[bold]source-copy[/bold]". Help is unaffected either way — rich rendered those tags correctly
+  there.
+
+- Take the clisteno index key fix
+  ([`669c8ab`](https://github.com/datapointchris/dectl/commit/669c8abb123cf2c5bf7525a9e40227c228e4f37c))
+
+0.6.2 keys the flat index by the typed sequence rather than the node's own prefix, which is what the
+  shell hint needs to look anything up — dectl's index had eleven colliding keys before it.
+
+### Features
+
+- Accept the short form of any command
+  ([`7ebf3d1`](https://github.com/datapointchris/dectl/commit/7ebf3d116cfa4b5e7c8fb06fb4c2cd9aa573f200))
+
+Stage 3, the last of adopting clisteno. `dectl ex g s r` now runs `dectl example-pipeline glue
+  source-copy run`, which is what the help hint has been offering since stage 1 — until now the tool
+  rejected its own advice.
+
+Expansion declines wherever it is not certain: an unknown token, a retired sequence, or anything
+  after a leading option is passed through for dectl to answer itself, and a real command name
+  expands to itself. Verified all three against the live config.
+
+
 ## v2.4.0 (2026-08-07)
 
 ### Features
