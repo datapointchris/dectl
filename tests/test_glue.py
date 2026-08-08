@@ -2,6 +2,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from dectl import prompt
 from dectl.commands.glue import GlueRunWatcher
 from dectl.commands.glue import build_job_update
 from dectl.commands.glue import follow_glue_run
@@ -122,6 +123,30 @@ def test_max_capacity_on_a_worker_based_job_is_rejected():
 
     with pytest.raises(typer.Exit):
         apply(glue, make_job(max_capacity=1.0))
+
+
+def test_update_without_a_terminal_fails_naming_the_flag():
+    """A prompt on a stdin that never closes deadlocks a Jenkins step or a cron
+    run with no output and no exit code. pytest's stdin is not a terminal, which
+    is the case."""
+    glue = FakeGlueClient(existing_job={'Command': {'Name': 'pythonshell'}})
+
+    with pytest.raises(typer.Exit) as raised:
+        update_glue_job(FakeSession(glue), make_job())
+
+    assert raised.value.exit_code == 1
+    assert glue.captured_update is None
+
+
+def test_no_input_refuses_the_prompt_even_on_a_terminal(monkeypatch):
+    monkeypatch.setattr('sys.stdin.isatty', lambda: True)
+    monkeypatch.setattr(prompt.interactivity, 'no_input', True)
+    glue = FakeGlueClient(existing_job={'Command': {'Name': 'pythonshell'}})
+
+    with pytest.raises(typer.Exit):
+        update_glue_job(FakeSession(glue), make_job())
+
+    assert glue.captured_update is None
 
 
 def test_update_is_skipped_when_nothing_dectl_manages_changed():

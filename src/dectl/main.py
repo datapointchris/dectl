@@ -29,6 +29,7 @@ from dectl.output import info
 from dectl.pipeline_view import pipeline_to_dict
 from dectl.pipeline_view import render_pipeline
 from dectl.pipeline_view import resource_types
+from dectl.prompt import set_no_input
 from dectl.session import make_session
 
 # no_args_is_help is intentionally omitted: it would short-circuit to help before the callback
@@ -230,6 +231,10 @@ def main(
             help='Environment substituted for {env} in resource names. Priority: --env > DECTL_ENV > config > dev.',
         ),
     ] = DEFAULT_ENVIRONMENT,
+    no_input: Annotated[
+        bool,
+        typer.Option('--no-input', help='Never prompt; fail naming the flag that would have answered.'),
+    ] = False,
 ) -> None:
     """[bold]dectl[/bold] — data engineering control for AWS pipelines.
 
@@ -249,6 +254,7 @@ def main(
     substitutes it, so one config drives every environment.
     """
     set_active_environment(env, resolve_env_source(ctx))
+    set_no_input(no_input)
     # Never raises and never prints an error; the notice is deferred to exit so it lands after the
     # command's own output. `dectl update` is the only place an update failure is reported, and is
     # skipped here because it is about to do the thing the notice would suggest.

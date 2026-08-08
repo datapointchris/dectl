@@ -14,6 +14,7 @@ from dectl.output import emit_json
 from dectl.output import error
 from dectl.output import info
 from dectl.output import success
+from dectl.prompt import confirm_or_exit
 
 RUN_STATE_COLORS = {'SUCCEEDED': 'green', 'FAILED': 'red', 'STOPPED': 'red', 'TIMEOUT': 'red', 'RUNNING': 'cyan'}
 
@@ -150,8 +151,8 @@ def update_glue_job(session: boto3.Session, glue_job: GlueJobConfig, assume_yes:
 
     if plan:
         return
-    if not assume_yes and not typer.confirm('apply these job definition changes?'):
-        raise typer.Abort()
+    if not assume_yes:
+        confirm_or_exit('apply these job definition changes?')
 
     glue.update_job(JobName=glue_job.name, JobUpdate=job_update)
     success(f'updated job {glue_job.name}')
