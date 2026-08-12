@@ -24,7 +24,7 @@ The Glue job-definition update went straight to typer.confirm, so a Jenkins step
   no exit code.
 
 confirm_or_exit gates on can_prompt() and otherwise fails naming --yes. --no-input forces that path
-  from a terminal, per the interactivity rule in ~/dev/standards/cli-design.md.
+  from a terminal, per the interactivity rule in standards/cli-design.md.
 
 The gate lives in its own module holding per-invocation state set from the root callback, the shape
   env.py already uses for --env, so a verb deep in the tree can ask without threading the flag
