@@ -7,7 +7,7 @@ from botocore.exceptions import ClientError
 
 from dectl.config import LambdaConfig
 from dectl.durable import epoch_millis
-from dectl.durable import execution_at_index
+from dectl.durable import execution_by_suffix
 from dectl.durable import execution_to_dict
 from dectl.durable import format_duration
 from dectl.durable import invoke_qualifier
@@ -65,6 +65,10 @@ class FakeLambdaClient:
         matches = [e for e in self.executions if version_of(e) == qualifier]
         if kwargs.get('DurableExecutionName'):
             matches = [e for e in matches if e['DurableExecutionName'] == kwargs['DurableExecutionName']]
+        # The service narrows on Statuses too. Ignoring it here made a listing's scope
+        # unexpressible, which is what hid a resolver reading one listing and consuming another.
+        if kwargs.get('Statuses'):
+            matches = [e for e in matches if e.get('Status') in kwargs['Statuses']]
         return {'DurableExecutions': matches[: kwargs.get('MaxItems', 100)]}
 
     def get_durable_execution(self, **kwargs) -> dict:
@@ -323,49 +327,76 @@ def test_tail_durable_history_follows_pagination():
     assert client.history_calls[1]['Marker'] == 'more'
 
 
-def test_resolve_execution_takes_a_row_number_from_the_listing():
-    # The default execution name is a UUID, so the row number is the only handle a person can
-    # retype off the executions table.
-    client = FakeLambdaClient([execution('order-9'), execution('order-8'), execution('order-7')])
+def test_resolve_execution_takes_a_unique_tail_of_the_name():
+    # Lambda names an unnamed execution with a UUID; its tail is the only part anyone retypes.
+    client = FakeLambdaClient(
+        [execution('090c4189-b18b-4296-9d0c-cfd01dc3a122'), execution('7f2a9c31-4d5e-4a1b-9c8d-2e3f4a5b6c7d')],
+        versions=['$LATEST', '7'],
+    )
 
-    found = resolve_execution(client, 'fn', '7', '2')
+    found = resolve_execution(client, 'fn', '7', 'cfd01dc3a122')
 
-    assert found['DurableExecutionName'] == 'order-8'
-
-
-def test_resolve_execution_prefers_a_name_over_a_row_number():
-    # An execution deliberately named '3' still wins its own digit; that ordering is the whole
-    # collision rule between the two ways of naming one.
-    client = FakeLambdaClient([execution('a'), execution('b'), execution('3')])
-
-    found = resolve_execution(client, 'fn', '7', '3')
-
-    assert found['DurableExecutionName'] == '3'
-    assert client.list_calls[0]['DurableExecutionName'] == '3'
+    assert found['DurableExecutionName'] == '090c4189-b18b-4296-9d0c-cfd01dc3a122'
 
 
-def test_resolve_execution_exits_on_a_row_number_below_one():
-    client = FakeLambdaClient([execution('order-9')])
+def test_resolve_execution_prefers_a_whole_name_over_a_tail_of_another():
+    # 'run-7' is both a name and the tail of 'nightly-run-7'. The exact name wins itself.
+    client = FakeLambdaClient([execution('nightly-run-7'), execution('run-7')], versions=['$LATEST', '7'])
 
-    with pytest.raises(typer.Exit):
-        resolve_execution(client, 'fn', '7', '0')
+    found = resolve_execution(client, 'fn', '7', 'run-7')
 
-
-def test_execution_at_index_is_empty_past_the_end_of_the_listing():
-    client = FakeLambdaClient([execution('order-9')])
-
-    assert execution_at_index(client, 'fn', '7', 5) == []
+    assert found['DurableExecutionName'] == 'run-7'
 
 
-def test_execution_to_dict_carries_the_row_number():
-    # The table shows a '#' column, so --json has to answer with the same handle.
-    assert execution_to_dict(execution('order-9'), 2)['index'] == 2
+def test_resolve_execution_finds_a_tail_under_an_older_version():
+    # The tail is typed off `executions --all-versions`, so it has to resolve past the live one.
+    client = FakeLambdaClient([execution('090c4189-b18b-4296-9d0c-cfd01dc3a122', version='6')], versions=['$LATEST', '6', '7'])
+
+    found = resolve_execution(client, 'fn', '7', 'cfd01dc3a122')
+
+    assert found['DurableExecutionName'] == '090c4189-b18b-4296-9d0c-cfd01dc3a122'
 
 
-def test_render_executions_table_numbers_the_rows_newest_first():
-    with console.capture() as capture:
-        render_executions_table('fn', 'version 7', [execution('order-9'), execution('order-8')])
+def test_an_ambiguous_tail_is_a_usage_error_naming_the_candidates():
+    # Picking the newest would resolve silently to something the caller did not name.
+    client = FakeLambdaClient([execution('batch-alpha-99'), execution('batch-beta-99')], versions=['$LATEST', '7'])
+
+    with pytest.raises(typer.Exit) as raised, console.capture() as capture:
+        resolve_execution(client, 'fn', '7', '99')
+
+    assert raised.value.exit_code == 2
     output = capture.get()
+    assert 'batch-alpha-99' in output
+    assert 'batch-beta-99' in output
 
-    assert '1' in output
-    assert output.index('order-9') < output.index('order-8')
+
+def test_a_tail_matching_nothing_exits_naming_the_versions_searched():
+    client = FakeLambdaClient([execution('order-9')], versions=['$LATEST', '7'])
+
+    with pytest.raises(typer.Exit) as raised:
+        resolve_execution(client, 'fn', '7', 'nosuchtail')
+
+    assert raised.value.exit_code == 1
+
+
+def test_execution_by_suffix_matches_the_tail_not_the_head():
+    # A UUID's head is its timestamp, so a prefix carries almost no entropy.
+    client = FakeLambdaClient([execution('090c4189-b18b-4296-9d0c-cfd01dc3a122')], versions=['$LATEST', '7'])
+
+    found = execution_by_suffix(client, 'fn', 'cfd01dc3a122', ['7'])
+
+    assert found['DurableExecutionName'] == '090c4189-b18b-4296-9d0c-cfd01dc3a122'
+
+
+def test_execution_to_dict_has_no_positional_handle():
+    # The handle is the name, which every row already carries; a row number would be a property of
+    # the listing rather than of the execution.
+    assert 'index' not in execution_to_dict(execution('order-9'))
+
+
+def test_the_executions_table_does_not_truncate_the_name():
+    # The tail is the handle, and an ellipsis in the middle of a UUID hides exactly that.
+    with console.capture() as capture:
+        render_executions_table('fn', 'version 7', [execution('090c4189-b18b-4296-9d0c-cfd01dc3a122')])
+
+    assert 'cfd01dc3a122' in capture.get()

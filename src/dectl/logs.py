@@ -26,16 +26,17 @@ LEVEL_KEYS = ('level', 'levelname', 'severity')
 MESSAGE_KEYS = ('message', 'msg', 'event')
 TRACEBACK_KEYS = ('exc_info', 'exception', 'stack_trace', 'stacktrace', 'traceback')
 
-# The durable SDK stamps the operation it is logging from onto every record. Rendered as a tag
-# beside the level it costs one column; rendered as expanded fields it costs two lines per
-# message, which is most of the screen when the messages themselves are one line.
-TAG_KEYS = ('operationName', 'attempt')
-HEADER_KEYS = frozenset(TIMESTAMP_KEYS + LEVEL_KEYS + MESSAGE_KEYS + TAG_KEYS)
+HEADER_KEYS = frozenset(TIMESTAMP_KEYS + LEVEL_KEYS + MESSAGE_KEYS)
 
-# Identical on every record of a scoped tail, so they carry no information once the execution
-# header has printed. `executionArn` is only constant when the tail is scoped to one execution —
-# it is added by the caller that did the scoping, not suppressed here.
-DURABLE_NOISE_KEYS = frozenset({'parentId', 'operationId', 'requestId', 'logger'})
+# The durable SDK's two opaque operation ids. Neither is a value anyone reads: they identify an
+# operation to the service, and the operation's *name* is what a person recognises, which
+# `operation_tag` lifts into the header instead. Deliberately not `requestId` — one execution spans
+# many invocations, so that one varies across a scoped tail and says which invocation spoke — and
+# deliberately not `logger`, which is ordinary structured-logging output no durable function owns.
+DURABLE_OPERATION_ID_KEYS = frozenset({'parentId', 'operationId'})
+
+# Constant only once a tail is scoped to one execution, so `tail_lambda_logs` adds it when its
+# filter pattern says the tail is scoped, rather than any caller deciding a second time.
 EXECUTION_ARN_KEY = 'executionArn'
 
 MARKUP_TAG = re.compile(r'\[/?[^\[\]]+\]')
@@ -73,29 +74,36 @@ def first_value(data: dict, keys: tuple[str, ...]) -> str:
     return ''
 
 
-def operation_tag(data: dict) -> str:
-    """The operation a durable record came from, as `name` or `name.attempt`.
+def operation_tag(data: dict) -> tuple[str, frozenset[str]]:
+    """The operation a durable record came from, and the keys folded into it.
 
-    Attempt is only worth a column when it is not the first try, since a retry is the case where
-    knowing which attempt spoke changes how you read the line."""
+    Returns the tag and the keys it consumed, so the caller suppresses exactly what it showed and
+    a field the tag could not use still prints. `attempt` alone has no operation to belong to, and
+    a non-integer one cannot be compared, so both fall through to the ordinary field rendering
+    rather than vanishing."""
     name = data.get('operationName')
     if not name:
-        return ''
+        return '', frozenset()
     attempt = data.get('attempt')
+    # A first attempt is the ordinary case and spends a column saying nothing; a later one is the
+    # case where knowing which attempt spoke changes how the line reads.
     if isinstance(attempt, int) and attempt > 1:
-        return f'{name}.{attempt}'
-    return str(name)
+        return f'{name}.{attempt}', frozenset({'operationName', 'attempt'})
+    if isinstance(attempt, int):
+        return str(name), frozenset({'operationName', 'attempt'})
+    return str(name), frozenset({'operationName'})
 
 
-def render_event(message: str, prefix: str = '', hide_keys: frozenset[str] = DURABLE_NOISE_KEYS) -> None:
+def render_event(message: str, prefix: str, hide_keys: frozenset[str]) -> None:
     """Print a CloudWatch event, restructuring it when the whole message is a
     JSON object. Structured logs (durable functions, python-json-logger) arrive
     as one dense line with any traceback collapsed into a single \\n-escaped
     field; this lifts the common fields into a header and re-expands tracebacks
     into readable, syntax-highlighted frames. Anything else prints verbatim.
 
-    hide_keys drops fields that repeat unchanged on every record. Pass an empty set to see the
-    whole record."""
+    hide_keys drops fields that repeat unchanged on every record; pass an empty set to see the
+    whole record. It has no default because the answer differs per caller and a wrong one is
+    invisible — a suppressed field leaves a record that still reads as complete."""
     text = message.rstrip()
     try:
         data = json.loads(text)
@@ -109,7 +117,7 @@ def render_event(message: str, prefix: str = '', hide_keys: frozenset[str] = DUR
     timestamp = first_value(data, TIMESTAMP_KEYS)
     level = first_value(data, LEVEL_KEYS)
     body = first_value(data, MESSAGE_KEYS)
-    tag = operation_tag(data)
+    tag, tagged_keys = operation_tag(data)
     level_color = LEVEL_COLORS.get(level.upper(), 'white')
 
     header_parts = []
@@ -129,7 +137,7 @@ def render_event(message: str, prefix: str = '', hide_keys: frozenset[str] = DUR
     indent = ' ' * indent_width
 
     for key, value in data.items():
-        if key in HEADER_KEYS or key in hide_keys:
+        if key in HEADER_KEYS or key in tagged_keys or key in hide_keys:
             continue
         if key.lower() in TRACEBACK_KEYS and isinstance(value, str) and value.strip():
             frames = Syntax(value, 'pytb', theme='ansi_dark', word_wrap=True)
@@ -279,8 +287,10 @@ def render_merged(batch: list[tuple[int, str, str]]) -> None:
     timestamp records when a line was shipped, and Glue's stdout and stderr go through
     independent agents. A job that prints, raises, then prints again routinely renders both
     stdout lines before the traceback. The err prefix is what makes that readable."""
+    # Glue and monitor records carry none of the durable SDK's fields, and monitor interleaves
+    # several sources, so nothing here is repetition worth hiding.
     for _, prefix, message in sorted(batch, key=operator.itemgetter(0)):
-        render_event(message, prefix=prefix)
+        render_event(message, prefix=prefix, hide_keys=frozenset())
 
 
 def tail_log_groups(logs_client, sources: list[tuple[str, str]], follow: bool = True) -> None:
@@ -363,17 +373,22 @@ def tail_glue_run(logs_client, run_id: str, started_at: int, follow: bool = True
 def tail_lambda_logs(
     logs_client,
     function_name: str,
+    hide_keys: frozenset[str],
     follow: bool = True,
     filter_pattern: str = '',
     start_time: int | None = None,
     end_time: int | None = None,
-    hide_keys: frozenset[str] = DURABLE_NOISE_KEYS,
 ) -> None:
     """Tail a Lambda function's log group.
 
     filter_pattern / start_time / end_time narrow the tail to one durable execution's records;
     left at their defaults the whole group is followed from the current invocation onwards.
-    hide_keys is passed through to render_event."""
+
+    A non-empty filter_pattern is what makes a tail scoped to one execution, so the execution ARN
+    is added to hide_keys here rather than at each call site: the fact that decides it already
+    lives in this function, and a caller computing it a second time can get it wrong invisibly."""
+    if filter_pattern and hide_keys:
+        hide_keys = hide_keys | {EXECUTION_ARN_KEY}
     log_group = f'/aws/lambda/{function_name}'
     info(f'tailing {log_group}')
 
@@ -399,7 +414,7 @@ def tail_lambda_logs(
     while True:
         new_events = cursor.poll(logs_client)
         for event in new_events:
-            render_event(event['message'], hide_keys=hide_keys)
+            render_event(event['message'], prefix='', hide_keys=hide_keys)
 
         if not new_events:
             if not follow:

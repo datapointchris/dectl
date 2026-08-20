@@ -4,13 +4,13 @@ from datetime import datetime
 
 import pytest
 
-from dectl.logs import DURABLE_NOISE_KEYS
-from dectl.logs import EXECUTION_ARN_KEY
+from dectl.logs import DURABLE_OPERATION_ID_KEYS
 from dectl.logs import GLUE_ERROR_LOG_GROUP
 from dectl.logs import GLUE_OUTPUT_LOG_GROUP
 from dectl.logs import operation_tag
 from dectl.logs import render_event
 from dectl.logs import render_history_event
+from dectl.logs import render_merged
 from dectl.logs import stream_prefix
 from dectl.logs import tail_execution_history
 from dectl.logs import tail_glue_run
@@ -21,9 +21,9 @@ from tests.conftest import FakeCloudWatchLogs
 from tests.conftest import log_event
 
 
-def capture_event(message: str, prefix: str = '', **kwargs) -> str:
+def capture_event(message: str, prefix: str = '', hide_keys: frozenset[str] = frozenset()) -> str:
     with console.capture() as capture:
-        render_event(message, prefix=prefix, **kwargs)
+        render_event(message, prefix=prefix, hide_keys=hide_keys)
     return capture.get()
 
 
@@ -136,7 +136,7 @@ def test_lambda_tail_picks_up_events_across_streams():
         }
     )
     with console.capture() as capture:
-        tail_lambda_logs(client, 'my-func', follow=False)
+        tail_lambda_logs(client, 'my-func', hide_keys=frozenset(), follow=False)
     output = capture.get()
 
     assert 'warm run' in output
@@ -157,7 +157,7 @@ def test_lambda_tail_does_not_reprint_boundary_events():
     with pytest.MonkeyPatch.context() as monkeypatch, console.capture() as capture:
         monkeypatch.setattr('dectl.logs.time.sleep', stop_sleep)
         with pytest.raises(StopTail):
-            tail_lambda_logs(client, 'my-func', follow=True)
+            tail_lambda_logs(client, 'my-func', hide_keys=frozenset(), follow=True)
     output = capture.get()
 
     assert output.count('event-one') == 1
@@ -337,7 +337,7 @@ def test_lambda_tail_scopes_to_one_durable_execution():
     )
 
     with console.capture() as capture:
-        tail_lambda_logs(client, 'my-fn', follow=False, filter_pattern='"arn:exec"', start_time=100, end_time=900)
+        tail_lambda_logs(client, 'my-fn', hide_keys=frozenset(), follow=False, filter_pattern='"arn:exec"', start_time=100, end_time=900)
     output = capture.get()
 
     assert 'step ran' in output
@@ -371,16 +371,17 @@ def test_tail_log_groups_interleaves_sources_by_timestamp():
     assert output.index('bravo-msg') < output.index('alpha-msg')
 
 
-def test_render_event_folds_a_durable_record_onto_one_line():
-    # Every one of these fields is identical on every record of a scoped tail, so expanding them
-    # spends eight lines on one message and buries the messages themselves.
-    output = capture_event(json.dumps(DURABLE_RECORD), hide_keys=DURABLE_NOISE_KEYS | {EXECUTION_ARN_KEY})
+def test_render_event_folds_the_opaque_durable_ids_out_of_a_scoped_record():
+    # The two operation ids identify an operation to the service and are unreadable; the execution
+    # ARN is the filter this tail already applied. requestId stays, because one execution spans
+    # many invocations and it is what says which one spoke.
+    output = capture_event(json.dumps(DURABLE_RECORD), hide_keys=DURABLE_OPERATION_ID_KEYS | {'executionArn'})
 
-    assert len(output.strip().splitlines()) == 1
     assert 'avscan/b-1: 3/10 files' in output
     assert 'wait_for_files' in output
     assert 'executionArn' not in output
-    assert 'requestId' not in output
+    assert 'operationId' not in output
+    assert 'requestId' in output
 
 
 def test_render_event_keeps_every_field_when_nothing_is_hidden():
@@ -394,12 +395,50 @@ def test_render_event_keeps_every_field_when_nothing_is_hidden():
 def test_render_event_keeps_a_field_the_sdk_did_not_stamp():
     # Suppression is a named list, not "anything past the header", so a caller's own extra=
     # still prints.
-    output = capture_event(json.dumps(DURABLE_RECORD | {'batch_id': 'b-1'}), hide_keys=DURABLE_NOISE_KEYS)
+    output = capture_event(json.dumps(DURABLE_RECORD | {'batch_id': 'b-1'}), hide_keys=DURABLE_OPERATION_ID_KEYS)
 
     assert 'batch_id' in output
 
 
 def test_operation_tag_marks_a_retry_and_leaves_the_first_attempt_bare():
-    assert operation_tag({'operationName': 'stage', 'attempt': 1}) == 'stage'
-    assert operation_tag({'operationName': 'stage', 'attempt': 4}) == 'stage.4'
-    assert operation_tag({'attempt': 4}) == ''
+    assert operation_tag({'operationName': 'stage', 'attempt': 1})[0] == 'stage'
+    assert operation_tag({'operationName': 'stage', 'attempt': 4})[0] == 'stage.4'
+    assert operation_tag({'attempt': 4})[0] == ''
+
+
+def test_operation_tag_only_claims_the_keys_it_showed():
+    # What the tag consumed is what render_event suppresses, so a field the tag could not use has
+    # to come back unclaimed or it vanishes from the record entirely.
+    assert operation_tag({'operationName': 'stage', 'attempt': 4})[1] == frozenset({'operationName', 'attempt'})
+    assert operation_tag({'operationName': 'stage', 'attempt': 'four'})[1] == frozenset({'operationName'})
+    assert operation_tag({'attempt': 4})[1] == frozenset()
+
+
+def test_render_event_keeps_an_attempt_that_has_no_operation_to_belong_to():
+    # attempt without operationName has no tag to fold into, so it prints as an ordinary field.
+    output = capture_event(json.dumps({'level': 'WARN', 'message': 'retrying upload', 'attempt': 4}))
+
+    assert 'attempt' in output
+    assert '4' in output
+
+
+def test_render_event_keeps_a_non_integer_attempt():
+    record = {'level': 'INFO', 'message': 'staged', 'operationName': 'stage', 'attempt': '4'}
+    output = capture_event(json.dumps(record))
+
+    assert 'stage' in output
+    assert '4' in output
+
+
+def test_glue_and_monitor_records_keep_every_field():
+    # render_merged is the glue and monitor path. It asks for no suppression, and the invariant the
+    # narrow signature enforced was that every field past the header prints. This points at the
+    # caller rather than at render_event, because a default is what would break it.
+    message = json.dumps({'level': 'INFO', 'message': 'row', 'requestId': 'r-1', 'logger': 'job', 'rows': 42})
+    with console.capture() as capture:
+        render_merged([(2000, '', message)])
+    output = capture.get()
+
+    assert 'requestId' in output
+    assert 'logger' in output
+    assert 'rows' in output

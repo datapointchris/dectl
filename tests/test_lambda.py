@@ -188,7 +188,6 @@ def test_executions_json_emits_a_stable_shape(monkeypatch):
     assert result.exit_code == 0
     assert json.loads(result.stdout) == [
         {
-            'index': 1,
             'name': 'order-1',
             'status': 'SUCCEEDED',
             'version': '7',

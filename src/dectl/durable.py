@@ -41,6 +41,10 @@ TERMINAL_HISTORY_EVENTS = frozenset({'ExecutionSucceeded', 'ExecutionFailed', 'E
 # function deployed often accumulates one bucket per deploy; the interesting ones are the newest.
 VERSION_SWEEP_DEPTH = 10
 
+# How many executions per version a tail match is looked for in. A tail is typed off a listing the
+# caller just read, so the window only has to cover what that listing could have shown.
+SUFFIX_SEARCH_LIMIT = 50
+
 
 def invoke_qualifier(fn: LambdaConfig) -> str:
     """The qualifier to invoke through — an alias when one is configured, else $LATEST.
@@ -148,14 +152,16 @@ def started_at(execution: dict) -> float:
 
 
 def resolve_execution(client, function_name: str, qualifier: str, execution: str | None = None) -> dict:
-    """Resolve the execution argument — an ARN, a name, a row number, or nothing.
+    """Resolve the execution argument — an ARN, a name, a unique tail of a name, or nothing.
 
-    Names are what you actually have to hand when `run --name` set one; without it the name is a
-    UUID, and the row number from `executions` is the only handle a person can retype. Omitting
-    the argument takes the most recent execution, matching `glue logs` and `sfn logs`.
+    `run --name` gives an execution a name you can retype. Without one Lambda assigns a UUID, so
+    the handle is its tail: `cfd01dc3a122` reaches it, and so does any suffix long enough to be
+    unique. Omitting the argument takes the most recent execution, matching `glue logs` and
+    `sfn logs`.
 
-    A name is tried before a row number, so an execution deliberately named `3` still wins its
-    own digit. That ordering is the whole collision rule.
+    The tail is tried last, after both exact-name paths, so an execution whose full name happens
+    to end another's still wins itself. A tail matching several is an error naming them, never a
+    guess at which one was meant.
 
     A miss falls back to sweeping recent versions before giving up, because the version a name
     ran under is not something you can be expected to know — and after a `deploy --publish` it is
@@ -164,30 +170,41 @@ def resolve_execution(client, function_name: str, qualifier: str, execution: str
         return client.get_durable_execution(DurableExecutionArn=execution)
 
     matches = list_executions(client, function_name, qualifier, limit=1, name=execution)
-    if not matches and execution and execution.isdigit():
-        matches = execution_at_index(client, function_name, qualifier, int(execution))
     if not matches:
         matches, scanned = sweep_executions(client, function_name, limit=1, name=execution)
-        if not matches:
-            scope = f'named {execution}' if execution else f'for {function_name}'
-            error(f'no durable execution {scope} in versions {", ".join(scanned)}')
+        if matches:
+            info(f'found under version {version_of(matches[0])}')
+        elif execution:
+            matches = [execution_by_suffix(client, function_name, execution, scanned)]
+        else:
+            error(f'no durable execution for {function_name} in versions {", ".join(scanned)}')
             raise typer.Exit(1)
-        info(f'found under version {version_of(matches[0])}')
     return client.get_durable_execution(DurableExecutionArn=matches[0]['DurableExecutionArn'])
 
 
-def execution_at_index(client, function_name: str, qualifier: str, index: int) -> list[dict]:
-    """The execution at one row of the `executions` listing, newest first and 1-based.
+def execution_by_suffix(client, function_name: str, suffix: str, scanned: list[str]) -> dict:
+    """The one execution whose name ends with `suffix`, across the versions already swept.
 
-    Returns a list so the caller can treat a row that does not exist the same as a name that
-    matched nothing, rather than branching on a second empty shape."""
-    if index < 1:
-        error(f'execution row {index} is not a row; rows start at 1')
+    Matched on the tail rather than the head because Lambda's generated names are UUIDs: a
+    prefix of one carries the timestamp and little else, while the tail is where the entropy is.
+    Several matches is a usage error listing the candidates — picking the newest would resolve
+    silently to something the caller did not name."""
+    candidates = [
+        found
+        for version in scanned
+        for found in list_executions(client, function_name, version, limit=SUFFIX_SEARCH_LIMIT)
+        if str(found.get('DurableExecutionName', '')).endswith(suffix)
+    ]
+    if not candidates:
+        error(f'no durable execution named {suffix}, or ending in it, in versions {", ".join(scanned)}')
+        error('run `executions --all-versions` to see what is there')
         raise typer.Exit(1)
-    listed = list_executions(client, function_name, qualifier, limit=index)
-    if len(listed) < index:
-        return []
-    return [listed[index - 1]]
+    if len(candidates) > 1:
+        error(f'{suffix} matches {len(candidates)} executions; use more of the name:')
+        for found in sorted(candidates, key=started_at, reverse=True):
+            error(f'  {found.get("DurableExecutionName", "")} ({version_of(found)})')
+        raise typer.Exit(2)
+    return candidates[0]
 
 
 def version_of(execution: dict) -> str:
@@ -219,9 +236,8 @@ def format_duration(start, end) -> str:
     return f'{hours}h{minutes:02d}m' if hours else f'{minutes}m{seconds:02d}s'
 
 
-def execution_to_dict(execution: dict, index: int | None = None) -> dict:
+def execution_to_dict(execution: dict) -> dict:
     return {
-        'index': index,
         'name': execution.get('DurableExecutionName'),
         'status': execution.get('Status'),
         'version': version_of(execution),
@@ -237,19 +253,17 @@ def render_executions_table(alias: str, scope: str, executions: list[dict]) -> N
     scope names what was searched — an alias and the version it resolved to, or the span of a
     sweep — so a short list reads as "this is where I looked" rather than "this is all there is".
 
-    The `#` column is what `history` and `logs` take in place of a name. An execution named by
-    `run --name` is memorable and retypable; the default is a UUID, and nobody transcribes one."""
+    The name folds rather than truncating, because `history` and `logs` accept its tail as a short
+    handle and an ellipsis in the middle of a UUID hides exactly the end you would retype."""
     table = Table(title=f'{alias} durable executions ({scope})')
-    table.add_column('#', justify='right')
-    table.add_column('name')
+    table.add_column('name', overflow='fold')
     table.add_column('status')
     table.add_column('version')
     table.add_column('started')
     table.add_column('duration')
-    for position, execution in enumerate(executions, start=1):
+    for execution in executions:
         started = execution.get('StartTimestamp')
         table.add_row(
-            str(position),
             execution.get('DurableExecutionName', ''),
             colored_status(execution.get('Status', '')),
             version_of(execution),

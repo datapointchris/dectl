@@ -21,8 +21,7 @@ from dectl.durable import resolve_execution
 from dectl.durable import sweep_executions
 from dectl.durable import tail_durable_history
 from dectl.env import render_env_model
-from dectl.logs import DURABLE_NOISE_KEYS
-from dectl.logs import EXECUTION_ARN_KEY
+from dectl.logs import DURABLE_OPERATION_ID_KEYS
 from dectl.logs import tail_lambda_logs
 from dectl.output import console
 from dectl.output import emit_json
@@ -196,7 +195,7 @@ def add_standard_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, conf
 
         fn = resolved()
         logs_client = make_session(config).client('logs')
-        tail_lambda_logs(logs_client, fn.name, follow=follow)
+        tail_lambda_logs(logs_client, fn.name, follow=follow, hide_keys=frozenset())
 
 
 def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, config: DectlConfig, resolved) -> None:
@@ -313,7 +312,7 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
             scope = asked if asked == version else f'{asked} → version {version}'
 
         if as_json:
-            emit_json([execution_to_dict(execution, index) for index, execution in enumerate(found, start=1)])
+            emit_json([execution_to_dict(execution) for execution in found])
             return
         if not found:
             info(f'no durable executions for {fn.name} ({scope})')
@@ -332,7 +331,7 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
     def history(
         execution: Annotated[
             str | None,
-            typer.Argument(help='Execution name, ARN, or a row number from `executions`. Defaults to the most recent.'),
+            typer.Argument(help='Execution name, a unique tail of one, or an ARN. Defaults to the most recent.'),
         ] = None,
         follow: Annotated[bool, typer.Option('--follow', '-f', help='Keep polling while the execution runs.')] = False,
         no_data: Annotated[
@@ -375,7 +374,7 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
     def logs(
         execution: Annotated[
             str | None,
-            typer.Argument(help='Execution name, ARN, or a row number from `executions`. Defaults to the most recent.'),
+            typer.Argument(help='Execution name, a unique tail of one, or an ARN. Defaults to the most recent.'),
         ] = None,
         follow: Annotated[bool, typer.Option('--follow', '-f', help='Keep tailing while the execution runs.')] = False,
         every: Annotated[
@@ -384,7 +383,7 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         ] = False,
         context: Annotated[
             bool,
-            typer.Option('--context', help='Keep the per-record durable fields: execution ARN, operation and request ids.'),
+            typer.Option('--context', help='Keep every field the record carried, including the ones folded away by default.'),
         ] = False,
     ) -> None:
         """Show the function's own logger output for one durable execution.
@@ -405,9 +404,9 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         session = make_session(config)
         logs_client = session.client('logs')
 
-        # Across executions the ARN varies and is worth a line; scoped to one it is the filter.
-        hide_keys = frozenset() if context else DURABLE_NOISE_KEYS
-        scoped_hide_keys = frozenset() if context else DURABLE_NOISE_KEYS | {EXECUTION_ARN_KEY}
+        # tail_lambda_logs adds the execution ARN to this when its filter pattern says the tail is
+        # scoped to one execution, so there is one set here rather than a scoped and unscoped pair.
+        hide_keys = frozenset() if context else DURABLE_OPERATION_ID_KEYS
 
         if every:
             tail_lambda_logs(logs_client, fn.name, follow=follow, hide_keys=hide_keys)
@@ -427,7 +426,7 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
             filter_pattern=f'"{found["DurableExecutionArn"]}"',
             start_time=started - LOG_WINDOW_BUFFER_MS if started else None,
             end_time=ended + LOG_WINDOW_BUFFER_MS if ended else None,
-            hide_keys=scoped_hide_keys,
+            hide_keys=hide_keys,
         )
 
 
