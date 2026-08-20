@@ -136,7 +136,7 @@ def test_lambda_tail_picks_up_events_across_streams():
         }
     )
     with console.capture() as capture:
-        tail_lambda_logs(client, 'my-func', hide_keys=frozenset(), follow=False)
+        tail_lambda_logs(client, 'my-func', hide_keys=frozenset(), fold_scope_fields=False, follow=False)
     output = capture.get()
 
     assert 'warm run' in output
@@ -157,7 +157,7 @@ def test_lambda_tail_does_not_reprint_boundary_events():
     with pytest.MonkeyPatch.context() as monkeypatch, console.capture() as capture:
         monkeypatch.setattr('dectl.logs.time.sleep', stop_sleep)
         with pytest.raises(StopTail):
-            tail_lambda_logs(client, 'my-func', hide_keys=frozenset(), follow=True)
+            tail_lambda_logs(client, 'my-func', hide_keys=frozenset(), fold_scope_fields=False, follow=True)
     output = capture.get()
 
     assert output.count('event-one') == 1
@@ -337,7 +337,16 @@ def test_lambda_tail_scopes_to_one_durable_execution():
     )
 
     with console.capture() as capture:
-        tail_lambda_logs(client, 'my-fn', hide_keys=frozenset(), follow=False, filter_pattern='"arn:exec"', start_time=100, end_time=900)
+        tail_lambda_logs(
+            client,
+            'my-fn',
+            hide_keys=frozenset(),
+            fold_scope_fields=False,
+            follow=False,
+            filter_pattern='"arn:exec"',
+            start_time=100,
+            end_time=900,
+        )
     output = capture.get()
 
     assert 'step ran' in output
@@ -407,11 +416,23 @@ def test_operation_tag_marks_a_retry_and_leaves_the_first_attempt_bare():
 
 
 def test_operation_tag_only_claims_the_keys_it_showed():
-    # What the tag consumed is what render_event suppresses, so a field the tag could not use has
-    # to come back unclaimed or it vanishes from the record entirely.
+    # What the tag consumed is what render_event suppresses, and the claim is read before
+    # hide_keys, so a key claimed without being shown is one no flag can bring back.
     assert operation_tag({'operationName': 'stage', 'attempt': 4})[1] == frozenset({'operationName', 'attempt'})
+    assert operation_tag({'operationName': 'stage', 'attempt': 1})[1] == frozenset({'operationName'})
     assert operation_tag({'operationName': 'stage', 'attempt': 'four'})[1] == frozenset({'operationName'})
     assert operation_tag({'attempt': 4})[1] == frozenset()
+
+
+def test_context_reaches_a_first_attempt():
+    # attempt=1 is folded out of the tag deliberately, so it has to survive as a field or nothing
+    # can show it. --context is what passes an empty hide_keys.
+    record = {'level': 'INFO', 'message': 'first try', 'operationName': 'upload', 'attempt': 1}
+    output = capture_event(json.dumps(record), hide_keys=frozenset())
+
+    assert 'upload' in output
+    assert 'attempt' in output
+    assert '1' in output
 
 
 def test_render_event_keeps_an_attempt_that_has_no_operation_to_belong_to():

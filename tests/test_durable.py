@@ -400,3 +400,27 @@ def test_the_executions_table_does_not_truncate_the_name():
         render_executions_table('fn', 'version 7', [execution('090c4189-b18b-4296-9d0c-cfd01dc3a122')])
 
     assert 'cfd01dc3a122' in capture.get()
+
+
+def test_the_suffix_window_covers_everything_the_listing_can_show():
+    # The two numbers are one number: a tail is typed off a listing, so a row the table can print
+    # and the resolver cannot reach is an ambiguity nobody sees.
+    from dectl.durable import SUFFIX_SEARCH_LIMIT
+
+    listed = [execution(f'run-{index:03d}') for index in range(SUFFIX_SEARCH_LIMIT)]
+    client = FakeLambdaClient(listed, versions=['$LATEST', '7'])
+
+    found = resolve_execution(client, 'fn', '7', f'{SUFFIX_SEARCH_LIMIT - 1:03d}')
+
+    assert found['DurableExecutionName'] == f'run-{SUFFIX_SEARCH_LIMIT - 1:03d}'
+
+
+def test_the_not_found_error_names_the_window_it_searched():
+    client = FakeLambdaClient([execution('order-9')], versions=['$LATEST', '7'])
+
+    with pytest.raises(typer.Exit), console.capture() as capture:
+        resolve_execution(client, 'fn', '7', 'nosuchtail')
+    output = capture.get()
+
+    assert 'searched' in output
+    assert 'named in full' in output

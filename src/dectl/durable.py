@@ -41,8 +41,11 @@ TERMINAL_HISTORY_EVENTS = frozenset({'ExecutionSucceeded', 'ExecutionFailed', 'E
 # function deployed often accumulates one bucket per deploy; the interesting ones are the newest.
 VERSION_SWEEP_DEPTH = 10
 
-# How many executions per version a tail match is looked for in. A tail is typed off a listing the
-# caller just read, so the window only has to cover what that listing could have shown.
+# How many executions per version a tail match is looked for in, and the cap `executions --limit`
+# is held to. The two are one number on purpose: a tail is typed off a listing, so anything the
+# listing can print has to be inside the window the resolver searches. Let them drift and a tail
+# read off a long listing either fails to resolve or, worse, resolves to one of two candidates
+# because the other fell outside the window and the ambiguity was never seen.
 SUFFIX_SEARCH_LIMIT = 50
 
 
@@ -196,8 +199,9 @@ def execution_by_suffix(client, function_name: str, suffix: str, scanned: list[s
         if str(found.get('DurableExecutionName', '')).endswith(suffix)
     ]
     if not candidates:
-        error(f'no durable execution named {suffix}, or ending in it, in versions {", ".join(scanned)}')
-        error('run `executions --all-versions` to see what is there')
+        error(f'no durable execution named {suffix}, or ending in it')
+        error(f'searched the {SUFFIX_SEARCH_LIMIT} most recent on each of versions {", ".join(scanned)}')
+        error('an older execution has to be named in full, or by its ARN')
         raise typer.Exit(1)
     if len(candidates) > 1:
         error(f'{suffix} matches {len(candidates)} executions; use more of the name:')

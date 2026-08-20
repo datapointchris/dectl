@@ -77,20 +77,19 @@ def first_value(data: dict, keys: tuple[str, ...]) -> str:
 def operation_tag(data: dict) -> tuple[str, frozenset[str]]:
     """The operation a durable record came from, and the keys folded into it.
 
-    Returns the tag and the keys it consumed, so the caller suppresses exactly what it showed and
-    a field the tag could not use still prints. `attempt` alone has no operation to belong to, and
-    a non-integer one cannot be compared, so both fall through to the ordinary field rendering
-    rather than vanishing."""
+    Returns the tag and the keys it rendered, never a key it merely read. Claiming one it did not
+    show would suppress a field nothing can bring back, since the claim is consulted before
+    hide_keys and no flag reaches past it.
+
+    So a first attempt, a non-integer attempt, and an attempt with no operation to belong to all
+    fall through to the ordinary field rendering. Only a retry is folded, because only a retry
+    changes how the line reads."""
     name = data.get('operationName')
     if not name:
         return '', frozenset()
     attempt = data.get('attempt')
-    # A first attempt is the ordinary case and spends a column saying nothing; a later one is the
-    # case where knowing which attempt spoke changes how the line reads.
     if isinstance(attempt, int) and attempt > 1:
         return f'{name}.{attempt}', frozenset({'operationName', 'attempt'})
-    if isinstance(attempt, int):
-        return str(name), frozenset({'operationName', 'attempt'})
     return str(name), frozenset({'operationName'})
 
 
@@ -374,6 +373,7 @@ def tail_lambda_logs(
     logs_client,
     function_name: str,
     hide_keys: frozenset[str],
+    fold_scope_fields: bool,
     follow: bool = True,
     filter_pattern: str = '',
     start_time: int | None = None,
@@ -384,10 +384,13 @@ def tail_lambda_logs(
     filter_pattern / start_time / end_time narrow the tail to one durable execution's records;
     left at their defaults the whole group is followed from the current invocation onwards.
 
-    A non-empty filter_pattern is what makes a tail scoped to one execution, so the execution ARN
-    is added to hide_keys here rather than at each call site: the fact that decides it already
-    lives in this function, and a caller computing it a second time can get it wrong invisibly."""
-    if filter_pattern and hide_keys:
+    Two conditions decide whether the execution ARN is worth a line, and both are needed. A
+    non-empty filter_pattern says the tail is scoped to one execution, which is what makes the ARN
+    constant — that fact lives here, so the ARN is added here rather than recomputed per caller.
+    fold_scope_fields says the caller wants folding at all, and it is a parameter rather than an
+    empty hide_keys because emptiness already means "this caller has nothing to suppress" for
+    glue and the non-durable logs."""
+    if filter_pattern and fold_scope_fields:
         hide_keys = hide_keys | {EXECUTION_ARN_KEY}
     log_group = f'/aws/lambda/{function_name}'
     info(f'tailing {log_group}')

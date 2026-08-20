@@ -138,11 +138,16 @@ first, so an execution whose name ends another's still wins itself, and a tail m
 is an error listing them rather than a guess at which was meant. The tail rather than the head
 because a UUID front-loads its timestamp, so a prefix carries almost no entropy.
 
+The search covers the same number of executions per version that `executions --limit` is capped
+at, so anything the table can print is something a tail can reach. An execution older than that
+has to be named in full, or by its ARN.
+
 **The opaque operation ids are folded away.** `logs` prints the operation as a tag beside the
 level — `wait_for_files`, or `wait_for_files.3` on a retry — and hides the two ids that identify
 it to the service, along with the execution ARN the tail is already filtered on. Everything else
-stays, including `requestId`, which says which invocation of the execution spoke. `--context`
-restores the lot. Fields your own `extra=` put there are never dropped.
+stays, including `requestId`, which says which invocation of the execution spoke, and `attempt`
+on a first try. `--context` restores the lot. Fields your own `extra=` put there are never
+dropped.
 
 `run` is qualified with the configured `live_alias` (falling back to `$LATEST`) — Lambda rejects
 an unqualified invoke of a durable function outright, since an execution is pinned to the

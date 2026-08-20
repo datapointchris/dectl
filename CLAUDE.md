@@ -214,8 +214,16 @@ and an eval'd `s3 export` stay clean.
   and only `DURABLE_OPERATION_ID_KEYS`. `requestId` is deliberately not in it — one execution spans
   many invocations, so it varies across a scoped tail. `tail_lambda_logs` adds `EXECUTION_ARN_KEY`
   itself when its filter pattern says the tail is scoped, because that is the fact that decides it
-  and a caller recomputing it can get it wrong invisibly. `operation_tag` returns the keys it
-  folded, so a field it could not use still prints.
+  and a caller recomputing it can get it wrong invisibly. Whether folding was wanted at all is
+  `fold_scope_fields`, a parameter rather than an empty `hide_keys`, because emptiness already
+  means "this caller has nothing to suppress" for glue and the non-durable `logs`.
+- **`operation_tag` returns the keys it *rendered*, never one it merely read** — the claim is
+  consulted before `hide_keys`, so a key claimed without being shown is one no flag can bring
+  back. That was live for `attempt: 1`: folded out of the tag deliberately, claimed anyway, and
+  unreachable even with `--context`. Only a retry is folded.
+- **`SUFFIX_SEARCH_LIMIT` is both the tail search window and the cap on `executions --limit`** —
+  one number on purpose. A tail is typed off a listing, so a row the table can print and the
+  resolver cannot reach is an ambiguity that resolves silently to whichever candidate fell inside.
 - **Invoking and listing need *different* qualifiers, which is why there are two functions** —
   `invoke_qualifier` returns the alias (Lambda rejects an unqualified invoke of a durable
   function, and an alias is the right thing to send since it resolves to whatever is live).

@@ -9,6 +9,7 @@ import typer
 from dectl.config import DectlConfig
 from dectl.config import LambdaConfig
 from dectl.durable import EXECUTION_STATUSES
+from dectl.durable import SUFFIX_SEARCH_LIMIT
 from dectl.durable import epoch_millis
 from dectl.durable import execution_to_dict
 from dectl.durable import fetch_history
@@ -195,7 +196,7 @@ def add_standard_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, conf
 
         fn = resolved()
         logs_client = make_session(config).client('logs')
-        tail_lambda_logs(logs_client, fn.name, follow=follow, hide_keys=frozenset())
+        tail_lambda_logs(logs_client, fn.name, hide_keys=frozenset(), fold_scope_fields=False, follow=follow)
 
 
 def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, config: DectlConfig, resolved) -> None:
@@ -278,7 +279,15 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
             str | None,
             typer.Option('--status', help=f'Only executions in this state: {", ".join(EXECUTION_STATUSES)}.'),
         ] = None,
-        limit: Annotated[int, typer.Option('--limit', '-n', help='Number of executions to show.')] = 10,
+        limit: Annotated[
+            int,
+            typer.Option(
+                '--limit',
+                '-n',
+                max=SUFFIX_SEARCH_LIMIT,
+                help=f'Number of executions to show, at most {SUFFIX_SEARCH_LIMIT} — the window a name tail resolves within.',
+            ),
+        ] = 10,
         qualifier: Annotated[
             str | None,
             typer.Option('--qualifier', help='Version, $LATEST, or an alias to resolve. Defaults to the configured live alias.'),
@@ -404,12 +413,13 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         session = make_session(config)
         logs_client = session.client('logs')
 
-        # tail_lambda_logs adds the execution ARN to this when its filter pattern says the tail is
-        # scoped to one execution, so there is one set here rather than a scoped and unscoped pair.
+        # tail_lambda_logs adds the execution ARN when its filter pattern says the tail is scoped
+        # to one execution and fold_scope_fields says folding was wanted; --context turns both the
+        # field set and the folding off, so nothing here computes a scoped variant.
         hide_keys = frozenset() if context else DURABLE_OPERATION_ID_KEYS
 
         if every:
-            tail_lambda_logs(logs_client, fn.name, follow=follow, hide_keys=hide_keys)
+            tail_lambda_logs(logs_client, fn.name, hide_keys=hide_keys, fold_scope_fields=False, follow=follow)
             return
 
         lambda_client = session.client('lambda')
@@ -427,6 +437,7 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
             start_time=started - LOG_WINDOW_BUFFER_MS if started else None,
             end_time=ended + LOG_WINDOW_BUFFER_MS if ended else None,
             hide_keys=hide_keys,
+            fold_scope_fields=not context,
         )
 
 
