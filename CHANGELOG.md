@@ -1,6 +1,240 @@
 # CHANGELOG
 
 
+## v2.7.0 (2026-08-20)
+
+### Bug Fixes
+
+- **durable**: Address an execution by a unique tail of its name, not a row
+  ([`28c9e96`](https://github.com/datapointchris/dectl/commit/28c9e964509fd96de519cc917efe70dbc368b674))
+
+A row number is a property of one rendering, not of the execution, so it was only valid for the
+  exact query that printed it. executions narrows by --status, --qualifier and --all-versions while
+  history and logs always resolved against the live version unfiltered, so the same digit named a
+  different execution and resolved silently. cli-design.md 'A UUID-keyed resource needs a short
+  handle of its own' prescribes the tail of the name: it survives a deploy --publish, cannot be
+  shadowed by a listing, and lands in the existing name path. Ambiguity errors listing the
+  candidates.
+
+hide_keys loses its default. Suppression reached render_merged and the non-durable logs, neither of
+  which asked for it and neither of which has --context, so glue and monitor silently lost requestId
+  and logger. requestId leaves the suppressed set outright: one execution spans many invocations, so
+  it varies across a scoped tail and says which one spoke. tail_lambda_logs now adds the execution
+  ARN itself, since its filter pattern is the fact that decides whether a tail is scoped.
+
+operation_tag returns the keys it folded, so attempt without an operationName, or a non-integer
+  attempt, prints as an ordinary field instead of vanishing where --context could not reach it.
+
+The fake now filters on Statuses, which is what made the wrong-listing case expressible.
+
+- **durable**: Let --context reach a first attempt and bound the tail search
+  ([`45f9499`](https://github.com/datapointchris/dectl/commit/45f9499da491890bfac2926ef37999bc5a5a6329))
+
+operation_tag claimed 'attempt' for every integer value while rendering it only past the first, and
+  the claim is read before hide_keys, so attempt=1 was folded out of the tag and unreachable by any
+  flag. It now claims only what it rendered, so a first attempt prints as an ordinary field and the
+  three neighbouring values behave alike.
+
+The tail search window and executions --limit were independent numbers, so past fifty executions a
+  tail either failed to resolve or resolved to one of two candidates because the other fell outside
+  the window and the ambiguity was never seen. --limit is capped at SUFFIX_SEARCH_LIMIT, which makes
+  'anything the listing prints, a tail can reach' true by construction.
+
+The not-found error named --all-versions, which rescans the versions the failed lookup already
+  covered. It now says how far the search reached and that an older execution needs its full name or
+  its ARN.
+
+Whether to fold the execution ARN is fold_scope_fields rather than a non-empty hide_keys, which was
+  carrying two unrelated meanings.
+
+### Build System
+
+- **precommit**: Resync to forge toolchain 14
+  ([`6a9d42a`](https://github.com/datapointchris/dectl/commit/6a9d42a94a6a484f5c87b83bc6704dec32b4ae2e))
+
+### Chores
+
+- **pyproject**: Raise assertion verbosity instead of test verbosity
+  ([`9604160`](https://github.com/datapointchris/dectl/commit/9604160155081fa3032cd48b96845a7f39c2d75a))
+
+A failing assertion truncated its diff and printed "use -vv to show", so the reader re-ran the whole
+  suite to see it. addopts = "-vv" answered that by raising test-list verbosity as well, which is a
+  different question: a green run printed a line per test and said nothing. verbosity_assertions
+  raises only the half that was wanted.
+
+Written by the forge pyproject die.
+
+### Continuous Integration
+
+- Regenerate validate.yml at toolchain 16
+  ([`144650f`](https://github.com/datapointchris/dectl/commit/144650fea350f646b2ab44effb7a1b7c410368b2))
+
+Catches this repo up with the version manifest: StyLua pinned to a release rather than latest, a
+  reworded bats discovery note, and double quotes in the node block. Only the blocks this repo
+  declares are affected.
+
+Triggers and job structure are unchanged.
+
+### Documentation
+
+- Cite the standards without a machine path
+  ([`3968e7d`](https://github.com/datapointchris/dectl/commit/3968e7d0c771c6d334147f44874f9e7a3199d2b4))
+
+The citation carried an absolute path from one machine's layout. What a reader needs is the file and
+  the section, and those do not move.
+
+### Features
+
+- **durable**: Fold repeated context out of logs and number execution rows
+  ([`bce5797`](https://github.com/datapointchris/dectl/commit/bce57971415fea86a7223c4036c2cfbc67d5e22c))
+
+Scoped to one execution, every record carries the same executionArn, operationId, parentId and
+  requestId. Expanded as fields they cost eight lines per message, so six messages filled a screen
+  and the messages themselves were the minority of it. render_event now takes hide_keys and folds
+  operationName/attempt into a tag beside the level; --context keeps the full record, and --all
+  keeps the ARN because across executions it varies. Suppression is a named list, so a handler's own
+  extra= survives.
+
+Without run --name an execution is named by a UUID, leaving nothing in the executions table a person
+  can retype. The table numbers its rows and history/logs accept that number, trying a name first so
+  an execution named 3 still wins its own digit. --json carries the same index.
+
+- **durable**: Fold repeated context out of logs and resolve by name tail
+  ([#1](https://github.com/datapointchris/dectl/pull/1),
+  [`674c223`](https://github.com/datapointchris/dectl/commit/674c223df8136334a03b4935e2be331407a0bb7b))
+
+Reading one durable execution's logs meant scrolling past the same opaque ids on every record, and
+  reaching a different execution meant transcribing a UUID. This folds the ids into a tag and makes
+  any unique tail of an execution's name resolve to it.
+
+## What to look at
+
+`bce5797`, then `28c9e96`, then `45f9499`. The later two rework the first after review, so read them
+  as the design and `bce5797` only for what it moved.
+
+- `src/dectl/durable.py` — `resolve_execution` tries an ARN, then the exact name, then the same name
+  across a version sweep, and only then a tail. Check that ordering is what keeps an execution whose
+  name ends another's resolving to itself, and that `execution_by_suffix` errors with candidates
+  rather than picking one. - `src/dectl/logs.py` — `render_event` and `tail_lambda_logs` take
+  `hide_keys` with no default. Check every caller passes one deliberately, and that
+  `tail_lambda_logs` is the only place the execution ARN is added. - `src/dectl/logs.py` —
+  `operation_tag` returns the keys it *rendered*, never one it merely read. Check that a first
+  attempt, a non-integer attempt, and an attempt with no operation all still print, since the claim
+  is consulted before `hide_keys` and nothing reaches past it. - `tests/test_durable.py` — the fake
+  now filters on `Statuses`. That filter is what made the wrong-listing case expressible at all.
+
+## How it was verified
+
+`uv run pytest -q` — 164 passed, 6 skipped. `uv run ruff check .`, `uv run ruff format --check .`
+  (38 files), `uv run mypy . --install-types --non-interactive` (38 source files) all clean.
+
+The two rendering regressions the reviews measured were re-run against the fix. A record with
+  `requestId`, `logger` and a caller's own field through `render_merged` returns all three.
+  `{'level':'WARN','message':'retrying upload','attempt':4}` returns `attempt: 4` where it
+  previously vanished.
+
+`test_glue_and_monitor_records_keep_every_field` points at `render_merged`, the caller that violated
+  the invariant, rather than at `render_event` with an obeying argument.
+  `test_an_ambiguous_tail_is_a_usage_error_naming_the_candidates` asserts exit code 2 and both
+  candidate names.
+
+## What changes
+
+`logs` on a durable function hides two fields — `operationId` and `parentId` — plus the execution
+  ARN when the tail is scoped to one execution. The operation appears as a tag beside the level:
+  `wait_for_files`, or `wait_for_files.3` on a retry. `attempt` is folded only on a retry, where it
+  shows as `.4`; a first attempt prints as an ordinary field. `--context` restores everything.
+
+`requestId` and `logger` are not hidden. One execution spans many invocations, so `requestId` varies
+  across a scoped tail and says which invocation spoke.
+
+`glue logs`, `monitor` and the non-durable `lambda logs` are unchanged. They pass an empty
+  suppression set explicitly.
+
+`history` and `logs` accept any unique tail of an execution's name alongside the full name and the
+  ARN. An ambiguous tail exits 2 listing the candidates. The `executions` table folds long names
+  instead of truncating them, so the tail stays visible.
+
+`executions --json` is unchanged from `main`.
+
+## Decisions, and what they rejected
+
+- **The tail of the name, not a row number** — `cli-design.md` § "A UUID-keyed resource needs a
+  short handle of its own" prescribes a server-assigned integer, which AWS does not give, and names
+  suffix resolution as the fallback. A row number shipped in `bce5797` and is reverted here: a
+  position is only valid for the query that produced it, so `--status`, `--qualifier` and
+  `--all-versions` each made the same digit name a different execution with nothing on screen to say
+  so. - **The tail rather than the head** — a UUID front-loads its timestamp, so a prefix of one
+  carries almost no entropy. - **Ambiguity errors rather than picking the newest** — resolving
+  silently to something the caller did not name is the failure the handle exists to prevent. - **No
+  default for `hide_keys`** — a suppressed field leaves a record that still reads as complete, so a
+  wrong default is invisible. Rejected keeping a default scoped to durable callers: the same
+  constant was already reaching three callers that had never asked for it. - **`tail_lambda_logs`
+  adds the execution ARN, gated on `fold_scope_fields`** — a non-empty filter pattern is what makes
+  a tail scoped, and that fact already lives there. Rejected a scoped and unscoped pair at the call
+  site, which differed by one element two lines apart. Rejected inferring "folding was wanted" from
+  a non-empty `hide_keys`, because emptiness already means "nothing to suppress" for glue and the
+  non-durable `logs`. - **One number for the tail window and the `--limit` cap** — a tail is typed
+  off a listing, so letting them drift means a row the table prints that the resolver cannot reach,
+  which surfaces as a silent wrong answer rather than an error.
+
+## Risk and rollback
+
+Nothing deploys. `45f9499` reverts cleanly on its own. `28c9e96` does not — reverting it restores
+  the row-number handle along with the rendering regressions it fixed.
+
+## What this does not do
+
+No `choose` verb. `sfn` and `glue` rendering is untouched. An execution older than
+  `SUFFIX_SEARCH_LIMIT` on its version cannot be reached by a tail and needs its full name or ARN;
+  `executions --limit` is capped at the same number so nothing the listing shows falls outside it.
+
+## The review
+
+Three reviews, converging on the same structural finding.
+
+[#pullrequestreview-4985245757](https://github.com/datapointchris/dectl/pull/1#pullrequestreview-4985245757)
+  — 5 correctness, 5 breaks, 1 rule proposed, 2 design.
+
+[#pullrequestreview-4985245991](https://github.com/datapointchris/dectl/pull/1#pullrequestreview-4985245991)
+  — 6 correctness, 5 breaks, 1 rule proposed, 2 design.
+
+[#pullrequestreview-4985267929](https://github.com/datapointchris/dectl/pull/1#pullrequestreview-4985267929)
+  — 4 correctness, 7 breaks, 0 rules proposed, 2 design.
+
+1. fixed — the row-number handle is replaced by name-suffix resolution, which dissolves the
+  wrong-listing resolution, the post-`deploy --publish` shadowing, the exit-code and `isdigit`
+  findings, the triple computation of the index, the unreachable `execution_to_dict` default, and
+  the one-concept-four-words finding. `28c9e96` 2. fixed — `hide_keys` loses its default;
+  `render_merged` and the non-durable `logs` pass `frozenset()`. `28c9e96` 3. fixed — `requestId`
+  leaves the suppressed set. It varies across a scoped tail because an execution spans many
+  invocations. `28c9e96` 4. fixed — `operation_tag` returns the keys it consumed, so `attempt`
+  without an `operationName` and a non-integer `attempt` both print. `28c9e96` 5. fixed — the fake
+  filters on `Statuses`. `28c9e96` 6. fixed — the test that passed with the `#` column deleted is
+  gone with the column; the table is now asserted on the tail staying visible. `28c9e96` 7. fixed —
+  the prose names `DURABLE_OPERATION_ID_KEYS` and stops enumerating it; `--context` help states the
+  rule rather than the members. `28c9e96` 8. accepted, not done — splitting `bce5797` into two
+  commits so the rendering and the handle revert apart. Doing it now means rewriting a commit that
+  three reviews are anchored to, and `28c9e96` already isolates the handle change on its own.
+
+### Second round, on `28c9e96`
+
+[#pullrequestreview-4985949874](https://github.com/datapointchris/dectl/pull/1#pullrequestreview-4985949874)
+  — 2 correctness, 2 breaks, 0 rules proposed, 1 design. Nineteen of the first round's 24 findings
+  verified closed.
+
+9. fixed — `operation_tag` claims only the keys it rendered, so `attempt: 1` prints as a field and
+  `--context` reaches it. `45f9499` 10. fixed — `executions --limit` is capped at
+  `SUFFIX_SEARCH_LIMIT`, so every row the listing prints is inside the window a tail resolves
+  within. The silent-ambiguity half is closed by construction. `45f9499` 11. fixed — the not-found
+  error says how far the search reached and that an older execution needs its full name or ARN,
+  instead of naming `--all-versions`, which rescans the same span. `45f9499` 12. fixed —
+  `test_operation_tag_only_claims_the_keys_it_showed` now asserts the `attempt: 1` case its name
+  promised, and `test_context_reaches_a_first_attempt` renders it. `45f9499` 13. fixed — folding is
+  `fold_scope_fields`, a parameter, rather than inferred from a non-empty `hide_keys` that was
+  carrying two meanings. `45f9499`
+
+
 ## v2.6.0 (2026-08-08)
 
 ### Continuous Integration
@@ -24,7 +258,7 @@ The Glue job-definition update went straight to typer.confirm, so a Jenkins step
   no exit code.
 
 confirm_or_exit gates on can_prompt() and otherwise fails naming --yes. --no-input forces that path
-  from a terminal, per the interactivity rule in standards/cli-design.md.
+  from a terminal, per the interactivity rule in ~/dev/standards/cli-design.md.
 
 The gate lives in its own module holding per-invocation state set from the root callback, the shape
   env.py already uses for --env, so a verb deep in the tree can ask without threading the flag
