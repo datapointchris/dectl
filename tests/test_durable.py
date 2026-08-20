@@ -7,12 +7,15 @@ from botocore.exceptions import ClientError
 
 from dectl.config import LambdaConfig
 from dectl.durable import epoch_millis
+from dectl.durable import execution_by_suffix
+from dectl.durable import execution_to_dict
 from dectl.durable import format_duration
 from dectl.durable import invoke_qualifier
 from dectl.durable import listing_qualifier
 from dectl.durable import recent_versions
 from dectl.durable import render_durable_event
 from dectl.durable import render_execution_header
+from dectl.durable import render_executions_table
 from dectl.durable import resolve_execution
 from dectl.durable import sweep_executions
 from dectl.durable import tail_durable_history
@@ -62,6 +65,10 @@ class FakeLambdaClient:
         matches = [e for e in self.executions if version_of(e) == qualifier]
         if kwargs.get('DurableExecutionName'):
             matches = [e for e in matches if e['DurableExecutionName'] == kwargs['DurableExecutionName']]
+        # The service narrows on Statuses too. Ignoring it here made a listing's scope
+        # unexpressible, which is what hid a resolver reading one listing and consuming another.
+        if kwargs.get('Statuses'):
+            matches = [e for e in matches if e.get('Status') in kwargs['Statuses']]
         return {'DurableExecutions': matches[: kwargs.get('MaxItems', 100)]}
 
     def get_durable_execution(self, **kwargs) -> dict:
@@ -318,3 +325,102 @@ def test_tail_durable_history_follows_pagination():
     assert 'ExecutionStarted' in output
     assert 'ExecutionSucceeded' in output
     assert client.history_calls[1]['Marker'] == 'more'
+
+
+def test_resolve_execution_takes_a_unique_tail_of_the_name():
+    # Lambda names an unnamed execution with a UUID; its tail is the only part anyone retypes.
+    client = FakeLambdaClient(
+        [execution('090c4189-b18b-4296-9d0c-cfd01dc3a122'), execution('7f2a9c31-4d5e-4a1b-9c8d-2e3f4a5b6c7d')],
+        versions=['$LATEST', '7'],
+    )
+
+    found = resolve_execution(client, 'fn', '7', 'cfd01dc3a122')
+
+    assert found['DurableExecutionName'] == '090c4189-b18b-4296-9d0c-cfd01dc3a122'
+
+
+def test_resolve_execution_prefers_a_whole_name_over_a_tail_of_another():
+    # 'run-7' is both a name and the tail of 'nightly-run-7'. The exact name wins itself.
+    client = FakeLambdaClient([execution('nightly-run-7'), execution('run-7')], versions=['$LATEST', '7'])
+
+    found = resolve_execution(client, 'fn', '7', 'run-7')
+
+    assert found['DurableExecutionName'] == 'run-7'
+
+
+def test_resolve_execution_finds_a_tail_under_an_older_version():
+    # The tail is typed off `executions --all-versions`, so it has to resolve past the live one.
+    client = FakeLambdaClient([execution('090c4189-b18b-4296-9d0c-cfd01dc3a122', version='6')], versions=['$LATEST', '6', '7'])
+
+    found = resolve_execution(client, 'fn', '7', 'cfd01dc3a122')
+
+    assert found['DurableExecutionName'] == '090c4189-b18b-4296-9d0c-cfd01dc3a122'
+
+
+def test_an_ambiguous_tail_is_a_usage_error_naming_the_candidates():
+    # Picking the newest would resolve silently to something the caller did not name.
+    client = FakeLambdaClient([execution('batch-alpha-99'), execution('batch-beta-99')], versions=['$LATEST', '7'])
+
+    with pytest.raises(typer.Exit) as raised, console.capture() as capture:
+        resolve_execution(client, 'fn', '7', '99')
+
+    assert raised.value.exit_code == 2
+    output = capture.get()
+    assert 'batch-alpha-99' in output
+    assert 'batch-beta-99' in output
+
+
+def test_a_tail_matching_nothing_exits_naming_the_versions_searched():
+    client = FakeLambdaClient([execution('order-9')], versions=['$LATEST', '7'])
+
+    with pytest.raises(typer.Exit) as raised:
+        resolve_execution(client, 'fn', '7', 'nosuchtail')
+
+    assert raised.value.exit_code == 1
+
+
+def test_execution_by_suffix_matches_the_tail_not_the_head():
+    # A UUID's head is its timestamp, so a prefix carries almost no entropy.
+    client = FakeLambdaClient([execution('090c4189-b18b-4296-9d0c-cfd01dc3a122')], versions=['$LATEST', '7'])
+
+    found = execution_by_suffix(client, 'fn', 'cfd01dc3a122', ['7'])
+
+    assert found['DurableExecutionName'] == '090c4189-b18b-4296-9d0c-cfd01dc3a122'
+
+
+def test_execution_to_dict_has_no_positional_handle():
+    # The handle is the name, which every row already carries; a row number would be a property of
+    # the listing rather than of the execution.
+    assert 'index' not in execution_to_dict(execution('order-9'))
+
+
+def test_the_executions_table_does_not_truncate_the_name():
+    # The tail is the handle, and an ellipsis in the middle of a UUID hides exactly that.
+    with console.capture() as capture:
+        render_executions_table('fn', 'version 7', [execution('090c4189-b18b-4296-9d0c-cfd01dc3a122')])
+
+    assert 'cfd01dc3a122' in capture.get()
+
+
+def test_the_suffix_window_covers_everything_the_listing_can_show():
+    # The two numbers are one number: a tail is typed off a listing, so a row the table can print
+    # and the resolver cannot reach is an ambiguity nobody sees.
+    from dectl.durable import SUFFIX_SEARCH_LIMIT
+
+    listed = [execution(f'run-{index:03d}') for index in range(SUFFIX_SEARCH_LIMIT)]
+    client = FakeLambdaClient(listed, versions=['$LATEST', '7'])
+
+    found = resolve_execution(client, 'fn', '7', f'{SUFFIX_SEARCH_LIMIT - 1:03d}')
+
+    assert found['DurableExecutionName'] == f'run-{SUFFIX_SEARCH_LIMIT - 1:03d}'
+
+
+def test_the_not_found_error_names_the_window_it_searched():
+    client = FakeLambdaClient([execution('order-9')], versions=['$LATEST', '7'])
+
+    with pytest.raises(typer.Exit), console.capture() as capture:
+        resolve_execution(client, 'fn', '7', 'nosuchtail')
+    output = capture.get()
+
+    assert 'searched' in output
+    assert 'named in full' in output

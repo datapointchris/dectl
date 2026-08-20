@@ -201,6 +201,29 @@ and an eval'd `s3 export` stay clean.
   CloudWatch filtered on the execution ARN that the SDK logger stamps onto every record. Note the
   two Error shapes — `GetDurableExecution` returns `Error` unwrapped, history events wrap it in a
   `Payload`/`Truncated` envelope.
+- **The handle is the name's tail, never a row number** — `cli-design.md` § "A UUID-keyed resource
+  needs a short handle of its own": AWS assigns no short id, so `resolve_execution` accepts any
+  unique suffix of `DurableExecutionName`, tried after both exact-name paths and erroring with the
+  candidates when several match. A row number was built first and reverted: a position is only
+  valid for the exact query that produced it, so `--status`, `--qualifier` and `--all-versions`
+  each made the same digit name a different execution, silently. The table folds the name rather
+  than truncating it, because an ellipsis mid-UUID hides the tail you would retype.
+- **`render_event` takes `hide_keys` with no default, and the reason is the failure mode** — a
+  suppressed field leaves a record that still reads as complete, so a wrong default is invisible.
+  Glue, `monitor` and the non-durable `logs` pass `frozenset()`; only the durable `logs` suppresses,
+  and only `DURABLE_OPERATION_ID_KEYS`. `requestId` is deliberately not in it — one execution spans
+  many invocations, so it varies across a scoped tail. `tail_lambda_logs` adds `EXECUTION_ARN_KEY`
+  itself when its filter pattern says the tail is scoped, because that is the fact that decides it
+  and a caller recomputing it can get it wrong invisibly. Whether folding was wanted at all is
+  `fold_scope_fields`, a parameter rather than an empty `hide_keys`, because emptiness already
+  means "this caller has nothing to suppress" for glue and the non-durable `logs`.
+- **`operation_tag` returns the keys it *rendered*, never one it merely read** — the claim is
+  consulted before `hide_keys`, so a key claimed without being shown is one no flag can bring
+  back. That was live for `attempt: 1`: folded out of the tag deliberately, claimed anyway, and
+  unreachable even with `--context`. Only a retry is folded.
+- **`SUFFIX_SEARCH_LIMIT` is both the tail search window and the cap on `executions --limit`** —
+  one number on purpose. A tail is typed off a listing, so a row the table can print and the
+  resolver cannot reach is an ambiguity that resolves silently to whichever candidate fell inside.
 - **Invoking and listing need *different* qualifiers, which is why there are two functions** —
   `invoke_qualifier` returns the alias (Lambda rejects an unqualified invoke of a durable
   function, and an alias is the right thing to send since it resolves to whatever is live).

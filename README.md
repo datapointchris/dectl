@@ -120,6 +120,7 @@ dectl salesdata lambda order-workflow history                    # steps/waits/r
 dectl salesdata lambda order-workflow history order-123 --follow
 dectl salesdata lambda order-workflow logs                       # logger output for the latest
 dectl salesdata lambda order-workflow logs order-123             # ...or for one named execution
+dectl salesdata lambda order-workflow logs 3                     # ...or the third row of `executions`
 dectl salesdata lambda order-workflow run --async --name order-123
 ```
 
@@ -129,6 +130,24 @@ suspended for — while `logs` is what the function's own logger printed while d
 logger stamps the execution ARN onto every record, and `logs` filters the group on it, so a log
 group carrying dozens of interleaved executions reads back as just the one. `--all` opts back
 out to the raw group.
+
+**Both take a unique tail of the name.** Without `run --name` an execution is named by a UUID,
+which is not something anyone retypes, so `history` and `logs` accept any suffix long enough to
+be unique — `logs cfd01dc3a122`, or fewer characters when fewer will do. The whole name is tried
+first, so an execution whose name ends another's still wins itself, and a tail matching several
+is an error listing them rather than a guess at which was meant. The tail rather than the head
+because a UUID front-loads its timestamp, so a prefix carries almost no entropy.
+
+The search covers the same number of executions per version that `executions --limit` is capped
+at, so anything the table can print is something a tail can reach. An execution older than that
+has to be named in full, or by its ARN.
+
+**The opaque operation ids are folded away.** `logs` prints the operation as a tag beside the
+level — `wait_for_files`, or `wait_for_files.3` on a retry — and hides the two ids that identify
+it to the service, along with the execution ARN the tail is already filtered on. Everything else
+stays, including `requestId`, which says which invocation of the execution spoke, and `attempt`
+on a first try. `--context` restores the lot. Fields your own `extra=` put there are never
+dropped.
 
 `run` is qualified with the configured `live_alias` (falling back to `$LATEST`) — Lambda rejects
 an unqualified invoke of a durable function outright, since an execution is pinned to the

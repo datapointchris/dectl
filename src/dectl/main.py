@@ -147,7 +147,7 @@ REFERENCE_DURABLE_VERBS = [
     '               run [--payload-file F|-] [--async] [--name N] [--follow] [--json]',
     '               executions [--status S] [--limit N] [--qualifier Q] [--all-versions] [--json]',
     '               history [EXECUTION] [--follow] [--no-data] [--json]',
-    '               logs [EXECUTION] [--follow] [--all]',
+    '               logs [EXECUTION] [--follow] [--all] [--context]',
 ]
 REFERENCE_SET_VERBS = [
     's3 export [--prefix STR]',

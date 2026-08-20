@@ -9,6 +9,7 @@ import typer
 from dectl.config import DectlConfig
 from dectl.config import LambdaConfig
 from dectl.durable import EXECUTION_STATUSES
+from dectl.durable import SUFFIX_SEARCH_LIMIT
 from dectl.durable import epoch_millis
 from dectl.durable import execution_to_dict
 from dectl.durable import fetch_history
@@ -21,6 +22,7 @@ from dectl.durable import resolve_execution
 from dectl.durable import sweep_executions
 from dectl.durable import tail_durable_history
 from dectl.env import render_env_model
+from dectl.logs import DURABLE_OPERATION_ID_KEYS
 from dectl.logs import tail_lambda_logs
 from dectl.output import console
 from dectl.output import emit_json
@@ -194,7 +196,7 @@ def add_standard_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, conf
 
         fn = resolved()
         logs_client = make_session(config).client('logs')
-        tail_lambda_logs(logs_client, fn.name, follow=follow)
+        tail_lambda_logs(logs_client, fn.name, hide_keys=frozenset(), fold_scope_fields=False, follow=follow)
 
 
 def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, config: DectlConfig, resolved) -> None:
@@ -277,7 +279,15 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
             str | None,
             typer.Option('--status', help=f'Only executions in this state: {", ".join(EXECUTION_STATUSES)}.'),
         ] = None,
-        limit: Annotated[int, typer.Option('--limit', '-n', help='Number of executions to show.')] = 10,
+        limit: Annotated[
+            int,
+            typer.Option(
+                '--limit',
+                '-n',
+                max=SUFFIX_SEARCH_LIMIT,
+                help=f'Number of executions to show, at most {SUFFIX_SEARCH_LIMIT} — the window a name tail resolves within.',
+            ),
+        ] = 10,
         qualifier: Annotated[
             str | None,
             typer.Option('--qualifier', help='Version, $LATEST, or an alias to resolve. Defaults to the configured live alias.'),
@@ -330,7 +340,7 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
     def history(
         execution: Annotated[
             str | None,
-            typer.Argument(help='Execution name or ARN. Defaults to the most recent execution.'),
+            typer.Argument(help='Execution name, a unique tail of one, or an ARN. Defaults to the most recent.'),
         ] = None,
         follow: Annotated[bool, typer.Option('--follow', '-f', help='Keep polling while the execution runs.')] = False,
         no_data: Annotated[
@@ -373,12 +383,16 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
     def logs(
         execution: Annotated[
             str | None,
-            typer.Argument(help='Execution name or ARN. Defaults to the most recent execution.'),
+            typer.Argument(help='Execution name, a unique tail of one, or an ARN. Defaults to the most recent.'),
         ] = None,
         follow: Annotated[bool, typer.Option('--follow', '-f', help='Keep tailing while the execution runs.')] = False,
         every: Annotated[
             bool,
             typer.Option('--all', help='Tail the raw log group instead, across every execution.'),
+        ] = False,
+        context: Annotated[
+            bool,
+            typer.Option('--context', help='Keep every field the record carried, including the ones folded away by default.'),
         ] = False,
     ) -> None:
         """Show the function's own logger output for one durable execution.
@@ -388,6 +402,10 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         dozens of interleaved executions reads back as just this one. Platform START/END/REPORT
         lines carry no ARN and are excluded with everything else; the checkpointed step
         transitions are in `history`, not here.
+
+        Those same stamped fields are identical on every line of a scoped tail, so they are
+        folded away: the operation shows as a tag beside the level, and the rest is behind
+        --context. `--all` keeps the execution ARN, since across executions it varies.
         """
         from dectl.session import make_session
 
@@ -395,8 +413,13 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         session = make_session(config)
         logs_client = session.client('logs')
 
+        # tail_lambda_logs adds the execution ARN when its filter pattern says the tail is scoped
+        # to one execution and fold_scope_fields says folding was wanted; --context turns both the
+        # field set and the folding off, so nothing here computes a scoped variant.
+        hide_keys = frozenset() if context else DURABLE_OPERATION_ID_KEYS
+
         if every:
-            tail_lambda_logs(logs_client, fn.name, follow=follow)
+            tail_lambda_logs(logs_client, fn.name, hide_keys=hide_keys, fold_scope_fields=False, follow=follow)
             return
 
         lambda_client = session.client('lambda')
@@ -413,6 +436,8 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
             filter_pattern=f'"{found["DurableExecutionArn"]}"',
             start_time=started - LOG_WINDOW_BUFFER_MS if started else None,
             end_time=ended + LOG_WINDOW_BUFFER_MS if ended else None,
+            hide_keys=hide_keys,
+            fold_scope_fields=not context,
         )
 
 

@@ -4,10 +4,13 @@ from datetime import datetime
 
 import pytest
 
+from dectl.logs import DURABLE_OPERATION_ID_KEYS
 from dectl.logs import GLUE_ERROR_LOG_GROUP
 from dectl.logs import GLUE_OUTPUT_LOG_GROUP
+from dectl.logs import operation_tag
 from dectl.logs import render_event
 from dectl.logs import render_history_event
+from dectl.logs import render_merged
 from dectl.logs import stream_prefix
 from dectl.logs import tail_execution_history
 from dectl.logs import tail_glue_run
@@ -18,10 +21,23 @@ from tests.conftest import FakeCloudWatchLogs
 from tests.conftest import log_event
 
 
-def capture_event(message: str, prefix: str = '') -> str:
+def capture_event(message: str, prefix: str = '', hide_keys: frozenset[str] = frozenset()) -> str:
     with console.capture() as capture:
-        render_event(message, prefix=prefix)
+        render_event(message, prefix=prefix, hide_keys=hide_keys)
     return capture.get()
+
+
+DURABLE_RECORD = {
+    'timestamp': '2026-07-08T12:00:00',
+    'level': 'INFO',
+    'message': 'avscan/b-1: 3/10 files',
+    'logger': 'root',
+    'requestId': '8a7c1f2e-9b3d-4c5a-8e7f-1a2b3c4d5e6f',
+    'executionArn': 'arn:aws:lambda:us-east-2:1:function:fn:7/durable-execution/090c4189/9f7d84c9',
+    'operationId': '1ced8f5be2db23a6513eba4d819c7380',
+    'operationName': 'wait_for_files',
+    'attempt': 3,
+}
 
 
 class FakeSfnClient:
@@ -120,7 +136,7 @@ def test_lambda_tail_picks_up_events_across_streams():
         }
     )
     with console.capture() as capture:
-        tail_lambda_logs(client, 'my-func', follow=False)
+        tail_lambda_logs(client, 'my-func', hide_keys=frozenset(), fold_scope_fields=False, follow=False)
     output = capture.get()
 
     assert 'warm run' in output
@@ -141,7 +157,7 @@ def test_lambda_tail_does_not_reprint_boundary_events():
     with pytest.MonkeyPatch.context() as monkeypatch, console.capture() as capture:
         monkeypatch.setattr('dectl.logs.time.sleep', stop_sleep)
         with pytest.raises(StopTail):
-            tail_lambda_logs(client, 'my-func', follow=True)
+            tail_lambda_logs(client, 'my-func', hide_keys=frozenset(), fold_scope_fields=False, follow=True)
     output = capture.get()
 
     assert output.count('event-one') == 1
@@ -321,7 +337,16 @@ def test_lambda_tail_scopes_to_one_durable_execution():
     )
 
     with console.capture() as capture:
-        tail_lambda_logs(client, 'my-fn', follow=False, filter_pattern='"arn:exec"', start_time=100, end_time=900)
+        tail_lambda_logs(
+            client,
+            'my-fn',
+            hide_keys=frozenset(),
+            fold_scope_fields=False,
+            follow=False,
+            filter_pattern='"arn:exec"',
+            start_time=100,
+            end_time=900,
+        )
     output = capture.get()
 
     assert 'step ran' in output
@@ -353,3 +378,88 @@ def test_tail_log_groups_interleaves_sources_by_timestamp():
     assert 'svc-a' in output
     assert 'svc-b' in output
     assert output.index('bravo-msg') < output.index('alpha-msg')
+
+
+def test_render_event_folds_the_opaque_durable_ids_out_of_a_scoped_record():
+    # The two operation ids identify an operation to the service and are unreadable; the execution
+    # ARN is the filter this tail already applied. requestId stays, because one execution spans
+    # many invocations and it is what says which one spoke.
+    output = capture_event(json.dumps(DURABLE_RECORD), hide_keys=DURABLE_OPERATION_ID_KEYS | {'executionArn'})
+
+    assert 'avscan/b-1: 3/10 files' in output
+    assert 'wait_for_files' in output
+    assert 'executionArn' not in output
+    assert 'operationId' not in output
+    assert 'requestId' in output
+
+
+def test_render_event_keeps_every_field_when_nothing_is_hidden():
+    output = capture_event(json.dumps(DURABLE_RECORD), hide_keys=frozenset())
+
+    assert 'executionArn' in output
+    assert 'requestId' in output
+    assert 'operationId' in output
+
+
+def test_render_event_keeps_a_field_the_sdk_did_not_stamp():
+    # Suppression is a named list, not "anything past the header", so a caller's own extra=
+    # still prints.
+    output = capture_event(json.dumps(DURABLE_RECORD | {'batch_id': 'b-1'}), hide_keys=DURABLE_OPERATION_ID_KEYS)
+
+    assert 'batch_id' in output
+
+
+def test_operation_tag_marks_a_retry_and_leaves_the_first_attempt_bare():
+    assert operation_tag({'operationName': 'stage', 'attempt': 1})[0] == 'stage'
+    assert operation_tag({'operationName': 'stage', 'attempt': 4})[0] == 'stage.4'
+    assert operation_tag({'attempt': 4})[0] == ''
+
+
+def test_operation_tag_only_claims_the_keys_it_showed():
+    # What the tag consumed is what render_event suppresses, and the claim is read before
+    # hide_keys, so a key claimed without being shown is one no flag can bring back.
+    assert operation_tag({'operationName': 'stage', 'attempt': 4})[1] == frozenset({'operationName', 'attempt'})
+    assert operation_tag({'operationName': 'stage', 'attempt': 1})[1] == frozenset({'operationName'})
+    assert operation_tag({'operationName': 'stage', 'attempt': 'four'})[1] == frozenset({'operationName'})
+    assert operation_tag({'attempt': 4})[1] == frozenset()
+
+
+def test_context_reaches_a_first_attempt():
+    # attempt=1 is folded out of the tag deliberately, so it has to survive as a field or nothing
+    # can show it. --context is what passes an empty hide_keys.
+    record = {'level': 'INFO', 'message': 'first try', 'operationName': 'upload', 'attempt': 1}
+    output = capture_event(json.dumps(record), hide_keys=frozenset())
+
+    assert 'upload' in output
+    assert 'attempt' in output
+    assert '1' in output
+
+
+def test_render_event_keeps_an_attempt_that_has_no_operation_to_belong_to():
+    # attempt without operationName has no tag to fold into, so it prints as an ordinary field.
+    output = capture_event(json.dumps({'level': 'WARN', 'message': 'retrying upload', 'attempt': 4}))
+
+    assert 'attempt' in output
+    assert '4' in output
+
+
+def test_render_event_keeps_a_non_integer_attempt():
+    record = {'level': 'INFO', 'message': 'staged', 'operationName': 'stage', 'attempt': '4'}
+    output = capture_event(json.dumps(record))
+
+    assert 'stage' in output
+    assert '4' in output
+
+
+def test_glue_and_monitor_records_keep_every_field():
+    # render_merged is the glue and monitor path. It asks for no suppression, and the invariant the
+    # narrow signature enforced was that every field past the header prints. This points at the
+    # caller rather than at render_event, because a default is what would break it.
+    message = json.dumps({'level': 'INFO', 'message': 'row', 'requestId': 'r-1', 'logger': 'job', 'rows': 42})
+    with console.capture() as capture:
+        render_merged([(2000, '', message)])
+    output = capture.get()
+
+    assert 'requestId' in output
+    assert 'logger' in output
+    assert 'rows' in output

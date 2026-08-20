@@ -25,7 +25,19 @@ TIMESTAMP_KEYS = ('timestamp', 'asctime', 'time')
 LEVEL_KEYS = ('level', 'levelname', 'severity')
 MESSAGE_KEYS = ('message', 'msg', 'event')
 TRACEBACK_KEYS = ('exc_info', 'exception', 'stack_trace', 'stacktrace', 'traceback')
+
 HEADER_KEYS = frozenset(TIMESTAMP_KEYS + LEVEL_KEYS + MESSAGE_KEYS)
+
+# The durable SDK's two opaque operation ids. Neither is a value anyone reads: they identify an
+# operation to the service, and the operation's *name* is what a person recognises, which
+# `operation_tag` lifts into the header instead. Deliberately not `requestId` — one execution spans
+# many invocations, so that one varies across a scoped tail and says which invocation spoke — and
+# deliberately not `logger`, which is ordinary structured-logging output no durable function owns.
+DURABLE_OPERATION_ID_KEYS = frozenset({'parentId', 'operationId'})
+
+# Constant only once a tail is scoped to one execution, so `tail_lambda_logs` adds it when its
+# filter pattern says the tail is scoped, rather than any caller deciding a second time.
+EXECUTION_ARN_KEY = 'executionArn'
 
 MARKUP_TAG = re.compile(r'\[/?[^\[\]]+\]')
 
@@ -62,12 +74,35 @@ def first_value(data: dict, keys: tuple[str, ...]) -> str:
     return ''
 
 
-def render_event(message: str, prefix: str = '') -> None:
+def operation_tag(data: dict) -> tuple[str, frozenset[str]]:
+    """The operation a durable record came from, and the keys folded into it.
+
+    Returns the tag and the keys it rendered, never a key it merely read. Claiming one it did not
+    show would suppress a field nothing can bring back, since the claim is consulted before
+    hide_keys and no flag reaches past it.
+
+    So a first attempt, a non-integer attempt, and an attempt with no operation to belong to all
+    fall through to the ordinary field rendering. Only a retry is folded, because only a retry
+    changes how the line reads."""
+    name = data.get('operationName')
+    if not name:
+        return '', frozenset()
+    attempt = data.get('attempt')
+    if isinstance(attempt, int) and attempt > 1:
+        return f'{name}.{attempt}', frozenset({'operationName', 'attempt'})
+    return str(name), frozenset({'operationName'})
+
+
+def render_event(message: str, prefix: str, hide_keys: frozenset[str]) -> None:
     """Print a CloudWatch event, restructuring it when the whole message is a
     JSON object. Structured logs (durable functions, python-json-logger) arrive
     as one dense line with any traceback collapsed into a single \\n-escaped
     field; this lifts the common fields into a header and re-expands tracebacks
-    into readable, syntax-highlighted frames. Anything else prints verbatim."""
+    into readable, syntax-highlighted frames. Anything else prints verbatim.
+
+    hide_keys drops fields that repeat unchanged on every record; pass an empty set to see the
+    whole record. It has no default because the answer differs per caller and a wrong one is
+    invisible — a suppressed field leaves a record that still reads as complete."""
     text = message.rstrip()
     try:
         data = json.loads(text)
@@ -81,6 +116,7 @@ def render_event(message: str, prefix: str = '') -> None:
     timestamp = first_value(data, TIMESTAMP_KEYS)
     level = first_value(data, LEVEL_KEYS)
     body = first_value(data, MESSAGE_KEYS)
+    tag, tagged_keys = operation_tag(data)
     level_color = LEVEL_COLORS.get(level.upper(), 'white')
 
     header_parts = []
@@ -88,6 +124,8 @@ def render_event(message: str, prefix: str = '') -> None:
         header_parts.append(f'[cyan]{escape(timestamp)}[/cyan]')
     if level:
         header_parts.append(f'[bold {level_color}]{escape(level)}[/bold {level_color}]')
+    if tag:
+        header_parts.append(f'[magenta]{escape(tag)}[/magenta]')
     if body:
         header_parts.append(escape(body))
     console.print(f'{prefix}{" ".join(header_parts)}' if header_parts else f'{prefix}{escape(text)}')
@@ -98,7 +136,7 @@ def render_event(message: str, prefix: str = '') -> None:
     indent = ' ' * indent_width
 
     for key, value in data.items():
-        if key in HEADER_KEYS:
+        if key in HEADER_KEYS or key in tagged_keys or key in hide_keys:
             continue
         if key.lower() in TRACEBACK_KEYS and isinstance(value, str) and value.strip():
             frames = Syntax(value, 'pytb', theme='ansi_dark', word_wrap=True)
@@ -248,8 +286,10 @@ def render_merged(batch: list[tuple[int, str, str]]) -> None:
     timestamp records when a line was shipped, and Glue's stdout and stderr go through
     independent agents. A job that prints, raises, then prints again routinely renders both
     stdout lines before the traceback. The err prefix is what makes that readable."""
+    # Glue and monitor records carry none of the durable SDK's fields, and monitor interleaves
+    # several sources, so nothing here is repetition worth hiding.
     for _, prefix, message in sorted(batch, key=operator.itemgetter(0)):
-        render_event(message, prefix=prefix)
+        render_event(message, prefix=prefix, hide_keys=frozenset())
 
 
 def tail_log_groups(logs_client, sources: list[tuple[str, str]], follow: bool = True) -> None:
@@ -332,6 +372,8 @@ def tail_glue_run(logs_client, run_id: str, started_at: int, follow: bool = True
 def tail_lambda_logs(
     logs_client,
     function_name: str,
+    hide_keys: frozenset[str],
+    fold_scope_fields: bool,
     follow: bool = True,
     filter_pattern: str = '',
     start_time: int | None = None,
@@ -340,7 +382,16 @@ def tail_lambda_logs(
     """Tail a Lambda function's log group.
 
     filter_pattern / start_time / end_time narrow the tail to one durable execution's records;
-    left at their defaults the whole group is followed from the current invocation onwards."""
+    left at their defaults the whole group is followed from the current invocation onwards.
+
+    Two conditions decide whether the execution ARN is worth a line, and both are needed. A
+    non-empty filter_pattern says the tail is scoped to one execution, which is what makes the ARN
+    constant — that fact lives here, so the ARN is added here rather than recomputed per caller.
+    fold_scope_fields says the caller wants folding at all, and it is a parameter rather than an
+    empty hide_keys because emptiness already means "this caller has nothing to suppress" for
+    glue and the non-durable logs."""
+    if filter_pattern and fold_scope_fields:
+        hide_keys = hide_keys | {EXECUTION_ARN_KEY}
     log_group = f'/aws/lambda/{function_name}'
     info(f'tailing {log_group}')
 
@@ -366,7 +417,7 @@ def tail_lambda_logs(
     while True:
         new_events = cursor.poll(logs_client)
         for event in new_events:
-            render_event(event['message'])
+            render_event(event['message'], prefix='', hide_keys=hide_keys)
 
         if not new_events:
             if not follow:

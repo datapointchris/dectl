@@ -41,6 +41,13 @@ TERMINAL_HISTORY_EVENTS = frozenset({'ExecutionSucceeded', 'ExecutionFailed', 'E
 # function deployed often accumulates one bucket per deploy; the interesting ones are the newest.
 VERSION_SWEEP_DEPTH = 10
 
+# How many executions per version a tail match is looked for in, and the cap `executions --limit`
+# is held to. The two are one number on purpose: a tail is typed off a listing, so anything the
+# listing can print has to be inside the window the resolver searches. Let them drift and a tail
+# read off a long listing either fails to resolve or, worse, resolves to one of two candidates
+# because the other fell outside the window and the ambiguity was never seen.
+SUFFIX_SEARCH_LIMIT = 50
+
 
 def invoke_qualifier(fn: LambdaConfig) -> str:
     """The qualifier to invoke through — an alias when one is configured, else $LATEST.
@@ -148,11 +155,16 @@ def started_at(execution: dict) -> float:
 
 
 def resolve_execution(client, function_name: str, qualifier: str, execution: str | None = None) -> dict:
-    """Resolve the execution argument — an ARN, a name, or nothing — to its full description.
+    """Resolve the execution argument — an ARN, a name, a unique tail of a name, or nothing.
 
-    Names are what you actually have to hand: `run --name` sets one for idempotency, and it is
-    what the console lists. Omitting the argument takes the most recent execution, matching
-    `glue logs` and `sfn logs`.
+    `run --name` gives an execution a name you can retype. Without one Lambda assigns a UUID, so
+    the handle is its tail: `cfd01dc3a122` reaches it, and so does any suffix long enough to be
+    unique. Omitting the argument takes the most recent execution, matching `glue logs` and
+    `sfn logs`.
+
+    The tail is tried last, after both exact-name paths, so an execution whose full name happens
+    to end another's still wins itself. A tail matching several is an error naming them, never a
+    guess at which one was meant.
 
     A miss falls back to sweeping recent versions before giving up, because the version a name
     ran under is not something you can be expected to know — and after a `deploy --publish` it is
@@ -163,12 +175,40 @@ def resolve_execution(client, function_name: str, qualifier: str, execution: str
     matches = list_executions(client, function_name, qualifier, limit=1, name=execution)
     if not matches:
         matches, scanned = sweep_executions(client, function_name, limit=1, name=execution)
-        if not matches:
-            scope = f'named {execution}' if execution else f'for {function_name}'
-            error(f'no durable execution {scope} in versions {", ".join(scanned)}')
+        if matches:
+            info(f'found under version {version_of(matches[0])}')
+        elif execution:
+            matches = [execution_by_suffix(client, function_name, execution, scanned)]
+        else:
+            error(f'no durable execution for {function_name} in versions {", ".join(scanned)}')
             raise typer.Exit(1)
-        info(f'found under version {version_of(matches[0])}')
     return client.get_durable_execution(DurableExecutionArn=matches[0]['DurableExecutionArn'])
+
+
+def execution_by_suffix(client, function_name: str, suffix: str, scanned: list[str]) -> dict:
+    """The one execution whose name ends with `suffix`, across the versions already swept.
+
+    Matched on the tail rather than the head because Lambda's generated names are UUIDs: a
+    prefix of one carries the timestamp and little else, while the tail is where the entropy is.
+    Several matches is a usage error listing the candidates — picking the newest would resolve
+    silently to something the caller did not name."""
+    candidates = [
+        found
+        for version in scanned
+        for found in list_executions(client, function_name, version, limit=SUFFIX_SEARCH_LIMIT)
+        if str(found.get('DurableExecutionName', '')).endswith(suffix)
+    ]
+    if not candidates:
+        error(f'no durable execution named {suffix}, or ending in it')
+        error(f'searched the {SUFFIX_SEARCH_LIMIT} most recent on each of versions {", ".join(scanned)}')
+        error('an older execution has to be named in full, or by its ARN')
+        raise typer.Exit(1)
+    if len(candidates) > 1:
+        error(f'{suffix} matches {len(candidates)} executions; use more of the name:')
+        for found in sorted(candidates, key=started_at, reverse=True):
+            error(f'  {found.get("DurableExecutionName", "")} ({version_of(found)})')
+        raise typer.Exit(2)
+    return candidates[0]
 
 
 def version_of(execution: dict) -> str:
@@ -215,9 +255,12 @@ def render_executions_table(alias: str, scope: str, executions: list[dict]) -> N
     """Executions with the version each ran on, since that is what scopes the list.
 
     scope names what was searched — an alias and the version it resolved to, or the span of a
-    sweep — so a short list reads as "this is where I looked" rather than "this is all there is"."""
+    sweep — so a short list reads as "this is where I looked" rather than "this is all there is".
+
+    The name folds rather than truncating, because `history` and `logs` accept its tail as a short
+    handle and an ellipsis in the middle of a UUID hides exactly the end you would retype."""
     table = Table(title=f'{alias} durable executions ({scope})')
-    table.add_column('name')
+    table.add_column('name', overflow='fold')
     table.add_column('status')
     table.add_column('version')
     table.add_column('started')
