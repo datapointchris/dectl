@@ -4,8 +4,11 @@ from datetime import datetime
 
 import pytest
 
+from dectl.logs import DURABLE_NOISE_KEYS
+from dectl.logs import EXECUTION_ARN_KEY
 from dectl.logs import GLUE_ERROR_LOG_GROUP
 from dectl.logs import GLUE_OUTPUT_LOG_GROUP
+from dectl.logs import operation_tag
 from dectl.logs import render_event
 from dectl.logs import render_history_event
 from dectl.logs import stream_prefix
@@ -18,10 +21,23 @@ from tests.conftest import FakeCloudWatchLogs
 from tests.conftest import log_event
 
 
-def capture_event(message: str, prefix: str = '') -> str:
+def capture_event(message: str, prefix: str = '', **kwargs) -> str:
     with console.capture() as capture:
-        render_event(message, prefix=prefix)
+        render_event(message, prefix=prefix, **kwargs)
     return capture.get()
+
+
+DURABLE_RECORD = {
+    'timestamp': '2026-07-08T12:00:00',
+    'level': 'INFO',
+    'message': 'avscan/b-1: 3/10 files',
+    'logger': 'root',
+    'requestId': '8a7c1f2e-9b3d-4c5a-8e7f-1a2b3c4d5e6f',
+    'executionArn': 'arn:aws:lambda:us-east-2:1:function:fn:7/durable-execution/090c4189/9f7d84c9',
+    'operationId': '1ced8f5be2db23a6513eba4d819c7380',
+    'operationName': 'wait_for_files',
+    'attempt': 3,
+}
 
 
 class FakeSfnClient:
@@ -353,3 +369,37 @@ def test_tail_log_groups_interleaves_sources_by_timestamp():
     assert 'svc-a' in output
     assert 'svc-b' in output
     assert output.index('bravo-msg') < output.index('alpha-msg')
+
+
+def test_render_event_folds_a_durable_record_onto_one_line():
+    # Every one of these fields is identical on every record of a scoped tail, so expanding them
+    # spends eight lines on one message and buries the messages themselves.
+    output = capture_event(json.dumps(DURABLE_RECORD), hide_keys=DURABLE_NOISE_KEYS | {EXECUTION_ARN_KEY})
+
+    assert len(output.strip().splitlines()) == 1
+    assert 'avscan/b-1: 3/10 files' in output
+    assert 'wait_for_files' in output
+    assert 'executionArn' not in output
+    assert 'requestId' not in output
+
+
+def test_render_event_keeps_every_field_when_nothing_is_hidden():
+    output = capture_event(json.dumps(DURABLE_RECORD), hide_keys=frozenset())
+
+    assert 'executionArn' in output
+    assert 'requestId' in output
+    assert 'operationId' in output
+
+
+def test_render_event_keeps_a_field_the_sdk_did_not_stamp():
+    # Suppression is a named list, not "anything past the header", so a caller's own extra=
+    # still prints.
+    output = capture_event(json.dumps(DURABLE_RECORD | {'batch_id': 'b-1'}), hide_keys=DURABLE_NOISE_KEYS)
+
+    assert 'batch_id' in output
+
+
+def test_operation_tag_marks_a_retry_and_leaves_the_first_attempt_bare():
+    assert operation_tag({'operationName': 'stage', 'attempt': 1}) == 'stage'
+    assert operation_tag({'operationName': 'stage', 'attempt': 4}) == 'stage.4'
+    assert operation_tag({'attempt': 4}) == ''

@@ -7,12 +7,15 @@ from botocore.exceptions import ClientError
 
 from dectl.config import LambdaConfig
 from dectl.durable import epoch_millis
+from dectl.durable import execution_at_index
+from dectl.durable import execution_to_dict
 from dectl.durable import format_duration
 from dectl.durable import invoke_qualifier
 from dectl.durable import listing_qualifier
 from dectl.durable import recent_versions
 from dectl.durable import render_durable_event
 from dectl.durable import render_execution_header
+from dectl.durable import render_executions_table
 from dectl.durable import resolve_execution
 from dectl.durable import sweep_executions
 from dectl.durable import tail_durable_history
@@ -318,3 +321,51 @@ def test_tail_durable_history_follows_pagination():
     assert 'ExecutionStarted' in output
     assert 'ExecutionSucceeded' in output
     assert client.history_calls[1]['Marker'] == 'more'
+
+
+def test_resolve_execution_takes_a_row_number_from_the_listing():
+    # The default execution name is a UUID, so the row number is the only handle a person can
+    # retype off the executions table.
+    client = FakeLambdaClient([execution('order-9'), execution('order-8'), execution('order-7')])
+
+    found = resolve_execution(client, 'fn', '7', '2')
+
+    assert found['DurableExecutionName'] == 'order-8'
+
+
+def test_resolve_execution_prefers_a_name_over_a_row_number():
+    # An execution deliberately named '3' still wins its own digit; that ordering is the whole
+    # collision rule between the two ways of naming one.
+    client = FakeLambdaClient([execution('a'), execution('b'), execution('3')])
+
+    found = resolve_execution(client, 'fn', '7', '3')
+
+    assert found['DurableExecutionName'] == '3'
+    assert client.list_calls[0]['DurableExecutionName'] == '3'
+
+
+def test_resolve_execution_exits_on_a_row_number_below_one():
+    client = FakeLambdaClient([execution('order-9')])
+
+    with pytest.raises(typer.Exit):
+        resolve_execution(client, 'fn', '7', '0')
+
+
+def test_execution_at_index_is_empty_past_the_end_of_the_listing():
+    client = FakeLambdaClient([execution('order-9')])
+
+    assert execution_at_index(client, 'fn', '7', 5) == []
+
+
+def test_execution_to_dict_carries_the_row_number():
+    # The table shows a '#' column, so --json has to answer with the same handle.
+    assert execution_to_dict(execution('order-9'), 2)['index'] == 2
+
+
+def test_render_executions_table_numbers_the_rows_newest_first():
+    with console.capture() as capture:
+        render_executions_table('fn', 'version 7', [execution('order-9'), execution('order-8')])
+    output = capture.get()
+
+    assert '1' in output
+    assert output.index('order-9') < output.index('order-8')

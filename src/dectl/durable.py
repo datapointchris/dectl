@@ -148,11 +148,14 @@ def started_at(execution: dict) -> float:
 
 
 def resolve_execution(client, function_name: str, qualifier: str, execution: str | None = None) -> dict:
-    """Resolve the execution argument — an ARN, a name, or nothing — to its full description.
+    """Resolve the execution argument — an ARN, a name, a row number, or nothing.
 
-    Names are what you actually have to hand: `run --name` sets one for idempotency, and it is
-    what the console lists. Omitting the argument takes the most recent execution, matching
-    `glue logs` and `sfn logs`.
+    Names are what you actually have to hand when `run --name` set one; without it the name is a
+    UUID, and the row number from `executions` is the only handle a person can retype. Omitting
+    the argument takes the most recent execution, matching `glue logs` and `sfn logs`.
+
+    A name is tried before a row number, so an execution deliberately named `3` still wins its
+    own digit. That ordering is the whole collision rule.
 
     A miss falls back to sweeping recent versions before giving up, because the version a name
     ran under is not something you can be expected to know — and after a `deploy --publish` it is
@@ -161,6 +164,8 @@ def resolve_execution(client, function_name: str, qualifier: str, execution: str
         return client.get_durable_execution(DurableExecutionArn=execution)
 
     matches = list_executions(client, function_name, qualifier, limit=1, name=execution)
+    if not matches and execution and execution.isdigit():
+        matches = execution_at_index(client, function_name, qualifier, int(execution))
     if not matches:
         matches, scanned = sweep_executions(client, function_name, limit=1, name=execution)
         if not matches:
@@ -169,6 +174,20 @@ def resolve_execution(client, function_name: str, qualifier: str, execution: str
             raise typer.Exit(1)
         info(f'found under version {version_of(matches[0])}')
     return client.get_durable_execution(DurableExecutionArn=matches[0]['DurableExecutionArn'])
+
+
+def execution_at_index(client, function_name: str, qualifier: str, index: int) -> list[dict]:
+    """The execution at one row of the `executions` listing, newest first and 1-based.
+
+    Returns a list so the caller can treat a row that does not exist the same as a name that
+    matched nothing, rather than branching on a second empty shape."""
+    if index < 1:
+        error(f'execution row {index} is not a row; rows start at 1')
+        raise typer.Exit(1)
+    listed = list_executions(client, function_name, qualifier, limit=index)
+    if len(listed) < index:
+        return []
+    return [listed[index - 1]]
 
 
 def version_of(execution: dict) -> str:
@@ -200,8 +219,9 @@ def format_duration(start, end) -> str:
     return f'{hours}h{minutes:02d}m' if hours else f'{minutes}m{seconds:02d}s'
 
 
-def execution_to_dict(execution: dict) -> dict:
+def execution_to_dict(execution: dict, index: int | None = None) -> dict:
     return {
+        'index': index,
         'name': execution.get('DurableExecutionName'),
         'status': execution.get('Status'),
         'version': version_of(execution),
@@ -215,16 +235,21 @@ def render_executions_table(alias: str, scope: str, executions: list[dict]) -> N
     """Executions with the version each ran on, since that is what scopes the list.
 
     scope names what was searched — an alias and the version it resolved to, or the span of a
-    sweep — so a short list reads as "this is where I looked" rather than "this is all there is"."""
+    sweep — so a short list reads as "this is where I looked" rather than "this is all there is".
+
+    The `#` column is what `history` and `logs` take in place of a name. An execution named by
+    `run --name` is memorable and retypable; the default is a UUID, and nobody transcribes one."""
     table = Table(title=f'{alias} durable executions ({scope})')
+    table.add_column('#', justify='right')
     table.add_column('name')
     table.add_column('status')
     table.add_column('version')
     table.add_column('started')
     table.add_column('duration')
-    for execution in executions:
+    for position, execution in enumerate(executions, start=1):
         started = execution.get('StartTimestamp')
         table.add_row(
+            str(position),
             execution.get('DurableExecutionName', ''),
             colored_status(execution.get('Status', '')),
             version_of(execution),

@@ -25,7 +25,18 @@ TIMESTAMP_KEYS = ('timestamp', 'asctime', 'time')
 LEVEL_KEYS = ('level', 'levelname', 'severity')
 MESSAGE_KEYS = ('message', 'msg', 'event')
 TRACEBACK_KEYS = ('exc_info', 'exception', 'stack_trace', 'stacktrace', 'traceback')
-HEADER_KEYS = frozenset(TIMESTAMP_KEYS + LEVEL_KEYS + MESSAGE_KEYS)
+
+# The durable SDK stamps the operation it is logging from onto every record. Rendered as a tag
+# beside the level it costs one column; rendered as expanded fields it costs two lines per
+# message, which is most of the screen when the messages themselves are one line.
+TAG_KEYS = ('operationName', 'attempt')
+HEADER_KEYS = frozenset(TIMESTAMP_KEYS + LEVEL_KEYS + MESSAGE_KEYS + TAG_KEYS)
+
+# Identical on every record of a scoped tail, so they carry no information once the execution
+# header has printed. `executionArn` is only constant when the tail is scoped to one execution —
+# it is added by the caller that did the scoping, not suppressed here.
+DURABLE_NOISE_KEYS = frozenset({'parentId', 'operationId', 'requestId', 'logger'})
+EXECUTION_ARN_KEY = 'executionArn'
 
 MARKUP_TAG = re.compile(r'\[/?[^\[\]]+\]')
 
@@ -62,12 +73,29 @@ def first_value(data: dict, keys: tuple[str, ...]) -> str:
     return ''
 
 
-def render_event(message: str, prefix: str = '') -> None:
+def operation_tag(data: dict) -> str:
+    """The operation a durable record came from, as `name` or `name.attempt`.
+
+    Attempt is only worth a column when it is not the first try, since a retry is the case where
+    knowing which attempt spoke changes how you read the line."""
+    name = data.get('operationName')
+    if not name:
+        return ''
+    attempt = data.get('attempt')
+    if isinstance(attempt, int) and attempt > 1:
+        return f'{name}.{attempt}'
+    return str(name)
+
+
+def render_event(message: str, prefix: str = '', hide_keys: frozenset[str] = DURABLE_NOISE_KEYS) -> None:
     """Print a CloudWatch event, restructuring it when the whole message is a
     JSON object. Structured logs (durable functions, python-json-logger) arrive
     as one dense line with any traceback collapsed into a single \\n-escaped
     field; this lifts the common fields into a header and re-expands tracebacks
-    into readable, syntax-highlighted frames. Anything else prints verbatim."""
+    into readable, syntax-highlighted frames. Anything else prints verbatim.
+
+    hide_keys drops fields that repeat unchanged on every record. Pass an empty set to see the
+    whole record."""
     text = message.rstrip()
     try:
         data = json.loads(text)
@@ -81,6 +109,7 @@ def render_event(message: str, prefix: str = '') -> None:
     timestamp = first_value(data, TIMESTAMP_KEYS)
     level = first_value(data, LEVEL_KEYS)
     body = first_value(data, MESSAGE_KEYS)
+    tag = operation_tag(data)
     level_color = LEVEL_COLORS.get(level.upper(), 'white')
 
     header_parts = []
@@ -88,6 +117,8 @@ def render_event(message: str, prefix: str = '') -> None:
         header_parts.append(f'[cyan]{escape(timestamp)}[/cyan]')
     if level:
         header_parts.append(f'[bold {level_color}]{escape(level)}[/bold {level_color}]')
+    if tag:
+        header_parts.append(f'[magenta]{escape(tag)}[/magenta]')
     if body:
         header_parts.append(escape(body))
     console.print(f'{prefix}{" ".join(header_parts)}' if header_parts else f'{prefix}{escape(text)}')
@@ -98,7 +129,7 @@ def render_event(message: str, prefix: str = '') -> None:
     indent = ' ' * indent_width
 
     for key, value in data.items():
-        if key in HEADER_KEYS:
+        if key in HEADER_KEYS or key in hide_keys:
             continue
         if key.lower() in TRACEBACK_KEYS and isinstance(value, str) and value.strip():
             frames = Syntax(value, 'pytb', theme='ansi_dark', word_wrap=True)
@@ -336,11 +367,13 @@ def tail_lambda_logs(
     filter_pattern: str = '',
     start_time: int | None = None,
     end_time: int | None = None,
+    hide_keys: frozenset[str] = DURABLE_NOISE_KEYS,
 ) -> None:
     """Tail a Lambda function's log group.
 
     filter_pattern / start_time / end_time narrow the tail to one durable execution's records;
-    left at their defaults the whole group is followed from the current invocation onwards."""
+    left at their defaults the whole group is followed from the current invocation onwards.
+    hide_keys is passed through to render_event."""
     log_group = f'/aws/lambda/{function_name}'
     info(f'tailing {log_group}')
 
@@ -366,7 +399,7 @@ def tail_lambda_logs(
     while True:
         new_events = cursor.poll(logs_client)
         for event in new_events:
-            render_event(event['message'])
+            render_event(event['message'], hide_keys=hide_keys)
 
         if not new_events:
             if not follow:

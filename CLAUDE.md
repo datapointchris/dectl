@@ -201,6 +201,19 @@ and an eval'd `s3 export` stay clean.
   CloudWatch filtered on the execution ARN that the SDK logger stamps onto every record. Note the
   two Error shapes — `GetDurableExecution` returns `Error` unwrapped, history events wrap it in a
   `Payload`/`Truncated` envelope.
+- **An execution is addressed by ARN, name, or row number, and that order is the collision rule** —
+  `resolve_execution` tries the name first and only reads a bare integer as a row when no execution
+  carries it as a name, so one deliberately named `3` still wins. Rows exist because the default
+  name is a UUID: `run --name` is the only thing that makes an execution retypable, and without it
+  the `#` column from `executions` is the sole handle. `render_executions_table` and
+  `execution_to_dict` both number from 1, newest first, so `--json` answers with the same handle
+  the table shows.
+- **The SDK stamps `executionArn`, `operationId`, `parentId` on every record, and `render_event`
+  hides them** — expanded they cost more lines than the messages do. `logs.py` names them in
+  `DURABLE_NOISE_KEYS`; `EXECUTION_ARN_KEY` is separate because it is only constant once the tail
+  is scoped to one execution, so the *caller that scoped it* adds it rather than the renderer
+  assuming it. Suppression is a named list, never "everything past the header", so a handler's own
+  `extra=` still prints. `operationName`/`attempt` are folded into a tag instead of dropped.
 - **Invoking and listing need *different* qualifiers, which is why there are two functions** —
   `invoke_qualifier` returns the alias (Lambda rejects an unqualified invoke of a durable
   function, and an alias is the right thing to send since it resolves to whatever is live).

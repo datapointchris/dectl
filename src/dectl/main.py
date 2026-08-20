@@ -146,8 +146,8 @@ REFERENCE_DURABLE_VERBS = [
     'lambda  ALIAS  deploy [--publish]',
     '               run [--payload-file F|-] [--async] [--name N] [--follow] [--json]',
     '               executions [--status S] [--limit N] [--qualifier Q] [--all-versions] [--json]',
-    '               history [EXECUTION] [--follow] [--no-data] [--json]',
-    '               logs [EXECUTION] [--follow] [--all]',
+    '               history [EXECUTION|ROW] [--follow] [--no-data] [--json]',
+    '               logs [EXECUTION|ROW] [--follow] [--all] [--context]',
 ]
 REFERENCE_SET_VERBS = [
     's3 export [--prefix STR]',

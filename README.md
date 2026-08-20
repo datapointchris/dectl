@@ -120,6 +120,7 @@ dectl salesdata lambda order-workflow history                    # steps/waits/r
 dectl salesdata lambda order-workflow history order-123 --follow
 dectl salesdata lambda order-workflow logs                       # logger output for the latest
 dectl salesdata lambda order-workflow logs order-123             # ...or for one named execution
+dectl salesdata lambda order-workflow logs 3                     # ...or the third row of `executions`
 dectl salesdata lambda order-workflow run --async --name order-123
 ```
 
@@ -129,6 +130,18 @@ suspended for — while `logs` is what the function's own logger printed while d
 logger stamps the execution ARN onto every record, and `logs` filters the group on it, so a log
 group carrying dozens of interleaved executions reads back as just the one. `--all` opts back
 out to the raw group.
+
+**Both take a row number from `executions`.** Without `run --name` an execution is named by a
+UUID, which is not something anyone retypes, so `executions` numbers its rows and `history` and
+`logs` accept that number in place of a name. A name is tried first, so an execution genuinely
+named `3` still wins its own digit.
+
+**The stamped fields are folded away.** `executionArn`, `operationId`, `parentId` and
+`requestId` are identical on every record of a scoped tail, and expanded they cost several lines
+per message. `logs` prints the operation as a tag beside the level — `wait_for_files`, or
+`wait_for_files.3` on a retry — and drops the rest. `--context` keeps them, and `--all` keeps
+the execution ARN because across executions it varies. Fields your own `extra=` put there are
+never dropped.
 
 `run` is qualified with the configured `live_alias` (falling back to `$LATEST`) — Lambda rejects
 an unqualified invoke of a durable function outright, since an execution is pinned to the
