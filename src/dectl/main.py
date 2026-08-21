@@ -1,5 +1,3 @@
-import shutil
-import subprocess
 from itertools import starmap
 from typing import Annotated
 
@@ -199,31 +197,13 @@ def reference() -> None:
         info('No config on this machine yet — run "dectl config init".')
 
 
-def github_token() -> str:
-    """A GitHub credential from the gh CLI.
-
-    This repository is public, so the release lookup needs no permission. It needs the rate
-    limit: an unauthenticated caller gets 60 API requests an hour per *IP address*, shared with
-    every other anonymous caller behind the same egress. Behind a corporate NAT that quota is
-    the whole office's, so it can be spent by someone else before the first dectl command of
-    the day, and the failure reads as a broken update rather than as a borrowed quota.
-
-    pyselfupdate checks $GITHUB_TOKEN and $GH_TOKEN itself and deliberately will not spawn a
-    subprocess a caller did not ask for, so this adds the third source. `standards/release.md`
-    § "Expensive credentials resolve through a `TokenFunc`" is why it is passed as `token_func`:
-    the config below is built at import and the notify gate resolves it on every invocation to
-    decline most of them, so an eager token would put a `gh` spawn in front of every command.
-    """
-    gh = shutil.which('gh')
-    if not gh:
-        return ''
-    result = subprocess.run([gh, 'auth', 'token'], capture_output=True, text=True, check=False)
-    return result.stdout.strip() if result.returncode == 0 else ''
-
-
 # Shared by the `update` command and the daily check in the root callback, so the
 # notice cannot name a release the update command would not install.
-UPDATE_CONFIG = Config(tool='dectl', owner='datapointchris', token_func=github_token)
+#
+# No token is configured because pyselfupdate authenticates itself, running
+# `gh auth token` when a request is about to be made. `$GITHUB_TOKEN_COMMAND`
+# redirects that or empties it, and it is the user's lever rather than ours.
+UPDATE_CONFIG = Config(tool='dectl', owner='datapointchris')
 
 
 @app.command(rich_help_panel='Global commands')
