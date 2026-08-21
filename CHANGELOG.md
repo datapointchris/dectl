@@ -1,6 +1,24 @@
 # CHANGELOG
 
 
+## v2.7.1 (2026-08-21)
+
+### Bug Fixes
+
+- **update**: Authenticate the release lookup with a gh token
+  ([`d7a6ce0`](https://github.com/datapointchris/dectl/commit/d7a6ce00fa9f7ea8a7c0c79d22bb2341d8ce1e7f))
+
+The GitHub API allows 60 unauthenticated requests an hour per IP address, shared with every other
+  anonymous caller behind the same egress. Behind a corporate NAT that quota belongs to the whole
+  office and is routinely spent before the first dectl command of the day, so the release lookup
+  returns 403 and the update reads as broken rather than as a borrowed quota.
+
+pyselfupdate reads $GITHUB_TOKEN and $GH_TOKEN and will not spawn a subprocess a caller did not ask
+  for, so add gh as the third source. It is a token_func rather than a token because the config is
+  built at import and the notify gate resolves it on every invocation, matching doit, relate and
+  fleet.
+
+
 ## v2.7.0 (2026-08-20)
 
 ### Bug Fixes
