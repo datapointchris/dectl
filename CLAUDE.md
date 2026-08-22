@@ -26,8 +26,10 @@ The command shape is `dectl PIPELINE RESOURCE ALIAS VERB [OPTIONS]` — the **ve
 deploy → run → logs loop on one resource changes only the trailing word. One rule governs the
 whole surface: **aliased = one thing, unaliased = the set/pipeline.** Instance verbs take an
 alias (`glue JOB run`, `s3 BUCKET mount`); set verbs take none (`s3 export`, `release`, `list`,
-`monitor`). `dectl reference` prints the full static grammar independent of config; every read
-command takes `--json` (via `output.emit_json`, bare-print so pipes stay clean).
+`monitor`). That is `standards/cli-design.md` § "Scope is structural: the argument's presence
+selects it, never a flag", which takes its example from this tool. `dectl reference` is the
+static-grammar command that file also requires, and `--json` on reads goes through
+`output.emit_json` — bare-print, so pipes stay clean.
 
 ## Shortcuts: one stroke for a whole path
 
@@ -67,8 +69,8 @@ AWS names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
 
 `s3` is the one resource with a set-level verb: per-bucket `mount`/`unmount`/`uri` are alias
 sub-apps, but `export` (spans every bucket, no alias) is a command on the `s3` app itself.
-`lambda`/`sfn` `run` take payloads via `payloads.read_payload` (a `--payload-file` path, or `-`
-for stdin), not an inline positional.
+`lambda`/`sfn` `run` take payloads through `payloads.read_payload`, per
+`standards/cli-design.md` § "Payloads come from `--payload-file F` or stdin `-`".
 
 `monitor` is the exception to the factory pattern: it is a **pipeline-level** command (like
 `list`, registered on `pipeline_app` directly), not a resource sub-app, because it spans
@@ -246,14 +248,13 @@ and an eval'd `s3 export` stay clean.
 `integration` and skipped unless `--run-integration` is passed — they create and delete real
 resources.
 
-**Fakes enforce the service's constraints; they never just replay canned responses.** Every log
-and execution bug that has shipped from here was green in tests, and each time the cause was the
-same: a fake more permissive than AWS, which validated the mental model instead of challenging
-it. `tests/conftest.py`'s `FakeCloudWatchLogs` therefore applies `startTime`, `endTime`,
-`logStreamNamePrefix` and `filterPattern` for real and *raises* on a `filter_log_events` with no
-`startTime`; `test_durable.py`'s Lambda fake raises on a `Qualifier` that is an alias. When you
-learn a new constraint from the real API, encode it in the fake — that is what stops the next
-person rediscovering it in production.
+**Fakes enforce the service's constraints** — `standards/testing.md` § "A fake enforces the
+service's constraints; it never just replays responses" is the rule, and it names
+`tests/conftest.py` here as its source. The constraints this repo's fakes encode:
+`FakeCloudWatchLogs` applies `startTime`, `endTime`, `logStreamNamePrefix` and `filterPattern`
+for real and *raises* on a `filter_log_events` with no `startTime`; `test_durable.py`'s Lambda
+fake raises on a `Qualifier` that is an alias. When you learn a new constraint from the real
+API, encode it in the fake.
 
 **Some failures are invisible to any fake.** The two Glue tailing bugs both produced *correct*
 output, just minutes late: one waited on a log stream that a fake creates instantly, the other
