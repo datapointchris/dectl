@@ -64,6 +64,10 @@ via no-args/`--help` at the resource level, and each alias sub-app's `help=` dou
 panel (its resolved name, bucket, scripts). `glue.py` and `lambda_.py` are the reference
 implementations, `stepfunctions.py` and `s3.py` the newest.
 
+`iceberg.py` is the one resource whose verbs are all reads. Its factory is the same two-level
+shape, and the domain behind it lives in `src/dectl/iceberg.py` — the same split as
+`durable.py` beside `lambda_.py`.
+
 Aliases matter: users reference the short config keys (`raw`, `source-copy`), never the real
 AWS names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
 
@@ -86,7 +90,9 @@ alias→name shape as `glue_jobs` and `lambdas`), not a fixed set of roles. A la
 `live_alias` (renamed from `alias` to avoid colliding with the CLI "alias" = the config key) is
 the AWS Lambda alias that `deploy --publish` repoints; its `durable` flag selects the durable
 verb set and doubles as the invocation qualifier's source. `step_functions` maps
-alias → `{name, log_group}` (the log group is optional, needed only for `monitor`). `monitor` is
+alias → `{name, log_group}` (the log group is optional, needed only for `monitor`).
+`iceberg_tables` maps alias → `{database, table}`, the Glue Data Catalog pair that owns the
+table; both fields carry `{env}`. `monitor` is
 its own block listing which lambdas / step machines to tail, kept separate so the monitored view
 is defined in one scannable place. When you change a model, update `TEMPLATE_CONFIG` in the same
 file so `config init` stays valid — a test asserts `TEMPLATE_CONFIG` round-trips through the models.
@@ -148,6 +154,7 @@ and an eval'd `s3 export` stay clean.
 | `payloads.py` | `read_payload` — resolves a `--payload-file` path or `-` (stdin) to a JSON string for `lambda`/`sfn` `run`. |
 | `logs.py` | CloudWatch log tailing (Glue, Lambda, and the multi-group `monitor` stream) plus Step Functions execution-history rendering, including structured-JSON pretty-printing. `LogGroupCursor` is the shared primitive all three tailers poll through. |
 | `durable.py` | The Lambda durable-functions domain: qualifier resolution, execution lookup by name/ARN, and execution-history rendering. Kept out of `logs.py` because it is the Lambda API, not CloudWatch. |
+| `iceberg.py` | The Iceberg table domain: locating the metadata file through Glue, parsing it, resolving a snapshot by id/tail/ref, walking lineage, and the diff. Talks to Glue and S3 only. |
 
 ## Gotchas
 
@@ -241,6 +248,37 @@ and an eval'd `s3 export` stay clean.
   version ran it. It is bounded by `VERSION_SWEEP_DEPTH` and returns the versions it scanned, so
   callers report the span rather than presenting a bounded search as exhaustive.
 
+- **Every Iceberg summary counter is a string** — the spec says so, so `total-records` arrives as
+  `'2000'`. Adding two of them concatenates and subtracting two raises, and neither failure shows
+  up until a real table. Every read goes through `summary_int`, and the test fixtures write
+  strings for the same reason: an integer fixture would let a reader that never coerces pass.
+- **Glue holds a pointer, not the state** — `table_type` and `metadata_location` on the catalog
+  table are the whole of what it knows about an Iceberg table. A table missing either is not an
+  Iceberg table, and saying that beats a `KeyError` on a parameter name, because pointing dectl
+  at a plain Glue table is the first thing anyone does.
+- **The metadata file is the floor** — snapshots, the snapshot log, refs and schemas are all in
+  it. Everything below it (the manifest list, and the manifests naming data files) is Avro, which
+  is why `files` reports per-snapshot summary counters rather than a row per data file. Reading
+  Avro would mean pyiceberg, which cannot open an `s3://` table without pyarrow or s3fs — either
+  one more than doubles the install, and pyiceberg's own import would become the most expensive
+  in the tool, paid on every invocation including the ones that never touch a table.
+- **The lineage and the log answer different questions** — `snapshot-log` records every change of
+  the current pointer, while parent pointers record descent. A rollback appends a log entry naming
+  an older snapshot and changes nobody's parent, so the skipped commits stay in the log and leave
+  the lineage. `history` shows the log with an `ancestor` column, and that column is the only
+  place a rollback is visible.
+- **A `diff` that could not reach its base reports no commits at all** — an ancestry walk that
+  runs out has collected the target's whole lineage, and presenting that as "what ran between
+  them" would be a confident answer to a question with none. `linear` is false and the path is
+  empty.
+- **`compact`, `expire`, `orphans` and `rollback` are deliberately not here.** They are writes,
+  and the mechanism is a real fork. pyiceberg reaches `expire` and `rollback` through
+  `maintenance` and `manage_snapshots`, and as of 0.11.1 has no compaction or orphan removal at
+  all; Athena reaches all four through `OPTIMIZE ... REWRITE DATA USING BIN_PACK` and `VACUUM`,
+  and needs a workgroup, an output location and a per-query cost. Neither covers all four for
+  free, so it is a dependency-versus-config decision rather than a detail. Do not add a stub for
+  one — a verb in the help that is not built is worse than an absent one.
+
 ## Tests
 
 `pytest` (`uv run pytest`). Unit tests mock boto3; command tests drive the real Typer apps via
@@ -253,8 +291,10 @@ service's constraints; it never just replays responses" is the rule, and it name
 `tests/conftest.py` here as its source. The constraints this repo's fakes encode:
 `FakeCloudWatchLogs` applies `startTime`, `endTime`, `logStreamNamePrefix` and `filterPattern`
 for real and *raises* on a `filter_log_events` with no `startTime`; `test_durable.py`'s Lambda
-fake raises on a `Qualifier` that is an alias. When you learn a new constraint from the real
-API, encode it in the fake.
+fake raises on a `Qualifier` that is an alias. `test_iceberg.py`'s Glue fake raises
+`EntityNotFoundException` for an unknown table and can serve a table carrying neither Iceberg
+parameter, and its S3 fake hands back a stream rather than bytes and gzips any key ending `.gz`.
+When you learn a new constraint from the real API, encode it in the fake.
 
 **Some failures are invisible to any fake.** The two Glue tailing bugs both produced *correct*
 output, just minutes late: one waited on a log stream that a fake creates instantly, the other

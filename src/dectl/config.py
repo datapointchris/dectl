@@ -54,6 +54,12 @@ pipelines:
     buckets:
       raw: my-{env}-raw-data-bucket
       curated: my-{env}-curated-data-bucket
+    iceberg_tables:
+      # Glue Data Catalog database + table. dectl reads the table's own metadata file, so the
+      # only requirement is that the table is registered in Glue with table_type ICEBERG.
+      events:
+        database: my-{env}-catalog
+        table: events
     monitor:
       lambdas:
         - my-function
@@ -123,6 +129,13 @@ class StepFunctionConfig(StrictModel):
     log_group: str = ''
 
 
+class IcebergTableConfig(StrictModel):
+    # An Iceberg table is addressed by the Glue Data Catalog pair that owns it. dectl reads its
+    # state from the table's own metadata file, whose S3 location Glue stores on the table.
+    database: str
+    table: str
+
+
 class MonitorConfig(StrictModel):
     # Explicit selection of which resources `monitor` tails, by alias. Kept as its own block so
     # the monitored pipeline view is defined in one scannable place rather than inferred.
@@ -137,6 +150,7 @@ class PipelineConfig(StrictModel):
     # alias -> real S3 bucket name. The alias is what you reference on the CLI and what dectl
     # uses to build the exported shell variable / mount path (pipeline_alias).
     buckets: dict[str, str] = {}
+    iceberg_tables: dict[str, IcebergTableConfig] = {}
     monitor: MonitorConfig = MonitorConfig()
     jenkins: JenkinsJobConfig | None = None
 
