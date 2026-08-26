@@ -146,7 +146,7 @@ REFERENCE_INSTANCE_VERBS = [
     'sfn     ALIAS  run [--payload-file F|-] [--follow] · logs [ARN] [--follow] · runs [--limit N] [--json]',
     's3      ALIAS  mount · unmount · uri',
     'iceberg ALIAS  snapshots [--limit N] [--json] · history [--limit N] [--json]',
-    '               files [SNAPSHOT] [--limit N] [--json] · branches [--json]',
+    '               files [SNAPSHOT] [--limit N] [--json] · branches [--limit N] [--json]',
     '               diff [BASE] [TARGET] [--json]',
 ]
 # A lambda flagged `durable` swaps run/logs for the execution-scoped set: its unit of work is the

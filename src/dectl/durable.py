@@ -23,6 +23,12 @@ from rich.table import Table
 from dectl.config import LambdaConfig
 from dectl.output import console
 from dectl.output import error
+
+# Elapsed wall-clock for a durable execution includes every suspended wait, which can run for
+# months — that gap between duration and billed compute is the whole point of the feature. The
+# formatter is shared with every resource that shows a duration, so the notation does not change
+# between two commands read in one session.
+from dectl.output import format_duration
 from dectl.output import info
 
 EXECUTION_STATUS_COLORS = {
@@ -225,19 +231,6 @@ def version_of(execution: dict) -> str:
 def colored_status(status: str) -> str:
     color = EXECUTION_STATUS_COLORS.get(status, 'white')
     return f'[{color}]{status}[/{color}]'
-
-
-def format_duration(start, end) -> str:
-    """Elapsed wall-clock time, which for a durable execution includes every suspended wait —
-    that gap between duration and billed compute is the whole point of the feature."""
-    if start is None or end is None:
-        return ''
-    seconds = (end - start).total_seconds()
-    if seconds < 60:
-        return f'{seconds:.1f}s'
-    minutes, seconds = divmod(int(seconds), 60)
-    hours, minutes = divmod(minutes, 60)
-    return f'{hours}h{minutes:02d}m' if hours else f'{minutes}m{seconds:02d}s'
 
 
 def execution_to_dict(execution: dict) -> dict:

@@ -60,7 +60,7 @@ def test_validate_reports_missing_config(monkeypatch, tmp_path):
     result = runner.invoke(config_app, ['validate'])
 
     assert result.exit_code == 1
-    assert 'no config' in result.stdout
+    assert 'no config' in result.stderr
 
 
 def test_validate_reports_unknown_key(monkeypatch, tmp_path):
@@ -119,4 +119,4 @@ def test_edit_errors_when_no_editor_configured(monkeypatch, tmp_path):
     result = runner.invoke(config_app, ['edit'])
 
     assert result.exit_code == 1
-    assert 'no editor configured' in result.stdout
+    assert 'no editor configured' in result.stderr

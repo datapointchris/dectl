@@ -1,6 +1,7 @@
 from typing import Annotated
 
 import typer
+from typer.models import OptionInfo
 
 from dectl.config import DectlConfig
 from dectl.config import IcebergTableConfig
@@ -12,6 +13,7 @@ from dectl.iceberg import diff_snapshots
 from dectl.iceberg import diff_to_dict
 from dectl.iceberg import file_rows
 from dectl.iceberg import history_rows
+from dectl.iceberg import limited
 from dectl.iceberg import read_table_metadata
 from dectl.iceberg import render_branches_table
 from dectl.iceberg import render_diff
@@ -19,8 +21,8 @@ from dectl.iceberg import render_files_table
 from dectl.iceberg import render_history_table
 from dectl.iceberg import render_snapshots_table
 from dectl.iceberg import resolve_snapshot
+from dectl.iceberg import snapshot_timestamp_ms
 from dectl.iceberg import snapshot_to_dict
-from dectl.iceberg import sort_key
 from dectl.output import emit_json
 from dectl.output import info
 from dectl.session import make_session
@@ -29,6 +31,16 @@ from dectl.session import make_session
 # reads one metadata file however far back it looks, so the limit trims the display and never
 # the fetch.
 DEFAULT_LIMIT = 10
+
+
+def limit_option(what: str) -> OptionInfo:
+    """The `--limit` every verb of this resource takes.
+
+    Built here rather than written per verb so no two of them can disagree about what the flag
+    means — both help rows would still read the same, and the divergence would only show in the
+    answers. `min=0` makes a negative a usage error rather than a silent off-by-one: -1 into a
+    slice drops the last row and returns a plausible count nobody asked for."""
+    return typer.Option('--limit', '-n', min=0, help=f'{what} 0 for all of them.')
 
 
 def make_iceberg_table_app(pipeline_name: str, alias: str, table_config: IcebergTableConfig, config: DectlConfig) -> typer.Typer:
@@ -58,7 +70,7 @@ def make_iceberg_table_app(pipeline_name: str, alias: str, table_config: Iceberg
         ),
     )
     def snapshots(
-        limit: Annotated[int, typer.Option('--limit', '-n', help='Number of snapshots to show, newest first.')] = DEFAULT_LIMIT,
+        limit: Annotated[int, limit_option('Snapshots to show, newest first.')] = DEFAULT_LIMIT,
         as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
     ) -> None:
         """List the table's commits: what each one did, and how the row count moved.
@@ -68,7 +80,7 @@ def make_iceberg_table_app(pipeline_name: str, alias: str, table_config: Iceberg
         been expired is gone from the file and cannot appear here.
         """
         metadata = load()
-        found = sorted(metadata.snapshots, key=sort_key, reverse=True)[:limit]
+        found = limited(sorted(metadata.snapshots, key=snapshot_timestamp_ms, reverse=True), limit)
 
         if as_json:
             emit_json([snapshot_to_dict(metadata, snapshot) for snapshot in found])
@@ -82,7 +94,7 @@ def make_iceberg_table_app(pipeline_name: str, alias: str, table_config: Iceberg
         epilog=(f'Examples:\n\ndectl {pipeline_name} iceberg {alias} history\n\ndectl {pipeline_name} iceberg {alias} history --limit 50'),
     )
     def history(
-        limit: Annotated[int, typer.Option('--limit', '-n', help='Number of log entries to show, most recent first.')] = DEFAULT_LIMIT,
+        limit: Annotated[int, limit_option('Log entries to show, the most recent first.')] = DEFAULT_LIMIT,
         as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
     ) -> None:
         """Show every change of the table's current snapshot, oldest last, and which survive.
@@ -115,7 +127,7 @@ def make_iceberg_table_app(pipeline_name: str, alias: str, table_config: Iceberg
             str | None,
             typer.Argument(help='Snapshot id, a unique tail of one, or a branch or tag. Defaults to the current snapshot.'),
         ] = None,
-        limit: Annotated[int, typer.Option('--limit', '-n', help='Number of commits to walk back through.')] = DEFAULT_LIMIT,
+        limit: Annotated[int, limit_option('Commits to walk back through.')] = DEFAULT_LIMIT,
         as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
     ) -> None:
         """Show the table's file layout at each commit: file counts, total size, average size.
@@ -181,6 +193,7 @@ def make_iceberg_table_app(pipeline_name: str, alias: str, table_config: Iceberg
         epilog=f'Example:\n\ndectl {pipeline_name} iceberg {alias} branches --json',
     )
     def branches(
+        limit: Annotated[int, limit_option('Refs to show, branches before tags.')] = DEFAULT_LIMIT,
         as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
     ) -> None:
         """List the table's branches and tags with the snapshot each points at.
@@ -190,7 +203,7 @@ def make_iceberg_table_app(pipeline_name: str, alias: str, table_config: Iceberg
         the table's defaults.
         """
         metadata = load()
-        rows = branch_rows(metadata)
+        rows = limited(branch_rows(metadata), limit)
 
         if as_json:
             emit_json(rows)

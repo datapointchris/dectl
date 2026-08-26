@@ -2,7 +2,7 @@ import sys
 
 import typer
 
-from dectl.output import warning_console
+from dectl.output import stderr_console
 
 
 class Interactivity:
@@ -37,7 +37,7 @@ def confirm_or_exit(question: str, flag: str = '--yes') -> None:
     blocks on a stdin that never closes, leaving it with no output and no exit
     code, which is the one failure it cannot recover from."""
     if not can_prompt():
-        warning_console.print(f'[red]Refusing to prompt without an interactive terminal; pass [bold]{flag}[/bold][/red]')
+        stderr_console.print(f'[red]Refusing to prompt without an interactive terminal; pass [bold]{flag}[/bold][/red]')
         raise typer.Exit(1)
     if not typer.confirm(question):
         raise typer.Abort()

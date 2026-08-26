@@ -13,11 +13,10 @@ from the per-snapshot summary counters instead, which is why `files` reports the
 layout per commit rather than a row per data file.
 """
 
+import datetime as dt
 import gzip
 import json
 from dataclasses import dataclass
-from datetime import UTC
-from datetime import datetime
 from typing import Any
 
 import typer
@@ -27,6 +26,7 @@ from rich.table import Table
 
 from dectl.output import console
 from dectl.output import error
+from dectl.output import format_duration
 from dectl.output import info
 
 # Glue table parameters that mark a catalog entry as Iceberg and point at its metadata file.
@@ -56,6 +56,13 @@ DIFF_COUNTERS = (
 )
 
 BYTE_COUNTERS = frozenset({TOTAL_FILES_SIZE})
+
+# How a gzipped metadata file is spelled. Iceberg puts the codec extension *before*
+# `.metadata.json` — Java's TableMetadataParser builds the name as codec extension plus
+# `.metadata.json`, and pyiceberg decompresses on exactly `.gz.metadata.json` and on nothing
+# else. The trailing form is the legacy spelling, which Java still reads and no current writer
+# produces. Both are accepted here because the catalog decides which one it points at.
+GZIP_SUFFIXES = ('.gz.metadata.json', '.metadata.json.gz')
 
 
 @dataclass(frozen=True)
@@ -153,7 +160,7 @@ def read_metadata_object(s3_client, location: str, database: str, table: str) ->
         error('  the catalog points here, so reading the table needs s3:GetObject on that key')
         raise typer.Exit(1) from exc
 
-    if key.endswith('.gz'):
+    if key.endswith(GZIP_SUFFIXES):
         body = gzip.decompress(body)
 
     try:
@@ -199,13 +206,13 @@ def colored_operation(snapshot: dict) -> str:
     return colored_operation_name(operation(snapshot))
 
 
-def epoch_datetime(millis: Any) -> datetime | None:
+def epoch_datetime(millis: Any) -> dt.datetime | None:
     if millis is None:
         return None
-    return datetime.fromtimestamp(millis / 1000, tz=UTC)
+    return dt.datetime.fromtimestamp(millis / 1000, tz=dt.UTC)
 
 
-def snapshot_time(snapshot: dict) -> datetime | None:
+def snapshot_time(snapshot: dict) -> dt.datetime | None:
     return epoch_datetime(snapshot.get('timestamp-ms'))
 
 
@@ -214,8 +221,31 @@ def snapshot_stamp(snapshot: dict) -> str:
     return moment.isoformat() if moment else ''
 
 
-def sort_key(snapshot: dict) -> int:
+def snapshot_timestamp_ms(snapshot: dict) -> int:
+    """The commit time a listing orders on.
+
+    Named for the field rather than for the use, because ordering by id would be a different
+    answer: an Iceberg snapshot id is a random 64-bit value, not a counter."""
     return snapshot.get('timestamp-ms') or 0
+
+
+def limited(rows: list, limit: int) -> list:
+    """Take the first `limit` rows, where 0 means every one of them.
+
+    One reading of `--limit` for every verb of this resource. `cli-design.md` § "A sentinel
+    never steals a value the flag can mean" sanctions 0 as "all" on a limit, and a sentinel one
+    verb honours and its sibling does not is worse than no sentinel at all: both help rows read
+    the same, the two answers differ, and the verb that slices to nothing then prints an
+    empty-state sentence that is false about the table."""
+    return rows if limit == 0 else rows[:limit]
+
+
+def limited_tail(rows: list, limit: int) -> list:
+    """The last `limit` rows, under the reading `limited` documents.
+
+    A log is read oldest-first, so its limit takes the most recent entries and still renders
+    them in order. The first N of a log is never the part anybody wants."""
+    return rows if limit == 0 else rows[-limit:]
 
 
 def format_bytes(value: int | None) -> str:
@@ -240,18 +270,6 @@ def format_duration_ms(millis: Any) -> str:
     if seconds >= 3600:
         return f'{seconds // 3600}h'
     return f'{seconds // 60}m' if seconds >= 60 else f'{seconds}s'
-
-
-def format_elapsed(start: datetime | None, end: datetime | None) -> str:
-    if start is None or end is None:
-        return ''
-    seconds = int(abs((end - start).total_seconds()))
-    days, seconds = divmod(seconds, 86400)
-    hours, seconds = divmod(seconds, 3600)
-    minutes = seconds // 60
-    if days:
-        return f'{days}d {hours}h'
-    return f'{hours}h {minutes}m' if hours else f'{minutes}m'
 
 
 def format_count(value: int | None) -> str:
@@ -346,7 +364,7 @@ def snapshot_by_id_or_suffix(metadata: TableMetadata, digits: str) -> dict:
         raise typer.Exit(1)
     if len(candidates) > 1:
         error(f'{digits} matches {len(candidates)} snapshots; use more of the id:')
-        for found in sorted(candidates, key=sort_key, reverse=True):
+        for found in sorted(candidates, key=snapshot_timestamp_ms, reverse=True):
             error(f'  {found.get("snapshot-id")}  {snapshot_stamp(found)}')
         raise typer.Exit(2)
     return candidates[0]
@@ -355,12 +373,16 @@ def snapshot_by_id_or_suffix(metadata: TableMetadata, digits: str) -> dict:
 def resolve_snapshot(metadata: TableMetadata, reference: str | None) -> dict:
     """Resolve a snapshot argument: nothing, a ref name, a full snapshot id, or a unique tail.
 
-    All-digits is read as a snapshot id and anything else as a branch or tag name, so the two
+    All-decimal is read as a snapshot id and anything else as a branch or tag name, so the two
     namespaces never contend. Omitting it takes the current snapshot, matching `glue logs` and
-    `sfn logs`."""
+    `sfn logs`.
+
+    `isdecimal`, not `isdigit`: the latter is true for characters `int()` refuses, superscripts
+    among them, so it routes a value into the id path that then raises on conversion. Anything
+    it turns away is a ref lookup, which reports what it could not find."""
     if reference is None:
         return current_snapshot(metadata)
-    if reference.isdigit():
+    if reference.isdecimal():
         return snapshot_by_id_or_suffix(metadata, reference)
     return snapshot_by_ref(metadata, reference)
 
@@ -430,10 +452,9 @@ def history_rows(metadata: TableMetadata, limit: int) -> list[dict]:
     The log records every change of the table's current pointer, so a rollback appears in it as a
     fresh entry naming an older snapshot. Marking ancestry against the current lineage is what
     separates the two: an entry that is no longer an ancestor is a commit the table has left
-    behind. The limit takes the most recent entries and still renders them chronologically, since
-    the first N of a log is never the part anybody wants."""
+    behind."""
     ancestors = {s.get('snapshot-id') for s in ancestry(metadata, metadata.current_snapshot_id)}
-    entries = metadata.snapshot_log[-limit:] if limit else metadata.snapshot_log
+    entries = limited_tail(metadata.snapshot_log, limit)
     rows = []
     for entry in entries:
         snapshot_id = entry.get('snapshot-id')
@@ -533,7 +554,7 @@ def file_rows(metadata: TableMetadata, snapshot: dict, limit: int) -> list[dict]
             'total_bytes': summary_int(entry, TOTAL_FILES_SIZE),
             'average_file_bytes': average_file_bytes(entry),
         }
-        for entry in ancestry(metadata, snapshot.get('snapshot-id'))[:limit]
+        for entry in limited(ancestry(metadata, snapshot.get('snapshot-id')), limit)
     ]
 
 
@@ -643,7 +664,7 @@ def render_diff(alias: str, diff: SnapshotDiff) -> None:
     base_id = diff.base.get('snapshot-id')
     target_id = diff.target.get('snapshot-id')
     info(f'[bold]{alias}[/bold]  {base_id} → {target_id}')
-    elapsed = format_elapsed(snapshot_time(diff.base), snapshot_time(diff.target))
+    elapsed = format_duration(snapshot_time(diff.base), snapshot_time(diff.target))
     info(f'  {snapshot_stamp(diff.base)} → {snapshot_stamp(diff.target)}{f"   ({elapsed})" if elapsed else ""}')
 
     if not diff.linear:

@@ -239,10 +239,19 @@ class FakeGlue:
 class FakeS3:
     """S3 stand-in for GetObject, enforcing the two things a permissive fake would let through.
 
-    A body is a stream that has to be read, not bytes already in hand. And an object whose key
-    ends in .gz holds gzipped bytes, because that is what `write.metadata.compression-codec=gzip`
-    produces — a reader that skips the decompression passes against a fake handing back plain
-    text and fails against the first real table configured that way."""
+    A body is a stream that has to be read, not bytes already in hand.
+
+    And an object Iceberg gzipped holds gzipped bytes. Which names those are is Iceberg's rule,
+    not dectl's, so the predicate here is written from the writers rather than from the reader
+    under test: Java's TableMetadataParser builds `<codec extension>.metadata.json` and
+    pyiceberg decompresses on `.gz.metadata.json` alone, while `.metadata.json.gz` is the legacy
+    spelling Java still reads. A fake that instead gzipped on whatever the code checks for would
+    be the same rule written twice, and the test would pass on the one input the code gets
+    right."""
+
+    # Read off the writers, so a reader that recognises fewer names than Iceberg produces fails
+    # here rather than against a real table.
+    ICEBERG_GZIP_SUFFIXES = ('.gz.metadata.json', '.metadata.json.gz')
 
     def __init__(self, objects: dict[str, str] | None = None, denied: tuple[str, ...] = ()) -> None:
         self.objects = objects or {}
@@ -259,7 +268,7 @@ class FakeS3:
         if uri not in self.objects:
             raise ClientError({'Error': {'Code': 'NoSuchKey', 'Message': 'The specified key does not exist.'}}, 'GetObject')
         payload = self.objects[uri].encode()
-        return {'Body': FakeBody(gzip.compress(payload) if Key.endswith('.gz') else payload)}
+        return {'Body': FakeBody(gzip.compress(payload) if Key.endswith(self.ICEBERG_GZIP_SUFFIXES) else payload)}
 
 
 class FakeSession:
@@ -325,10 +334,20 @@ def test_reading_a_table_costs_one_get_table_and_one_get_object():
     assert s3.calls == [{'Bucket': 'example-lake', 'Key': METADATA_KEY}]
 
 
-def test_a_gzipped_metadata_file_reads():
+@pytest.mark.parametrize(
+    'key',
+    [
+        'warehouse/events/metadata/00004-abc.gz.metadata.json',
+        'warehouse/events/metadata/00004-abc.metadata.json.gz',
+    ],
+)
+def test_a_gzipped_metadata_file_reads(key):
     # write.metadata.compression-codec=gzip is a table property, not an exception, and the codec
     # is only knowable from the key the catalog handed back.
-    key = 'warehouse/events/metadata/00004-abc.metadata.json.gz'
+    #
+    # Both spellings, because Iceberg puts the codec extension before `.metadata.json` and every
+    # current writer produces that form. Recognising only the trailing one reports a healthy
+    # gzipped table as corrupt, and says so in a message that sends the reader after the file.
     glue, s3 = fakes_for(four_commit_table(), key=key)
 
     metadata = read_table_metadata(glue, s3, 'lakehouse', 'events')
@@ -343,7 +362,7 @@ def test_a_missing_table_names_the_table(capsys):
         read_table_metadata(glue, s3, 'lakehouse', 'events')
 
     assert exc.value.exit_code == 1
-    assert 'lakehouse.events' in capsys.readouterr().out
+    assert 'lakehouse.events' in capsys.readouterr().err
 
 
 def test_a_plain_glue_table_says_it_is_not_iceberg(capsys):
@@ -355,9 +374,9 @@ def test_a_plain_glue_table_says_it_is_not_iceberg(capsys):
         read_table_metadata(glue, FakeS3(), 'lakehouse', 'events')
 
     assert exc.value.exit_code == 1
-    out = capsys.readouterr().out
-    assert 'not an Iceberg table' in out
-    assert 'no table_type parameter' in out
+    err = capsys.readouterr().err
+    assert 'not an Iceberg table' in err
+    assert 'no table_type parameter' in err
 
 
 def test_a_table_of_another_format_names_the_format(capsys):
@@ -367,7 +386,7 @@ def test_a_table_of_another_format_names_the_format(capsys):
         read_table_metadata(glue, FakeS3(), 'lakehouse', 'events')
 
     assert exc.value.exit_code == 1
-    assert 'HUDI' in capsys.readouterr().out
+    assert 'HUDI' in capsys.readouterr().err
 
 
 def test_an_iceberg_table_without_a_metadata_pointer_says_so(capsys):
@@ -377,7 +396,7 @@ def test_an_iceberg_table_without_a_metadata_pointer_says_so(capsys):
         read_table_metadata(glue, FakeS3(), 'lakehouse', 'events')
 
     assert exc.value.exit_code == 1
-    assert 'metadata_location' in capsys.readouterr().out
+    assert 'metadata_location' in capsys.readouterr().err
 
 
 def test_an_unreadable_metadata_file_names_the_bucket_and_key(capsys):
@@ -389,10 +408,10 @@ def test_an_unreadable_metadata_file_names_the_bucket_and_key(capsys):
         read_table_metadata(glue, s3, 'lakehouse', 'events')
 
     assert exc.value.exit_code == 1
-    out = capsys.readouterr().out
-    assert 'AccessDenied' in out
-    assert f's3://example-lake/{METADATA_KEY}' in out
-    assert 's3:GetObject' in out
+    err = capsys.readouterr().err
+    assert 'AccessDenied' in err
+    assert f's3://example-lake/{METADATA_KEY}' in err
+    assert 's3:GetObject' in err
 
 
 def test_a_metadata_pointer_that_is_not_an_s3_uri_refuses(capsys):
@@ -402,7 +421,7 @@ def test_a_metadata_pointer_that_is_not_an_s3_uri_refuses(capsys):
         read_table_metadata(glue, FakeS3(), 'lakehouse', 'events')
 
     assert exc.value.exit_code == 1
-    assert 'not an S3 URI' in capsys.readouterr().out
+    assert 'not an S3 URI' in capsys.readouterr().err
 
 
 def test_a_metadata_file_that_is_not_json_refuses(capsys):
@@ -413,7 +432,7 @@ def test_a_metadata_file_that_is_not_json_refuses(capsys):
         read_table_metadata(glue, s3, 'lakehouse', 'events')
 
     assert exc.value.exit_code == 1
-    assert 'not readable JSON' in capsys.readouterr().out
+    assert 'not readable JSON' in capsys.readouterr().err
 
 
 # --- summary counters -------------------------------------------------------------------------
@@ -546,9 +565,9 @@ def test_an_ambiguous_tail_is_a_usage_error_listing_the_candidates(capsys):
         resolve_snapshot(TableMetadata(document=document, location=METADATA_URI), '9108')
 
     assert exc.value.exit_code == 2
-    out = capsys.readouterr().out
-    assert '1111111111111119108' in out
-    assert '2222222222222229108' in out
+    err = capsys.readouterr().err
+    assert '1111111111111119108' in err
+    assert '2222222222222229108' in err
 
 
 def test_an_unknown_ref_lists_the_ones_that_exist(capsys):
@@ -556,9 +575,9 @@ def test_an_unknown_ref_lists_the_ones_that_exist(capsys):
         resolve_snapshot(load(four_commit_table()), 'weekly')
 
     assert exc.value.exit_code == 1
-    out = capsys.readouterr().out
-    assert 'main' in out
-    assert 'month-end' in out
+    err = capsys.readouterr().err
+    assert 'main' in err
+    assert 'month-end' in err
 
 
 def test_a_ref_pointing_at_an_expired_snapshot_says_so(capsys):
@@ -568,7 +587,19 @@ def test_a_ref_pointing_at_an_expired_snapshot_says_so(capsys):
         resolve_snapshot(TableMetadata(document=document, location=METADATA_URI), 'stale')
 
     assert exc.value.exit_code == 1
-    assert 'expired' in capsys.readouterr().out
+    assert 'expired' in capsys.readouterr().err
+
+
+def test_a_non_decimal_digit_refuses_rather_than_raising(capsys):
+    # str.isdigit() is true for characters int() rejects, superscripts among them, so routing on
+    # it sends a value into the id path that then raises. Every other bad input here exits.
+    assert '²'.isdigit() and not '²'.isdecimal()
+
+    with pytest.raises(typer.Exit) as exc:
+        resolve_snapshot(load(four_commit_table()), '²')
+
+    assert exc.value.exit_code == 1
+    assert 'no branch or tag named' in capsys.readouterr().err
 
 
 def test_a_table_with_nothing_committed_says_so_rather_than_erroring_on_none(capsys):
@@ -578,7 +609,7 @@ def test_a_table_with_nothing_committed_says_so_rather_than_erroring_on_none(cap
         resolve_snapshot(TableMetadata(document=document, location=METADATA_URI), None)
 
     assert exc.value.exit_code == 1
-    assert 'nothing has been committed' in capsys.readouterr().out
+    assert 'nothing has been committed' in capsys.readouterr().err
 
 
 def test_a_current_snapshot_id_of_minus_one_reads_as_no_current_snapshot():
@@ -615,7 +646,7 @@ def test_diff_on_a_first_commit_refuses_rather_than_comparing_it_to_nothing(caps
         diff_endpoints(metadata, None, None)
 
     assert exc.value.exit_code == 1
-    assert 'first commit' in capsys.readouterr().out
+    assert 'first commit' in capsys.readouterr().err
 
 
 def test_diff_names_the_commits_that_ran_between_the_two_snapshots():
@@ -711,24 +742,34 @@ def test_the_file_table_shows_the_delete_column_once_a_commit_reports_deletes():
         current=SNAP_ONE,
     )
     metadata = TableMetadata(document=document, location=METADATA_URI)
+    rows = file_rows(metadata, metadata.by_id(SNAP_ONE), 10)
 
     with console.capture() as capture:
-        render_files_table('events', file_rows(metadata, metadata.by_id(SNAP_ONE), 10))
+        render_files_table('events', rows)
 
-    out = capture.get()
-    assert 'delete files' in out
-    assert '2' in out
+    assert 'delete files' in capture.get()
+    # Asserted on the row rather than the rendering. A bare `'2' in out` passes on a table with
+    # no delete files at all, because the ISO timestamp column carries 2026.
+    assert rows[0]['delete_files'] == 2
+    assert rows[0]['position_deletes'] == 340
 
 
 def test_the_diff_counter_table_title_does_not_carry_two_snapshot_ids():
     # Two 19-digit ids wrap the title across the narrow table, and the lines above it already
     # name both ends of the comparison.
+    #
+    # Asserted as an absence. `'events counters' in out` would survive any title with the ids
+    # appended, which is exactly what this forbids — and at a wide terminal the second id is
+    # clipped off the title entirely, so the rendering does not even show the whole fault.
     metadata = load(four_commit_table())
 
     with console.capture() as capture:
         render_diff('events', diff_snapshots(metadata, metadata.by_id(SNAP_THREE), metadata.by_id(SNAP_FOUR)))
 
-    assert 'events counters' in capture.get()
+    title = next(line for line in capture.get().splitlines() if 'counters' in line)
+    assert 'events counters' in title
+    assert str(SNAP_THREE) not in title
+    assert str(SNAP_FOUR) not in title
 
 
 def test_the_snapshots_table_does_not_truncate_the_id():
@@ -819,6 +860,43 @@ def test_files_json_reports_the_layout_at_each_commit(monkeypatch):
     row = json.loads(result.stdout)[0]
     assert row['data_files'] == 14
     assert row['average_file_bytes'] == 12582912 // 14
+
+
+@pytest.mark.parametrize('verb', ['snapshots', 'history', 'files', 'branches'])
+def test_limit_zero_means_every_row_on_every_verb(verb, monkeypatch):
+    # A sentinel one verb honours and its sibling does not is worse than no sentinel: both help
+    # rows read the same and the answers differ. A verb slicing to nothing then prints an
+    # empty-state sentence that is false about a table holding four commits.
+    app, _, _ = make_app(four_commit_table(), monkeypatch)
+
+    result = runner.invoke(app, ['events', verb, '--limit', '0', '--json'])
+
+    assert result.exit_code == 0
+    assert len(json.loads(result.stdout)) >= 3
+
+
+@pytest.mark.parametrize('verb', ['snapshots', 'history', 'files', 'branches'])
+def test_a_negative_limit_is_a_usage_error_not_a_quiet_off_by_one(verb, monkeypatch):
+    # -1 into a slice drops the last row and returns a plausible count nobody asked for.
+    app, _, _ = make_app(four_commit_table(), monkeypatch)
+
+    result = runner.invoke(app, ['events', verb, '--limit', '-1', '--json'])
+
+    assert result.exit_code == 2
+
+
+def test_a_refusal_keeps_stdout_clean_for_a_json_reader(monkeypatch):
+    # Every one of these verbs takes --json, so a caller pipes stdout into jq. A refusal printed
+    # there is a parse error instead of a message.
+    config = make_config({'events': {'database': 'lakehouse', 'table': 'events'}})
+    monkeypatch.setattr('dectl.commands.iceberg.make_session', lambda _config: FakeSession(FakeGlue(), FakeS3()))
+    app = make_iceberg_app('proj', config.pipelines['proj'], config)
+
+    result = runner.invoke(app, ['events', 'snapshots', '--json'])
+
+    assert result.exit_code == 1
+    assert result.stdout == ''
+    assert 'no table lakehouse.events' in result.stderr
 
 
 def test_files_help_says_there_is_no_row_per_data_file(monkeypatch):

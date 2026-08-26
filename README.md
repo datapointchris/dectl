@@ -255,6 +255,9 @@ dectl salesdata iceberg events files         # file counts and average file size
 dectl salesdata iceberg events diff          # what the last commit changed
 ```
 
+Every one of those but `diff` is a list and takes `--limit`/`-n`, showing ten rows by default.
+`--limit 0` means all of them, on all four.
+
 `diff` is the one to reach for when a number moved. Give it the snapshot the number was last
 right at and it names the commits that ran since, alongside the record, file and byte deltas:
 

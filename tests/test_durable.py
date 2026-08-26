@@ -21,6 +21,7 @@ from dectl.durable import sweep_executions
 from dectl.durable import tail_durable_history
 from dectl.durable import version_of
 from dectl.output import console
+from dectl.output import stderr_console
 
 STARTED = datetime(2026, 7, 30, 12)
 
@@ -226,10 +227,13 @@ def test_resolve_execution_exits_when_nothing_matches():
 
 
 def test_format_duration_covers_a_suspended_workflow():
-    # Elapsed time spans durable waits, so it is routinely hours rather than seconds.
+    # Elapsed time spans durable waits, so it runs from seconds to months. Days are their own
+    # unit for that reason: a wait of a quarter reported in hours is a number nobody can read.
     assert format_duration(STARTED, STARTED + timedelta(seconds=4.2)) == '4.2s'
     assert format_duration(STARTED, STARTED + timedelta(minutes=3, seconds=7)) == '3m07s'
-    assert format_duration(STARTED, STARTED + timedelta(hours=26, minutes=5)) == '26h05m'
+    assert format_duration(STARTED, STARTED + timedelta(hours=5, minutes=5)) == '5h05m'
+    assert format_duration(STARTED, STARTED + timedelta(hours=26, minutes=5)) == '1d02h'
+    assert format_duration(STARTED, STARTED + timedelta(days=91)) == '91d00h'
     assert format_duration(STARTED, None) == ''
 
 
@@ -361,7 +365,7 @@ def test_an_ambiguous_tail_is_a_usage_error_naming_the_candidates():
     # Picking the newest would resolve silently to something the caller did not name.
     client = FakeLambdaClient([execution('batch-alpha-99'), execution('batch-beta-99')], versions=['$LATEST', '7'])
 
-    with pytest.raises(typer.Exit) as raised, console.capture() as capture:
+    with pytest.raises(typer.Exit) as raised, stderr_console.capture() as capture:
         resolve_execution(client, 'fn', '7', '99')
 
     assert raised.value.exit_code == 2
@@ -418,7 +422,7 @@ def test_the_suffix_window_covers_everything_the_listing_can_show():
 def test_the_not_found_error_names_the_window_it_searched():
     client = FakeLambdaClient([execution('order-9')], versions=['$LATEST', '7'])
 
-    with pytest.raises(typer.Exit), console.capture() as capture:
+    with pytest.raises(typer.Exit), stderr_console.capture() as capture:
         resolve_execution(client, 'fn', '7', 'nosuchtail')
     output = capture.get()
 
