@@ -11,6 +11,7 @@ from pyselfupdate.typercmd import run_update
 
 from dectl.commands.config_cmd import config_app
 from dectl.commands.glue import make_glue_app
+from dectl.commands.iceberg import make_iceberg_app
 from dectl.commands.lambda_ import make_lambda_app
 from dectl.commands.monitor import run_monitor
 from dectl.commands.release import make_release_app
@@ -78,6 +79,8 @@ if cfg:
             resources.append(f'sfn ({", ".join(pipeline.step_functions)})')
         if pipeline.buckets:
             resources.append(f's3 ({", ".join(pipeline.buckets)})')
+        if pipeline.iceberg_tables:
+            resources.append(f'iceberg ({", ".join(pipeline.iceberg_tables)})')
         if pipeline.jenkins and cfg.jenkins:
             resources.append('release (jenkins)')
         summary = ' · '.join(resources) if resources else 'none configured'
@@ -97,6 +100,9 @@ if cfg:
             has_commands = True
         if pipeline.buckets:
             pipeline_app.add_typer(make_s3_app(name, pipeline, cfg), name='s3', rich_help_panel='Resources')
+            has_commands = True
+        if pipeline.iceberg_tables:
+            pipeline_app.add_typer(make_iceberg_app(name, pipeline, cfg), name='iceberg', rich_help_panel='Resources')
             has_commands = True
         if pipeline.jenkins and cfg.jenkins:
             pipeline_app.add_typer(make_release_app(name, pipeline.jenkins, cfg), name='release', rich_help_panel='Pipeline')
@@ -139,6 +145,9 @@ REFERENCE_INSTANCE_VERBS = [
     'lambda  ALIAS  deploy [--publish] · run [--payload-file F|-] [--json] · logs [--follow]',
     'sfn     ALIAS  run [--payload-file F|-] [--follow] · logs [ARN] [--follow] · runs [--limit N] [--json]',
     's3      ALIAS  mount · unmount · uri',
+    'iceberg ALIAS  snapshots [--limit N] [--json] · history [--limit N] [--json]',
+    '               files [SNAPSHOT] [--limit N] [--json] · branches [--limit N] [--json]',
+    '               diff [BASE] [TARGET] [--json]',
 ]
 # A lambda flagged `durable` swaps run/logs for the execution-scoped set: its unit of work is the
 # durable execution, which spans many invocations, so invocation-shaped verbs answer nothing.

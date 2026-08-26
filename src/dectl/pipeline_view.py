@@ -17,6 +17,8 @@ def resource_types(pipeline: PipelineConfig) -> list[str]:
         types.append('sfn')
     if pipeline.buckets:
         types.append('s3')
+    if pipeline.iceberg_tables:
+        types.append('iceberg')
     return types
 
 
@@ -43,6 +45,10 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
             for alias, sfn in pipeline.step_functions.items()
         },
         's3': {alias: {'bucket': substitute_env(bucket)} for alias, bucket in pipeline.buckets.items()},
+        'iceberg': {
+            alias: {'database': substitute_env(table.database), 'table': substitute_env(table.table)}
+            for alias, table in pipeline.iceberg_tables.items()
+        },
     }
 
 
@@ -64,4 +70,6 @@ def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
         info(f'  sfn/{alias}: {substitute_env(sfn.name)}')
     for alias, bucket in pipeline.buckets.items():
         info(f'  s3/{alias}: {substitute_env(bucket)}')
+    for alias, table in pipeline.iceberg_tables.items():
+        info(f'  iceberg/{alias}: {substitute_env(table.database)}.{substitute_env(table.table)}')
     info('')

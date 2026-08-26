@@ -20,7 +20,7 @@ day, a command that finds a newer release prints a one-line notice to stderr;
 
 Commands follow the shape `dectl PIPELINE RESOURCE ALIAS VERB [OPTIONS]` — **the verb comes
 last**, so a deploy → run → logs loop on one resource changes only the final word. Pipelines
-and their resources (`glue`, `lambda`, `sfn`, `s3`, `release`) are built from your config.
+and their resources (`glue`, `lambda`, `sfn`, `s3`, `iceberg`, `release`) are built from your config.
 Every level is self-documenting — run any partial command or add `--help` to see what's next,
 including the live list of aliases. `dectl reference` prints the whole grammar independent of
 your config.
@@ -39,7 +39,8 @@ dectl salesdata glue source-copy   # this job's verbs (deploy/run/logs/runs) + w
 ```
 
 Every read command takes `--json` for a stable, machine-readable shape on stdout (`list`,
-`config show`, `search`, the per-resource `runs`, `lambda ... run`, `release status`).
+`config show`, `search`, the per-resource `runs`, `lambda ... run`, `release status`, and every
+`iceberg` verb).
 
 ## Environments
 
@@ -120,7 +121,7 @@ dectl salesdata lambda order-workflow history                    # steps/waits/r
 dectl salesdata lambda order-workflow history order-123 --follow
 dectl salesdata lambda order-workflow logs                       # logger output for the latest
 dectl salesdata lambda order-workflow logs order-123             # ...or for one named execution
-dectl salesdata lambda order-workflow logs 3                     # ...or the third row of `executions`
+dectl salesdata lambda order-workflow logs cfd01dc3a122          # ...or a unique tail of its name
 dectl salesdata lambda order-workflow run --async --name order-123
 ```
 
@@ -231,6 +232,47 @@ dectl salesdata s3 raw unmount
 ```
 
 `s3 <alias> mount` refuses on macOS and points you at `export` instead.
+
+## Iceberg tables
+
+Tables are declared as an alias over the Glue Data Catalog pair that owns them:
+
+```yaml
+iceberg_tables:
+  events:
+    database: salesdata-{env}-catalog
+    table: events
+```
+
+The verbs read the table's own metadata file. Glue holds a pointer to it, so a read is one
+`GetTable` and one `GetObject` — no query engine, no workgroup, and nothing to switch on.
+
+```bash
+dectl salesdata iceberg events snapshots     # every commit: operation, rows added and removed
+dectl salesdata iceberg events history       # each change of the current snapshot, rollbacks included
+dectl salesdata iceberg events branches      # branches and tags, and what they point at
+dectl salesdata iceberg events files         # file counts and average file size, commit by commit
+dectl salesdata iceberg events diff          # what the last commit changed
+```
+
+Every one of those but `diff` is a list and takes `--limit`/`-n`, showing ten rows by default.
+`--limit 0` means all of them, on all four.
+
+`diff` is the one to reach for when a number moved. Give it the snapshot the number was last
+right at and it names the commits that ran since, alongside the record, file and byte deltas:
+
+```bash
+dectl salesdata iceberg events diff 4471          # from that snapshot to now
+dectl salesdata iceberg events diff 4471 9108     # between two snapshots
+```
+
+A snapshot is named by its full 19-digit id, by any unique tail of one, or by a branch or tag.
+An ambiguous tail is an error listing the candidates rather than a guess.
+
+Two limits are worth knowing. `files` reports the file layout from each snapshot's own summary
+counters — file counts, total bytes and average size — and there is no row-per-data-file view,
+because the manifests naming individual files are Avro and dectl does not read them. And a
+snapshot that has been expired is gone from the metadata file, so nothing can reach it.
 
 ## Other commands
 
