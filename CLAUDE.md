@@ -305,13 +305,16 @@ serve a table carrying neither Iceberg parameter, and its S3 fake hands back a s
 than bytes and gzips the names *Iceberg* gzips. When you learn a new constraint from the real
 API, encode it in the fake.
 
-**Write the fake's predicate from the service, never from the code under test.** A fake that
-restates the implementation's rule is that rule written twice, and it produces something worse
-than a permissive fake: a green test named for the property, exercising it, and passing on the
-one input the code happens to get right. The tell is greppable — the same expression on both
-sides of the boundary. `FakeS3.ICEBERG_GZIP_SUFFIXES` is read off the writers (Java's
-`TableMetadataParser`, pyiceberg's `serializers.py`) rather than off `iceberg.GZIP_SUFFIXES`,
-which is why it covers a spelling a reader can miss.
+**`FakeS3.ICEBERG_GZIP_SUFFIXES` is read off the writers** — Java's `TableMetadataParser` and
+pyiceberg's `serializers.py` — rather than off `iceberg.GZIP_SUFFIXES`. That is what makes it
+cover a spelling the reader can miss. A fake restating the implementation's rule is that rule
+written twice, and it leaves something worse than a permissive fake: a green test named for the
+property, exercising it, and passing on the one input the code happens to get right. The tell is
+greppable, the same expression on both sides of the boundary.
+
+*Proposed, not settled.* That this generalises to every fake here is an open standards proposal
+and Chris has not ruled on it. It describes the code above, so follow it in this file's
+fakes. Do not carry it elsewhere as approved policy, and do not cite it as a rule.
 
 **Some failures are invisible to any fake.** The two Glue tailing bugs both produced *correct*
 output, just minutes late: one waited on a log stream that a fake creates instantly, the other
