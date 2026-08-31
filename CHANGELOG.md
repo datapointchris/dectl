@@ -1,6 +1,406 @@
 # CHANGELOG
 
 
+## v2.8.0 (2026-08-31)
+
+### Bug Fixes
+
+- **config**: Report the validation error wherever the pipelines are missing
+  ([`adcef6a`](https://github.com/datapointchris/dectl/commit/adcef6a17f8ddbb8beef2afd0d8e7244d45d6d21))
+
+An absent config and one that fails to load both leave cfg as None, and every refusal path reported
+  the first. A config with a typo in it was answered with 'no config loaded — run dectl config
+  init', which refuses because the file it would write is already there.
+
+report_config_error is now the single renderer, called by list, search, config show, config
+  validate, bare dectl, and DectlGroup.get_command when the name typed was a pipeline. It carries
+  the location, the message and the rejected value, which is what identifies the offending key.
+
+config show called load_config unguarded and surfaced a pydantic traceback. require_config consults
+  CONFIG_ERROR before cfg, so init is only ever suggested for a config that is genuinely absent.
+
+Detail lines move to stderr with the rest of the refusals, keeping config show --json parseable on
+  the path where it fails.
+
+- **iceberg**: Read the gzip spelling Iceberg writes, and refuse on stderr
+  ([`735663a`](https://github.com/datapointchris/dectl/commit/735663aa54feab8af140c3be8c3d11bea6947683))
+
+The gzip check recognised only `<name>.metadata.json.gz`. Iceberg puts the codec extension before
+  `.metadata.json`, which is what Java's TableMetadataParser builds and the only form pyiceberg
+  decompresses; the trailing spelling is legacy. A table with write.metadata.compression-codec=gzip
+  was reported as corrupt, in a message that sent the reader after a metadata file that was fine.
+
+The test could not catch it because the S3 fake gzipped on the same predicate the code checked, so
+  the two were one wrong rule written twice. The fake now encodes Iceberg's names, read off the
+  writers, and the test covers both spellings.
+
+error() wrote to stdout, so a refusal on a --json read reached a caller piping into jq as a parse
+  error rather than a message. It now writes to stderr with warn(), which is the contract every read
+  verb in the tool depends on. success() and info() stay on stdout, being the answer.
+
+--limit 0 meant all on history and none on snapshots and files, and the two then printed an
+  empty-state sentence that was false about a table holding four commits. One reading now, shared by
+  all four list verbs, and a negative is a usage error rather than a silent off-by-one.
+
+resolve_snapshot routed on str.isdigit(), which is true for characters int() rejects, so a
+  superscript raised out of a function whose every other bad-input path exits. isdecimal() sends
+  those to the ref lookup, which reports what it could not find.
+
+format_elapsed floored to whole minutes, printing (0m) for two commits less than a minute apart —
+  which on a streaming table is most of them, and diff with no arguments is exactly that comparison.
+  Both duration formatters are now one in output.py, carrying seconds through days. Durable
+  executions read 1d02h where they read 26h05m, which is the range that matters when a wait can run
+  for months.
+
+Two assertions could not fail and now can: the delete-files test asserted '2' in rendered output,
+  which the 2026 timestamp satisfied on a table with no delete files at all, and the diff title test
+  asserted a substring that survived appending the ids it forbids. Both were mutated to confirm they
+  catch what they name.
+
+Also renames sort_key to snapshot_timestamp_ms, since ordering by id would be a different answer,
+  and imports datetime as a module.
+
+### Chores
+
+- Regenerate the shared config
+  ([`ad0eb97`](https://github.com/datapointchris/dectl/commit/ad0eb977c129a75644f480d3b9106c81686b1775))
+
+The refcheck block carried a count of active repos, which published the size of a mostly-private
+  portfolio and went stale whenever one was added. The comment now states the property it was
+  evidence for: the whole-tree half finds nothing on a clean tree, which is the normal state.
+
+- Regenerate the shared config
+  ([`2ffa34f`](https://github.com/datapointchris/dectl/commit/2ffa34fea41238cf43fed607ff635732cf78e7d4))
+
+The generated templates named private tooling, so a public repo carrying them published a reference
+  to it. Regenerating from the current templates replaces every one with a description of what the
+  thing does.
+
+Also drops the repo names, machine home paths and a dependency anecdote the same templates carried,
+  and makes the prepare-commit-msg hook skip cleanly when the machine-local hook it calls is absent
+  — a clone of a public repo has to be able to run pre-commit without it.
+
+- Sync the generated configs to toolchain 18
+  ([`7f1e024`](https://github.com/datapointchris/dectl/commit/7f1e0244979e794935074152dc5bbde127fc34e9))
+
+Both stamped files come from the fleet's version declaration: the pre-commit config and the
+  generated workflow. Nothing here is a repo decision.
+
+Stamp 18 carries the refcheck hook at v0.6.0, a codespell exclude widened to go.mod, and — on a
+  private repo — runs-on naming the self-hosted pool with the actionlint config that declares the
+  label.
+
+- Sync the generated configs to toolchain 19
+  ([`38fe9f8`](https://github.com/datapointchris/dectl/commit/38fe9f87dd3b14800d837902cd069f50c7b1bd00))
+
+Both stamped files come from the fleet's version declaration: the pre-commit config and the
+  generated workflow. Nothing here is a repo decision.
+
+Stamp 19 passes --allow-parallel-runners to golangci-lint. A repo with two Go components runs two
+  Lint jobs at once, and on a single self-hosted box the second one dies on the shared cache lock
+  before linting anything.
+
+- **precommit**: Drop the commit-branding hook
+  ([`6a71b12`](https://github.com/datapointchris/dectl/commit/6a71b12a2ffb97ecfcdd46ce26db361150f84089))
+
+Claude Code suppresses its own commit and PR attribution through its attribution setting, which
+  resolves an empty string to no trailer at all. A hook that strips the trailer afterwards has
+  nothing left to remove.
+
+### Documentation
+
+- Cite the four cli-design and testing rules built from this repo
+  ([`f908698`](https://github.com/datapointchris/dectl/commit/f908698a647adef6d4fa2684bedee6cfeef31a33))
+
+The scope-is-structural grammar, the static reference command, the payload source and the
+  constraint-enforcing fake are all standards that name dectl's own source files as canonical. The
+  fakes' specific refusals stay, since those are the constraints this repo learned from the real
+  API.
+
+- Mark the fake-predicate guidance as proposed rather than settled
+  ([`f8c9783`](https://github.com/datapointchris/dectl/commit/f8c97838fcf2ef3e1ff5ee6fd6b7b2f969087c1e))
+
+The paragraph read as a rule, in the same voice as every ratified one around it, so a session
+  reading the file cold could not tell it apart. What is settled is what FakeS3 does; whether that
+  generalises to every fake is an open question.
+
+The description stays and the generalisation is marked, with the instruction not to carry it
+  elsewhere or cite it as a rule.
+
+### Features
+
+- **iceberg**: Add the iceberg resource type with five read verbs
+  ([`0d14af2`](https://github.com/datapointchris/dectl/commit/0d14af2595302c468b833c24368e53623bf54356))
+
+Nothing in the AWS console gives a usable view of an Iceberg table's state, so the questions asked
+  during an incident — which commit changed the row count, when the file count started climbing,
+  whether the table was rolled back — have no answer short of archaeology.
+
+Adds a pipeline resource assembled from an iceberg_tables block mapping an alias to the Glue Data
+  Catalog database and table that own it, with snapshots, history, files, diff and branches on each.
+  Every verb takes --json.
+
+The reads go through the table's own metadata file. Glue holds only a pointer to it, so a read is
+  GetTable followed by GetObject, and the file carries the snapshots with their per-commit
+  summaries, the snapshot log, the refs and the schema history. That covers every verb here without
+  a query engine or a new dependency; reading a data-file listing would mean the Avro manifests
+  below it, which is why files reports per-snapshot summary counters instead.
+
+diff is the verb the resource is for. With no arguments it compares the current snapshot to its
+  parent, and with one it runs from there to now, naming the commits that ran between and the
+  record, file and byte deltas across them. A walk that never reaches its base reports no commits
+  rather than presenting the target's whole lineage as what ran between two points.
+
+Snapshot ids are 19-digit longs, so a snapshot is addressed by its full id, by any unique tail of
+  one, or by a branch or tag; an ambiguous tail is a usage error listing the candidates.
+
+compact, expire, orphans and rollback are deliberately absent. They are writes and the mechanism is
+  unsettled: pyiceberg reaches expire and rollback and has neither compaction nor orphan removal,
+  while Athena reaches all four but needs a workgroup, an output location and a per-query cost.
+
+The test fakes refuse what the services refuse. Glue raises EntityNotFoundException for an unknown
+  table and can serve one carrying neither Iceberg parameter; S3 hands back a stream rather than
+  bytes and gzips any key ending .gz. Summary values are written as strings throughout, because that
+  is what a real metadata file holds and an integer fixture would let a reader that never coerces
+  pass.
+
+Also corrects the README's durable-execution example, which showed a row number as a handle.
+  Executions resolve by name or by a unique tail of one.
+
+- **iceberg**: Add the iceberg resource type with five read verbs
+  ([#2](https://github.com/datapointchris/dectl/pull/2),
+  [`5662422`](https://github.com/datapointchris/dectl/commit/5662422b3d8cc92d2ee51e76c21ce4885b08a64f))
+
+An Iceberg table's committed history has no usable view: the console shows a schema and nothing
+  about what the table has done, so working out which commit changed a row count means archaeology.
+  This adds an `iceberg` pipeline resource with five read verbs, all served from the table's own
+  metadata file through Glue and S3.
+
+## What to look at
+
+`src/dectl/iceberg.py` is where the reading happens and the only file that needs a close read. Three
+  things to check about it:
+
+- `locate_metadata` and `read_metadata_object` are the refusal path. Every way this can be pointed
+  at something it cannot read — a table absent from Glue, a table that is not Iceberg, an Iceberg
+  table with no `metadata_location`, a pointer that is not an S3 URI, an object that IAM denies, a
+  body that is not JSON — has to name the thing that is wrong. Pointing dectl at a plain Glue table
+  is the first thing anyone does, and the error is the whole of what they get. - `summary_int` is
+  the coercion every counter goes through. Iceberg writes summary values as strings, so a counter
+  read raw is `'2000'`, which compares and concatenates without ever raising. - `ancestry`,
+  `history_rows` and `diff_snapshots` are one idea in three places: the snapshot log and the parent
+  chain answer different questions, and a rollback is only visible in the gap between them.
+
+`src/dectl/commands/iceberg.py` is the two-level factory, the same shape as `glue.py` and
+  `stepfunctions.py`. The verbs hold no logic beyond choosing between `emit_json` and a renderer.
+
+`tests/test_iceberg.py` holds the fakes. Check that they refuse what the services refuse rather than
+  replaying what they were handed.
+
+The wiring is `src/dectl/config.py`, `src/dectl/main.py` and `src/dectl/pipeline_view.py`, and it is
+  mechanical: a resource type has to appear in the pipeline loop, the `resources` summary,
+  `reference`, `resource_types`, `pipeline_to_dict` and `render_pipeline`, or it exists and nothing
+  can find it.
+
+`2ffa34f` is unrelated to the resource type and is a separate read. It regenerates the shared config
+  from the current templates, which drops the references to private tooling that a public repo was
+  publishing.
+
+## How it was verified
+
+`uv run pytest` — 235 passed, 6 skipped, of which 70 are new. `uv run mypy src` clean across 22
+  files, `uv run ruff check src tests` clean, `uv run bandit -c pyproject.toml -r src` silent.
+
+Four assertions were checked to be capable of failing rather than assumed to be. Two by
+  construction, two by mutating the source and watching them go red:
+
+- `test_diff_the_wrong_way_round_reports_that_the_two_are_not_on_one_line` asserts the commit path
+  is empty. It fails against a `diff_snapshots` that returns the walk unconditionally, because an
+  ancestry walk that never reaches its base has collected the target's entire lineage. -
+  `test_a_gzipped_metadata_file_reads` cannot pass without the decompression: `json.loads` on
+  gzipped bytes raises `UnicodeDecodeError`. Narrowing `GZIP_SUFFIXES` to the trailing spelling
+  alone fails the `.gz.metadata.json` case with `is not readable JSON` — the exact symptom a real
+  gzipped table would have produced. -
+  `test_the_diff_counter_table_title_does_not_carry_two_snapshot_ids` was run against a title
+  rewritten to `f'{alias} counters {base_id} {target_id}'`, and caught it. A substring assertion on
+  the alias would not have: at any width the rendered title shows one id and clips the other, so the
+  fault is not fully visible in the output it is read from. - The delete-files assertion reads the
+  row rather than the rendering, because `'2' in out` passes on a table with no delete files at all
+  — the ISO timestamp column carries `2026`.
+
+The rendered output of all five verbs was read against fixtures holding a four-commit table and a
+  rolled-back one, at several terminal widths. Two properties that only reading the output catches
+  carry tests of their own: the diff counter table is titled with the alias alone, because two
+  19-digit ids wrap a table that narrow; and the delete-files column appears only when one of the
+  listed commits reports a delete file.
+
+The assembled surface was run end to end against the template config — `dectl reference`, `dectl
+  PIPELINE list`, and the help at each level.
+
+## What changes
+
+A pipeline that declares `iceberg_tables` gains an `iceberg` command. Nothing changes for a config
+  that does not.
+
+```yaml iceberg_tables: events: database: salesdata-{env}-catalog table: events ```
+
+Both fields carry `{env}`. The block is a `StrictModel` with a `{}` default, so every existing
+  config stays valid untouched and a misspelling of the key is a loud error rather than a pipeline
+  that silently has no Iceberg commands.
+
+The five verbs are `snapshots`, `history`, `files`, `diff` and `branches`, and every one takes
+  `--json`. All five are reads: this resource issues `GetTable` and `GetObject` and nothing else,
+  and needs `glue:GetTable` plus `s3:GetObject` on the metadata key.
+
+The four that list take `--limit`/`-n`, ten rows by default, and `--limit 0` means all of them on
+  all four. A negative is a usage error rather than a slice that quietly drops the last row.
+
+**Three changes reach beyond this resource.** `error()` now writes to stderr rather than stdout, so
+  every refusal in the tool does — `success()` and `info()` stay on stdout, being the answer.
+  Anything scraping a dectl error message off stdout stops seeing it, and anything piping a `--json`
+  read into `jq` stops choking on one. `output.warning_console` is renamed `stderr_console`, since
+  errors share it now.
+
+`format_duration` is one function in `output.py` shared by every resource that shows an elapsed
+  time. Durable executions read `1d02h` where they read `26h05m`, and `91d00h` where they read
+  `2184h00m`. That range is the point: a durable wait can run for months, and the Iceberg diff it
+  now shares a notation with spans a single commit or a quarter.
+
+`diff` is the one worth knowing. With no arguments it compares the current snapshot to its parent.
+  With one it runs from there to now, naming the commits that ran between and the record, file and
+  byte deltas across them.
+
+A snapshot is addressed by its full 19-digit id, by any unique tail of one, or by a branch or tag
+  name. All-digits is read as an id and anything else as a ref, so the two namespaces never contend.
+  An ambiguous tail exits 2 listing the candidates.
+
+Three limits a reader will meet:
+
+- `files` reports each snapshot's own summary counters — file count, total bytes, average file size
+  — and there is no row-per-data-file view. - The delete-files column appears only when one of the
+  listed commits reports a delete file. Its absence on a copy-on-write table is the answer, and
+  `--json` carries the counters either way along with the position and equality breakdown. - A
+  snapshot that has been expired is gone from the metadata file, so nothing can reach it. A ref
+  still pointing at one says so rather than failing on a lookup.
+
+The README's durable-execution example showed a row number as a handle for `logs`. Nothing resolves
+  a row number; executions resolve by name or by a unique tail of one, and the example now shows
+  that.
+
+One paragraph in `CLAUDE.md` is marked *proposed, not settled*: whether a fake's predicate must
+  always be written from the service rather than from the code under test. It describes what
+  `FakeS3` here does and is not ratified beyond that, so it is not a rule to cite.
+
+## Decisions, and what they rejected
+
+- **The metadata file is read directly, through `GetTable` then `GetObject`** — rejecting pyiceberg.
+  Everything these five verbs need is in that JSON, and pyiceberg parses the same bytes into
+  dataclasses. It also cannot open an `s3://` table without pyarrow or s3fs, and either one more
+  than doubles the install for a tool whose only dependency on AWS is boto3. - **Athena's metadata
+  tables were rejected for the reads** — they answer the same questions through a billed query
+  against a workgroup and an output location, which is config and latency for bytes that a
+  `GetObject` already returns. It stays the candidate for the maintenance verbs, where it reaches
+  things nothing else does. - **`iceberg_tables` maps an alias to `{database, table}`** — matching
+  `glue_jobs`, `lambdas` and `step_functions`, so the alias is a tree node rather than an argument
+  and an unknown table is a Typer usage error listing the ones that exist. - **A non-linear diff
+  reports no commits at all**, rather than the walk it collected. Two snapshots on different
+  branches have no path between them, and the target's whole lineage presented as "what ran between
+  these" is a confident answer to a question with none. - **The snapshot handle is the id's tail,
+  not a row number** — `cli-design.md` § "A UUID-keyed resource needs a short handle of its own". A
+  position is a property of the listing that printed it, so it means something different under a
+  different query.
+
+## Risk and rollback
+
+Nothing here writes to AWS. Every verb is a read, so the worst failure is a wrong or absent answer
+  rather than a changed table.
+
+A revert removes the `iceberg` command and the `iceberg_tables` model. Any config carrying that
+  block then fails validation under `extra='forbid'`, which surfaces through `config validate` and
+  the startup banner rather than silently — the block would have to come out of the config too.
+
+A revert also puts every error message back on stdout and returns `format_duration` to its
+  per-module spellings. Neither is recoverable by config, so a caller that had come to depend on
+  reading dectl errors from stderr would have to be changed back with it.
+
+## What this does not do
+
+`compact`, `expire`, `orphans` and `rollback` are absent, and no stub stands in for them. All four
+  are writes and the mechanism is a genuine fork rather than a detail: pyiceberg reaches `expire`
+  and `rollback` through `maintenance` and `manage_snapshots` and, as of 0.11.1, has neither
+  compaction nor orphan removal, while Athena reaches all four through `OPTIMIZE ... REWRITE DATA
+  USING BIN_PACK` and `VACUUM` but needs a workgroup, an output location and a per-query cost.
+  Choosing means taking on either a heavy dependency or new account-level config, and neither
+  belongs in a change about reading.
+
+There is no per-data-file listing, for the reason above: everything below the metadata file is Avro.
+
+## The review
+
+https://github.com/datapointchris/dectl/pull/2#pullrequestreview-5034132105 — 7 correctness, 4
+  breaks a rule, 3 rules proposed, 1 design. All twelve findings fixed in `735663a`; the three rule
+  proposals are for the standards rather than for this branch.
+
+Correctness:
+
+1. fixed — `735663a`. The gzip check missed `<name>.gz.metadata.json`, which is what every current
+  writer produces, so a gzipped table was reported as corrupt. 2. fixed — `735663a`. The S3 fake
+  gzipped on the code's own predicate, so the test passed on the one spelling the code got right.
+  The fake now encodes Iceberg's names. 3. fixed — `735663a`. `error()` moved to stderr, tool-wide.
+  4. fixed — `735663a`. One reading of `--limit`, shared by all four list verbs, with `min=0`
+  turning a negative into a usage error. 5. fixed — `735663a`. `isdecimal()`, so a superscript is a
+  ref lookup rather than a traceback. 6. fixed — `735663a`. Asserts the row's `delete_files` and
+  `position_deletes`, not the render. 7. fixed — `735663a`. Asserts the ids are absent from the
+  title line.
+
+Breaks a written rule:
+
+1. fixed — `735663a`. `import datetime as dt`. 2. fixed — `735663a`. `sort_key` is
+  `snapshot_timestamp_ms`. 3. fixed — `735663a`. `branches` takes `--limit`/`-n`. 4. fixed —
+  `735663a`. The three citations keep the lesson and drop the locale.
+
+Design:
+
+1. fixed — `735663a`. One `format_duration` in `output.py`, carrying seconds through days. The
+  sub-minute case is the one that mattered: `diff` with no arguments compares the current commit to
+  its parent, and on a streaming table those are usually seconds apart, where the old formatter
+  printed `(0m)`.
+
+Rules proposed, none of which changes this branch:
+
+1. `sweep-a-cross-repo-citation-as-a-fleet-path` — the sweep behind a documentation rule does not
+  recognise a `§` citation into a shared standards directory, which is the most common cross-repo
+  pointer a `CLAUDE.md` carries. It returned clean here while three sat in the file. 2.
+  `a-flag-means-one-thing-across-every-verb-of-a-resource` — the existing rules settle whether `0`
+  may mean "all" on a `--limit` and that a verb means one thing, and neither reaches a flag
+  diverging between sibling verbs of one resource, where both help rows read identically. 3.
+  `a-fake-restating-the-implementations-rule-proves-nothing` — the fake rule is written against
+  permissiveness, and does not reach a fake that enforces the code's constraint instead of the
+  service's. That failure is worse, because it leaves a green test named for the property.
+
+### Refactoring
+
+- **update**: Let pyselfupdate resolve the credential
+  ([`224ce32`](https://github.com/datapointchris/dectl/commit/224ce329ccd2b9441b8ef7bcd253eb99994171aa))
+
+pyselfupdate now runs gh auth token itself, so the local helper was a second implementation of the
+  library's default. GITHUB_TOKEN_COMMAND redirects or empties it and belongs to whoever runs dectl,
+  which a hardcoded token_func could not offer.
+
+Removes the shutil and subprocess imports with it. The three tests that covered the helper move to
+  the library, where the behaviour now lives; what is left asserts dectl configures no credential of
+  its own.
+
+### Testing
+
+- **main**: Assert on a help fragment no style boundary splits
+  ([`5f461b5`](https://github.com/datapointchris/dectl/commit/5f461b5f1c4883234d61e5ac3c44104932af8e0e))
+
+rich styles 'Usage:' and the command name separately, so an escape sequence sits between them
+  wherever colour is on and the two words are only contiguous without it. The runner has colour on
+  and this machine does not, which is the one condition the local suite cannot reproduce.
+
+
 ## v2.7.1 (2026-08-21)
 
 ### Bug Fixes
