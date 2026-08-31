@@ -6,14 +6,14 @@ from itertools import starmap
 from typing import Annotated
 
 import typer
-import yaml
-from pydantic import ValidationError
 from rich.syntax import Syntax
 
+from dectl.config import CONFIG_LOAD_ERRORS
 from dectl.config import CONFIG_PATH
 from dectl.config import TEMPLATE_CONFIG
 from dectl.config import init_config
 from dectl.config import load_config
+from dectl.config import report_config_error
 from dectl.output import console
 from dectl.output import emit_json
 from dectl.output import error
@@ -43,10 +43,13 @@ def config_show(
     as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
 ) -> None:
     """Display the loaded pipelines and their resources (alias → AWS name)."""
-    cfg = load_config()
+    try:
+        cfg = load_config()
+    except CONFIG_LOAD_ERRORS as exc:
+        report_config_error(exc)
+        raise typer.Exit(1) from exc
     if cfg is None:
-        error(f'no config found at {CONFIG_PATH}')
-        info('run "dectl config init" to create one')
+        error(f'no config found at {CONFIG_PATH} — run "dectl config init" to create one')
         raise typer.Exit(1)
 
     if as_json:
@@ -114,21 +117,13 @@ def config_edit() -> None:
 def config_validate() -> None:
     """Check that the config exists, is valid YAML, and matches the expected schema."""
     if not CONFIG_PATH.exists():
-        error(f'no config found at {CONFIG_PATH}')
-        info('run "dectl config init" to create one')
+        error(f'no config found at {CONFIG_PATH} — run "dectl config init" to create one')
         raise typer.Exit(1)
 
     try:
         load_config()
-    except yaml.YAMLError as exc:
-        error(f'config at {CONFIG_PATH} is not valid YAML:')
-        console.print(f'  {exc}')
-        raise typer.Exit(1) from exc
-    except ValidationError as exc:
-        error(f'config at {CONFIG_PATH} does not match the expected schema:')
-        for err in exc.errors():
-            location = '.'.join(str(part) for part in err['loc']) or '(root)'
-            console.print(f'  {location}: {err["msg"]}')
+    except CONFIG_LOAD_ERRORS as exc:
+        report_config_error(exc)
         raise typer.Exit(1) from exc
 
     success(f'config at {CONFIG_PATH} is valid')

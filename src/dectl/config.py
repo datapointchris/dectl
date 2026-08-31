@@ -3,6 +3,10 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel
 from pydantic import ConfigDict
+from pydantic import ValidationError
+
+from dectl.output import error
+from dectl.output import stderr_console
 
 CONFIG_DIR = Path.home() / '.config' / 'dectl'
 CONFIG_PATH = CONFIG_DIR / 'config.yaml'
@@ -166,6 +170,63 @@ def load_config() -> DectlConfig | None:
         return None
     raw = yaml.safe_load(CONFIG_PATH.read_text())
     return DectlConfig.model_validate(raw)
+
+
+# The two ways a config that exists still fails to load: YAML that will not parse, and YAML that
+# does not match the models. Declared once because every caller catches them together — a reader
+# hitting either one needs the same answer, and `except Exception` would swallow real bugs.
+CONFIG_LOAD_ERRORS = (yaml.YAMLError, ValidationError)
+
+# A rejected value is shown so the reader can see which key the location names, but a `missing`
+# error's input is the whole parent object and a large pipeline block would bury the message.
+MAX_INPUT_CHARS = 160
+
+
+def config_error_headline(exc: yaml.YAMLError | ValidationError) -> str:
+    """The one-line summary: which file, and which of the two failures it hit."""
+    kind = 'is not valid YAML' if isinstance(exc, yaml.YAMLError) else 'does not match the expected schema'
+    return f'config at {CONFIG_PATH} {kind}:'
+
+
+def describe_config_error(exc: yaml.YAMLError | ValidationError) -> list[str]:
+    """The failure as indented detail lines: where it is, what is wrong, and what was rejected.
+
+    The rejected value is carried because it is what identifies the offending key when the
+    location alone is ambiguous — `pipelines.p.step_function` names a plausible spelling, and
+    the value is the block the reader has to go and find. Pydantic's error code and docs URL
+    are dropped, since both restate the message in the line above them.
+    """
+    if isinstance(exc, ValidationError):
+        lines = []
+        for err in exc.errors():
+            location = '.'.join(str(part) for part in err['loc']) or '(root)'
+            rejected = repr(err['input'])
+            if len(rejected) > MAX_INPUT_CHARS:
+                rejected = f'{rejected[:MAX_INPUT_CHARS]}…'
+            lines.append(f'  {location}: {err["msg"]}')
+            lines.append(f'    got: {rejected}')
+        return lines
+    return [f'  {line}' for line in str(exc).splitlines()]
+
+
+def report_config_error(exc: yaml.YAMLError | ValidationError) -> None:
+    """Print the whole diagnostic, headline through fix hint.
+
+    One renderer for every caller, because the question is the same from `config validate`,
+    `config show`, `list`, `search`, an unknown pipeline name, and bare `dectl`. A site that
+    answers it its own way answers it worse: the reader reaches for whichever command they
+    happened to think of, and the useful one is not knowable from outside.
+
+    Every line goes to stderr: the detail is not the answer to a read, and `config show --json`
+    has to stay parseable on the path where it fails. The details print with markup disabled
+    because a rejected list value renders as `['a']`, which rich would eat as a style tag.
+    """
+    error(config_error_headline(exc))
+    for line in describe_config_error(exc):
+        stderr_console.print(line, markup=False)
+    # The headline already named the file, and repeating a long path here wraps across two
+    # lines on a narrow terminal, which breaks it mid-token for anyone copying it.
+    stderr_console.print('run "dectl config edit" to fix it', style='dim')
 
 
 def init_config() -> Path:

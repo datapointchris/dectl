@@ -102,13 +102,21 @@ example` prints it (syntax-highlighted on a TTY, plain when piped so `config exa
 stays clean), and it exercises every option so it doubles as side-by-side reference while editing.
 
 All models inherit `StrictModel` (`extra='forbid'`), so an unknown key — a typo like
-`step_function:` — is a loud error surfaced by `config validate` rather than a silently dropped
-field. Because forbidding extras widens what counts as "invalid," `main.py` wraps its import-time
-`load_config()` in try/except: a present-but-invalid config falls back to `cfg = None` (so the
-always-present `config` commands stay reachable to diagnose and fix it) and the root callback's
-bare-invocation banner prints the reason. Only a *missing* config yields `None` from
-`load_config()` directly; an invalid one still raises, which is what `config validate` catches to
-report the exact failing path.
+`step_function:` — is a loud error rather than a silently dropped field. Because forbidding
+extras widens what counts as "invalid," `main.py` wraps its import-time `load_config()` in
+try/except: a present-but-invalid config falls back to `cfg = None` (so the always-present
+`config` commands stay reachable to diagnose and fix it) and keeps the exception in
+`CONFIG_ERROR`. Only a *missing* config yields `None` from `load_config()` directly; an invalid
+one raises, and `CONFIG_LOAD_ERRORS` is the tuple every caller catches.
+
+`report_config_error` is the single renderer for that failure, and every site that notices the
+missing pipelines calls it: `list`, `search`, `config show`, `config validate`, bare `dectl`, and
+`DectlGroup.get_command` when the name typed was a pipeline. It prints the file and which of the
+two failures it hit, then one entry per problem carrying the location, the message, and the
+rejected value — `describe_config_error` keeps that value because it is what identifies the
+offending key when the location alone is ambiguous. Every line goes to stderr, and the detail
+prints with markup disabled because a rejected list renders as `['a']`, which rich would eat as
+a style tag.
 
 `config edit` resolves the editor via `$VISUAL` → `$EDITOR` (no hardcoded fallback — the env var
 carries the user's intent, including any `--wait`), `shlex.split`s it so args survive, resolves the
@@ -248,6 +256,16 @@ and an eval'd `s3 export` stay clean.
   version ran it. It is bounded by `VERSION_SWEEP_DEPTH` and returns the versions it scanned, so
   callers report the span rather than presenting a bounded search as exhaustive.
 
+- **`cfg is None` covers two states that need opposite answers** — no config file, and a config
+  file that failed to load. The first is `config init`, the second is `config edit`, and telling
+  a reader to init a config that already exists sends them to a command that refuses. Nothing
+  reads `cfg` directly to refuse: `require_config` is the guard, it consults `CONFIG_ERROR`
+  first, and it returns the config so the caller has no reason to reach for the global.
+- **A config that does not load takes the whole pipeline tree with it** — every pipeline is a
+  subcommand assembled from config, so Click's answer to `dectl my-pipeline ...` is "No such
+  command", which sends the reader after a typo in something they have run for months.
+  `DectlGroup.get_command` answers with the config failure instead, and only while `cfg is None`.
+  With a config loaded, an unknown name really is one and the usage error is correct.
 - **stdout is data and stderr is everything else, and `error()` is where that is enforced** —
   every refusal in the tool goes through it, and every read verb takes `--json`, so a message
   printed to stdout reaches a caller as a parse error instead. `success` and `info` stay on

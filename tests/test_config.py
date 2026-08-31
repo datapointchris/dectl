@@ -8,6 +8,8 @@ from pydantic import ValidationError
 
 from dectl.config import TEMPLATE_CONFIG
 from dectl.config import DectlConfig
+from dectl.config import config_error_headline
+from dectl.config import describe_config_error
 from dectl.config import load_config
 
 
@@ -186,3 +188,67 @@ def test_defaults_have_sensible_fallbacks():
     assert config.defaults.region == 'us-east-2'
     assert config.defaults.environment == 'dev'
     assert config.defaults.aws_profile == ''
+
+
+def validation_error_for(raw) -> ValidationError:
+    """The real exception a bad config produces, since the renderer walks `.errors()`."""
+    with pytest.raises(ValidationError) as caught:
+        DectlConfig.model_validate(raw)
+    return caught.value
+
+
+def test_describe_names_the_location_and_the_rejected_value():
+    # The rejected value is what identifies the offending key: `step_function` is a plausible
+    # spelling, and the location alone leaves the reader hunting for which block held it.
+    exc = validation_error_for(
+        {
+            'defaults': {'account_id': '111'},
+            'pipelines': {'p': {'step_function': {'flow': {'name': 'sm'}}}},
+        }
+    )
+
+    lines = describe_config_error(exc)
+
+    assert lines[0] == '  pipelines.p.step_function: Extra inputs are not permitted'
+    assert lines[1] == "    got: {'flow': {'name': 'sm'}}"
+
+
+def test_describe_truncates_a_large_rejected_value():
+    # A `missing` error's input is the whole parent object, so a real pipeline block would
+    # bury the message it is meant to illustrate.
+    exc = validation_error_for({'pipelines': {'p': {'buckets': {f'alias-{n}': f'bucket-{n}' for n in range(40)}}}})
+
+    lines = describe_config_error(exc)
+
+    assert lines[0] == '  defaults: Field required'
+    assert lines[1].endswith('…')
+    assert len(lines[1]) < 200
+
+
+def test_describe_reports_every_problem_not_only_the_first():
+    exc = validation_error_for({'defaults': {'account_id': '111', 'acct': 'x'}, 'pipelines': {'p': {'glue_jbs': {}}}})
+
+    lines = describe_config_error(exc)
+
+    assert '  defaults.acct: Extra inputs are not permitted' in lines
+    assert '  pipelines.p.glue_jbs: Extra inputs are not permitted' in lines
+
+
+def test_a_yaml_syntax_error_reports_through_the_same_renderer():
+    # Both failures are caught together everywhere, so both have to render.
+    with pytest.raises(yaml.YAMLError) as caught:
+        yaml.safe_load('defaults:\n  account_id: "1"\n pipelines: {}\n')
+
+    lines = describe_config_error(caught.value)
+
+    assert lines
+    assert all(line.startswith('  ') for line in lines)
+
+
+def test_the_headline_distinguishes_the_two_failures():
+    schema_error = validation_error_for({'pipelines': {}})
+    with pytest.raises(yaml.YAMLError) as caught:
+        yaml.safe_load('a:\n b: 1\n  c: 2\n')
+
+    assert 'does not match the expected schema' in config_error_headline(schema_error)
+    assert 'is not valid YAML' in config_error_headline(caught.value)

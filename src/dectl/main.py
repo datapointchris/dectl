@@ -1,6 +1,7 @@
 from itertools import starmap
 from typing import Annotated
 
+import click
 import typer
 import yaml
 from pyclisteno import attach
@@ -8,6 +9,7 @@ from pydantic import ValidationError
 from pyselfupdate import Config
 from pyselfupdate import notify
 from pyselfupdate.typercmd import run_update
+from typer.core import TyperGroup
 
 from dectl.commands.config_cmd import config_app
 from dectl.commands.glue import make_glue_app
@@ -18,24 +20,80 @@ from dectl.commands.release import make_release_app
 from dectl.commands.s3 import make_s3_app
 from dectl.commands.search import run_search
 from dectl.commands.stepfunctions import make_sfn_app
+from dectl.config import CONFIG_LOAD_ERRORS
 from dectl.config import CONFIG_PATH
+from dectl.config import DectlConfig
 from dectl.config import PipelineConfig
 from dectl.config import load_config
+from dectl.config import report_config_error
 from dectl.env import active_environment
 from dectl.env import set_active_environment
 from dectl.output import console
 from dectl.output import emit_json
 from dectl.output import error
 from dectl.output import info
+from dectl.output import stderr_console
 from dectl.pipeline_view import pipeline_to_dict
 from dectl.pipeline_view import render_pipeline
 from dectl.pipeline_view import resource_types
 from dectl.prompt import set_no_input
 from dectl.session import make_session
 
+# A present-but-invalid config must not brick the CLI: without this guard the ValidationError
+# would propagate out of import and take down every command, including the `config validate` /
+# `config edit` you would use to fix it. Fall back to no config and surface the reason wherever
+# the missing pipelines are noticed.
+#
+# The exception itself is kept, not str(exc): every reporting site renders it through
+# report_config_error, which walks exc.errors() for the location and the rejected value.
+try:
+    cfg = load_config()
+    CONFIG_ERROR: yaml.YAMLError | ValidationError | None = None
+except CONFIG_LOAD_ERRORS as exc:
+    cfg = None
+    CONFIG_ERROR = exc
+
+
+def require_config() -> DectlConfig:
+    """Refuse with the reason there are no pipelines, and never with the wrong one.
+
+    `cfg is None` covers two states that need opposite answers — no config file, and a config
+    file that failed to load. Naming the second as the first sends the reader to `config init`,
+    which refuses because the file it would write is already there. `CONFIG_ERROR` is what
+    separates them, so it is consulted before `cfg`.
+
+    Returning the config is what keeps a caller from reading the global after the guard, where
+    the type is `DectlConfig | None` and every use needs a narrowing it cannot get.
+    """
+    if CONFIG_ERROR is not None:
+        report_config_error(CONFIG_ERROR)
+        raise typer.Exit(1)
+    if cfg is None:
+        error(f'no config found at {CONFIG_PATH} — run "dectl config init" first')
+        raise typer.Exit(1)
+    return cfg
+
+
+class DectlGroup(TyperGroup):
+    """Report the config failure where an unknown pipeline name is what the reader typed.
+
+    Every pipeline is a subcommand assembled from config, so a config that does not load takes
+    the whole pipeline tree with it. Click can only report the name as unknown, which sends the
+    reader after a typo in a command they have run for months. The substitution holds only
+    while there is no loaded config to have contained the name — with one loaded, an unknown
+    name really is unknown and Click's usage error is the right answer.
+    """
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        command = super().get_command(ctx, cmd_name)
+        if command is None and cfg is None:
+            require_config()
+        return command
+
+
 # no_args_is_help is intentionally omitted: it would short-circuit to help before the callback
 # runs, so the callback (invoke_without_command) prints the env banner then the help itself.
-app = typer.Typer(name='dectl', invoke_without_command=True)
+app = typer.Typer(name='dectl', cls=DectlGroup, invoke_without_command=True)
 app.add_typer(config_app, name='config', rich_help_panel='Global commands')
 
 
@@ -54,17 +112,6 @@ def resolve_env_source(ctx: typer.Context) -> str:
     # config's `environment` field (falling back to 'dev' only when there is no config at all).
     return ENV_SOURCE_LABELS.get(source_name, 'config' if cfg else 'default')
 
-
-# A present-but-invalid config must not brick the CLI: without this guard the ValidationError
-# would propagate out of import and take down every command, including the `config validate` /
-# `config edit` you would use to fix it. Fall back to no config and surface the reason in the
-# root callback's banner instead.
-try:
-    cfg = load_config()
-    CONFIG_LOAD_ERROR: str | None = None
-except (ValidationError, yaml.YAMLError) as exc:
-    cfg = None
-    CONFIG_LOAD_ERROR = str(exc)
 
 EXAMPLE_PIPELINE = next(iter(cfg.pipelines), 'my-pipeline') if cfg and cfg.pipelines else 'my-pipeline'
 DEFAULT_ENVIRONMENT = cfg.defaults.environment if cfg else 'dev'
@@ -275,9 +322,9 @@ def main(
         notify(UPDATE_CONFIG)
     if ctx.invoked_subcommand is None:
         print_environment_banner()
-        if CONFIG_LOAD_ERROR:
-            error(f'config at {CONFIG_PATH} is invalid — pipelines unavailable.')
-            info('run "dectl config validate" to see what is wrong, or "dectl config edit" to fix it')
+        if CONFIG_ERROR is not None:
+            report_config_error(CONFIG_ERROR)
+            stderr_console.print('pipeline commands are absent from the help below until it loads', style='dim')
         print(ctx.get_help())
 
 
@@ -292,11 +339,9 @@ def search(
     per service where a name contains the keyword. Useful for finding the real
     AWS name behind a config alias, or checking whether a resource exists.
     """
-    if not cfg:
-        error('no config loaded — run "dectl config init" first')
-        raise typer.Exit(1)
-    session = make_session(cfg)
-    run_search(session, keyword, cfg.defaults.region, as_json=as_json)
+    config = require_config()
+    session = make_session(config)
+    run_search(session, keyword, config.defaults.region, as_json=as_json)
 
 
 @app.command('env', rich_help_panel='Global commands')
@@ -310,14 +355,12 @@ def list_all(
     as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
 ) -> None:
     """List every pipeline with its jobs, functions, and buckets (alias → AWS name)."""
-    if not cfg:
-        error('no config loaded — run "dectl config init" first')
-        raise typer.Exit(1)
+    config = require_config()
 
     if as_json:
-        emit_json(list(starmap(pipeline_to_dict, cfg.pipelines.items())))
+        emit_json(list(starmap(pipeline_to_dict, config.pipelines.items())))
         return
-    for name, p in cfg.pipelines.items():
+    for name, p in config.pipelines.items():
         render_pipeline(name, p)
 
 
