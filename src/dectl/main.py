@@ -1,7 +1,7 @@
 from itertools import starmap
 from typing import Annotated
+from typing import Any
 
-import click
 import typer
 import yaml
 from pyclisteno import attach
@@ -84,7 +84,11 @@ class DectlGroup(TyperGroup):
     name really is unknown and Click's usage error is the right answer.
     """
 
-    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+    # `Any` because typer vendors click privately as `typer._click`, and those are the types
+    # this signature has to match. `click` itself is not a dectl dependency and would be the
+    # wrong hierarchy anyway; `typer.Context` is a subclass of the vendored one, so naming it
+    # here narrows a parameter the base widens.
+    def get_command(self, ctx: Any, cmd_name: str) -> Any:
         command = super().get_command(ctx, cmd_name)
         if command is None and cfg is None:
             require_config()
