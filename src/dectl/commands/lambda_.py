@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from botocore.exceptions import ReadTimeoutError
 
 from dectl.config import DectlConfig
 from dectl.config import LambdaConfig
@@ -178,14 +179,26 @@ def add_standard_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, conf
 
         This calls the unqualified function, so it runs the latest deployed code
         even if you have not published a version yet — ideal for the fast dev loop.
+        The wait is the function's own Timeout plus a margin, and a call that does
+        not answer within it is reported rather than retried.
         """
+        from dectl.session import invoke_read_timeout
+        from dectl.session import make_invoke_client
         from dectl.session import make_session
 
         fn = resolved()
         payload = read_payload(payload_file)
-        client = make_session(config).client('lambda')
+        session = make_session(config)
+        read_timeout = invoke_read_timeout(session.client('lambda'), fn)
+        invoke_client = make_invoke_client(session, read_timeout)
 
-        report_invocation(client.invoke(FunctionName=fn.name, Payload=payload.encode()), as_json)
+        try:
+            response = invoke_client.invoke(FunctionName=fn.name, Payload=payload.encode())
+        except ReadTimeoutError:
+            error(f'{fn.name} answered nothing in {read_timeout}s — it is still running, and dectl did not retry')
+            raise typer.Exit(1) from None
+
+        report_invocation(response, as_json)
 
     @fn_app.command(epilog=f'Example:\n\ndectl {pipeline_name} lambda {alias} logs --follow')
     def logs(
@@ -237,13 +250,18 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         $LATEST: Lambda rejects an unqualified invoke of a durable function, because an execution
         is pinned to the version it starts on so that a replay hours or days later runs the same
         code. Synchronous invocation waits for the whole execution and is capped at 15 minutes —
-        use --async for anything longer.
+        use --async for anything longer. A wait that expires is reported rather than retried.
         """
+        from dectl.session import invoke_read_timeout
+        from dectl.session import make_invoke_client
         from dectl.session import make_session
 
         fn = resolved()
         payload = read_payload(payload_file)
-        client = make_session(config).client('lambda')
+        session = make_session(config)
+        client = session.client('lambda')
+        read_timeout = invoke_read_timeout(client, fn)
+        invoke_client = make_invoke_client(session, read_timeout)
 
         kwargs: dict = {'FunctionName': fn.name, 'Qualifier': invoke_qualifier(fn), 'Payload': payload.encode()}
         if run_async:
@@ -251,7 +269,13 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         if name:
             kwargs['DurableExecutionName'] = name
 
-        resp = client.invoke(**kwargs)
+        try:
+            resp = invoke_client.invoke(**kwargs)
+        except ReadTimeoutError:
+            error(f'{fn.name} answered nothing in {read_timeout}s — the execution is still running, and dectl did not retry')
+            error(f'see "dectl {pipeline_name} lambda {alias} executions"')
+            raise typer.Exit(1) from None
+
         execution_arn = resp.get('DurableExecutionArn')
         # Suppressed under --json so the response payload stays the only thing on stdout, the
         # same reason warnings go to stderr elsewhere. The ARN is in `executions --json`.
