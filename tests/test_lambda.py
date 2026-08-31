@@ -1,10 +1,16 @@
 import json
 from datetime import datetime
 
+from botocore.exceptions import ClientError
+from botocore.exceptions import ReadTimeoutError
 from typer.testing import CliRunner
 
 from dectl.commands.lambda_ import make_lambda_app
 from dectl.config import DectlConfig
+from dectl.invoke import DURABLE_SYNC_CAP_SECONDS
+from dectl.invoke import EVENT_ACK_TIMEOUT_SECONDS
+from dectl.invoke import INVOKE_TIMEOUT_MARGIN_SECONDS
+from dectl.invoke import timed_out_message
 
 runner = CliRunner()
 
@@ -44,30 +50,40 @@ def test_unknown_function_is_not_a_command():
     assert result.exit_code != 0
 
 
+def stderr_text(result) -> str:
+    """Refusals as one line. rich soft-wraps to the console width, so a phrase splits across a
+    newline at one width and not another; the assertion is about the words, not the wrapping."""
+    return ' '.join(result.stderr.split())
+
+
+def plain_app(**overrides):
+    fn = {'name': 'fn', 'source_dir': 'code'} | overrides
+    config = make_config({'notifier': fn})
+    return make_lambda_app('proj', config.pipelines['proj'], config)
+
+
+class FakeLambda:
+    def __init__(self, payload: bytes = b'{}', timeout: int = 3) -> None:
+        self.invoke_kwargs: dict = {}
+        self.payload = payload
+        self.timeout = timeout
+
+    def invoke(self, **kwargs):
+        self.invoke_kwargs = kwargs
+        return {'Payload': FakeEmptyPayload(self.payload)}
+
+    def get_function_configuration(self, FunctionName):
+        return {'Timeout': self.timeout, 'FunctionName': FunctionName}
+
+
 def test_run_json_emits_clean_response(monkeypatch):
-    config = make_config({'notifier': {'name': 'fn', 'source_dir': 'code'}})
-    app = make_lambda_app('proj', config.pipelines['proj'], config)
+    client = FakeLambda(payload=json.dumps({'ok': True}).encode())
+    patch_session(monkeypatch, client)
 
-    class FakePayload:
-        def read(self):
-            return json.dumps({'ok': True}).encode()
-
-    class FakeLambda:
-        def invoke(self, FunctionName, Payload):
-            assert Payload == b'{}'  # default payload when none supplied
-            return {'Payload': FakePayload()}
-
-    class FakeSession:
-        def client(self, name):
-            return FakeLambda()
-
-    # The command lazy-imports make_session inside the function, so patching the source binding
-    # takes effect at call time.
-    monkeypatch.setattr('dectl.session.make_session', lambda config: FakeSession())
-
-    result = runner.invoke(app, ['notifier', 'run', '--json'])
+    result = runner.invoke(plain_app(), ['notifier', 'run', '--json'])
 
     assert result.exit_code == 0
+    assert client.invoke_kwargs['Payload'] == b'{}'  # default payload when none supplied
     assert json.loads(result.stdout) == {'ok': True}
 
 
@@ -109,12 +125,103 @@ class FakeEmptyPayload:
         return self.body
 
 
-def patch_session(monkeypatch, lambda_client, logs_client=None):
-    class FakeSession:
-        def client(self, name):
-            return logs_client if name == 'logs' else lambda_client
+def reject_retrying_invoke(config) -> None:
+    """Refuse an Invoke issued through a client botocore would retry.
 
-    monkeypatch.setattr('dectl.session.make_session', lambda config: FakeSession())
+    Invoke is the one call dectl makes that AWS cannot take back: a retry is a second run of a
+    function Lambda cannot cancel, so the copies overlap and race each other over whatever the
+    function writes. A fake that accepts any client makes the retrying invoke and the fixed one
+    indistinguishable, which is how a 60-second default reached a 205-second function."""
+    attempts = None if config is None else config.retries.get('total_max_attempts')
+    if attempts != 1:
+        raise AssertionError(
+            f'invoke was issued through a client that retries (total_max_attempts={attempts}); '
+            'every retry is a second run of a function Lambda cannot cancel. '
+            'Build the invoking client with make_invoke_client.'
+        )
+
+
+class BoundLambdaClient:
+    """One lambda client: the shared recorder, plus the botocore Config this client was built with.
+
+    The read client and the invoking client are separate objects built from the same session, and
+    only the second may invoke. Binding the config to the client is what lets the fake tell them
+    apart at the moment invoke is called."""
+
+    def __init__(self, backend, config) -> None:
+        self._backend = backend
+        self.config = config
+
+    def invoke(self, **kwargs):
+        reject_retrying_invoke(self.config)
+        return self._backend.invoke(**kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._backend, name)
+
+
+class FakeSession:
+    def __init__(self, lambda_client, logs_client=None) -> None:
+        self.lambda_client = lambda_client
+        self.logs_client = logs_client
+        self.configs: list = []
+
+    def client(self, name, config=None):
+        if name == 'logs':
+            return self.logs_client
+        self.configs.append(config)
+        return BoundLambdaClient(self.lambda_client, config)
+
+    @property
+    def invoke_config(self):
+        """The Config of the one client built to invoke through."""
+        return next(config for config in self.configs if config is not None)
+
+
+def patch_session(monkeypatch, lambda_client, logs_client=None) -> FakeSession:
+    session = FakeSession(lambda_client, logs_client)
+    # The command lazy-imports make_session inside the function, so patching the source binding
+    # takes effect at call time.
+    monkeypatch.setattr('dectl.session.make_session', lambda config: session)
+    return session
+
+
+def test_run_waits_the_function_timeout_and_never_retries(monkeypatch):
+    session = patch_session(monkeypatch, FakeLambda(timeout=120))
+
+    result = runner.invoke(plain_app(), ['notifier', 'run'])
+
+    assert result.exit_code == 0
+    assert session.invoke_config.read_timeout == 120 + INVOKE_TIMEOUT_MARGIN_SECONDS
+    assert session.invoke_config.retries['total_max_attempts'] == 1
+
+
+def test_run_reads_the_timeout_through_a_client_that_is_not_the_invoking_one(monkeypatch):
+    # Two clients, one session: reads keep botocore's retries, and only the invoking client drops
+    # them. Collapsing them into one is what the fix exists to prevent.
+    session = patch_session(monkeypatch, FakeLambda())
+
+    result = runner.invoke(plain_app(), ['notifier', 'run'])
+
+    assert result.exit_code == 0
+    assert session.configs.count(None) == 1
+
+
+def test_run_reports_a_read_timeout_instead_of_retrying(monkeypatch):
+    class TimingOutLambda(FakeLambda):
+        def invoke(self, **kwargs):
+            raise ReadTimeoutError(endpoint_url='https://lambda.us-east-2.amazonaws.com')
+
+    patch_session(monkeypatch, TimingOutLambda(timeout=120))
+
+    result = runner.invoke(plain_app(), ['notifier', 'run'])
+
+    assert result.exit_code == 1
+    # Asserted against the builder rather than its words, so rewording the refusal moves both.
+    message = stderr_text(result)
+    assert timed_out_message('fn', 150, run_async=False) in message
+    # A still-running function's output lands in logs, which is the command that changes this.
+    assert 'dectl proj lambda notifier logs' in message
 
 
 def test_durable_function_swaps_run_and_logs_for_execution_verbs():
@@ -157,6 +264,97 @@ def test_durable_run_async_names_the_execution(monkeypatch):
     assert result.exit_code == 0
     assert client.invoke_kwargs['InvocationType'] == 'Event'
     assert client.invoke_kwargs['DurableExecutionName'] == 'order-1'
+
+
+def test_durable_run_waits_the_execution_ceiling(monkeypatch):
+    # A durable invoke waits for the whole execution, which Lambda caps at 15 minutes whatever the
+    # function's own Timeout says.
+    session = patch_session(monkeypatch, FakeDurableLambda())
+
+    result = runner.invoke(durable_app(), ['workflow', 'run'])
+
+    assert result.exit_code == 0
+    assert session.invoke_config.read_timeout == DURABLE_SYNC_CAP_SECONDS + INVOKE_TIMEOUT_MARGIN_SECONDS
+
+
+def test_durable_async_run_also_refuses_to_retry(monkeypatch):
+    # An Event invoke returns before any read timeout can expire, but a retried one starts a second
+    # execution whenever --name was not given.
+    session = patch_session(monkeypatch, FakeDurableLambda())
+
+    result = runner.invoke(durable_app(), ['workflow', 'run', '--async'])
+
+    assert result.exit_code == 0
+    assert session.invoke_config.retries['total_max_attempts'] == 1
+
+
+def test_durable_async_run_waits_on_the_acknowledgement_not_the_execution(monkeypatch):
+    # The wait is resolved after --async is read. Handing an Event invoke the synchronous ceiling
+    # blocks the command for a quarter of an hour on a stalled endpoint, for a call taking
+    # milliseconds — and the refusal would claim an execution is running that may never have queued.
+    session = patch_session(monkeypatch, FakeDurableLambda())
+
+    result = runner.invoke(durable_app(), ['workflow', 'run', '--async'])
+
+    assert result.exit_code == 0
+    assert session.invoke_config.read_timeout == EVENT_ACK_TIMEOUT_SECONDS
+
+
+def test_durable_async_run_reports_a_timeout_without_claiming_the_execution_started(monkeypatch):
+    class TimingOutDurableLambda(FakeDurableLambda):
+        def invoke(self, **kwargs):
+            raise ReadTimeoutError(endpoint_url='https://lambda.us-east-2.amazonaws.com')
+
+    patch_session(monkeypatch, TimingOutDurableLambda())
+
+    result = runner.invoke(durable_app(), ['workflow', 'run', '--async'])
+
+    assert result.exit_code == 1
+    assert timed_out_message('fn', EVENT_ACK_TIMEOUT_SECONDS, run_async=True) in stderr_text(result)
+
+
+def test_a_throttled_run_is_sent_again_and_succeeds(monkeypatch):
+    # The invoking client retries nothing, so the throttle Lambda used to absorb has to be re-issued
+    # here or a function at its concurrency limit fails the command with a traceback.
+    class ThrottledOnceLambda(FakeDurableLambda):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+
+        def invoke(self, **kwargs):
+            self.attempts += 1
+            if self.attempts == 1:
+                response = {
+                    'Error': {'Code': 'TooManyRequestsException', 'Message': 'Rate Exceeded.'},
+                    'ResponseMetadata': {'HTTPStatusCode': 429},
+                }
+                raise ClientError(response, 'Invoke')
+            return super().invoke(**kwargs)
+
+    client = ThrottledOnceLambda()
+    patch_session(monkeypatch, client)
+    monkeypatch.setattr('time.sleep', lambda seconds: None)
+
+    result = runner.invoke(durable_app(), ['workflow', 'run'])
+
+    assert result.exit_code == 0
+    assert client.attempts == 2
+
+
+def test_durable_run_reports_a_read_timeout_and_points_at_executions(monkeypatch):
+    class TimingOutDurableLambda(FakeDurableLambda):
+        def invoke(self, **kwargs):
+            raise ReadTimeoutError(endpoint_url='https://lambda.us-east-2.amazonaws.com')
+
+    patch_session(monkeypatch, TimingOutDurableLambda())
+
+    result = runner.invoke(durable_app(), ['workflow', 'run'])
+
+    assert result.exit_code == 1
+    message = stderr_text(result)
+    assert timed_out_message('fn', DURABLE_SYNC_CAP_SECONDS + INVOKE_TIMEOUT_MARGIN_SECONDS, run_async=False) in message
+    # The execution outlives the socket, so the listing is where its outcome is read.
+    assert 'dectl proj lambda workflow executions' in message
 
 
 def test_durable_run_without_a_live_alias_falls_back_to_latest(monkeypatch):

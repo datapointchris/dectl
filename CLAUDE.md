@@ -157,6 +157,7 @@ and an eval'd `s3 export` stay clean.
 | Module | Responsibility |
 | --- | --- |
 | `session.py` | Builds the boto3 `Session` from config (region + optional profile). Every command that touches AWS goes through `make_session`. |
+| `invoke.py` | The Lambda Invoke domain: how long to wait for one, the client to send it through, and which failures may safely be sent again. Kept out of `session.py` for the reason `durable.py` is kept out of `logs.py` — it is the Lambda API, not the boto3 session. |
 | `output.py` | The two `rich` consoles and the `error`/`success`/`info`/`warn` helpers, plus `emit_json` (bare-print JSON for `--json`) and `format_duration`. Use these, not bare `print`, for anything human-facing. `error` and `warn` write to `stderr_console`; `success` and `info` write to stdout. |
 | `pipeline_view.py` | Shared pipeline rendering — `render_pipeline` (human) and `pipeline_to_dict` (the stable `--json` shape). Used by both `main.py` (`list`) and `config_cmd.py` (`show`); lives outside both to avoid the `main` ↔ `config_cmd` import cycle. |
 | `payloads.py` | `read_payload` — resolves a `--payload-file` path or `-` (stdin) to a JSON string for `lambda`/`sfn` `run`. |
@@ -185,6 +186,16 @@ and an eval'd `s3 export` stay clean.
 - **Lambda `$LATEST` vs. published alias** — `deploy` without `--publish` only moves `$LATEST`;
   alias-following triggers keep running the old published version until you `--publish` (which
   moves the configured `live_alias`). `run` always targets `$LATEST`.
+- **`Invoke` is the one call dectl makes that AWS cannot take back, so `invoke.py` owns it and
+  `make_session` is never what sends it** — the module's docstring and constants carry the whole
+  mechanism, including which failures may be sent again and why the two attempt-count keys are not
+  interchangeable. Two consequences are worth knowing before reading it: a botocore default reached
+  a 205-second function and ran it five times over, and the function's own `MaximumRetryAttempts`
+  cannot reach that, because those are the client's HTTP retries and Lambda never sees them.
+- **A wait is chosen per invocation, not per function** — a synchronous run waits on the function, a
+  durable one on the whole execution, and an `--async` one only on Lambda taking the event.
+  `invoke_read_timeout` is where the three are told apart, and the third is why the wait is resolved
+  after `--async` is read rather than before.
 - **`s3 export` / `s3 <alias> uri` must stay eval-safe** — a CLI cannot mutate its parent shell,
   so `export` prints `export name='s3://…'` lines for `eval "$(...)"` and `uri` prints a bare
   `s3://…`. Both use bare `print()`, not the rich console, so no markup or ANSI escapes leak into
@@ -218,8 +229,8 @@ and an eval'd `s3 export` stay clean.
   CloudWatch filtered on the execution ARN that the SDK logger stamps onto every record. Note the
   two Error shapes — `GetDurableExecution` returns `Error` unwrapped, history events wrap it in a
   `Payload`/`Truncated` envelope.
-- **The handle is the name's tail, never a row number** — `cli-design.md` § "A UUID-keyed resource
-  needs a short handle of its own": AWS assigns no short id, so `resolve_execution` accepts any
+- **The handle is the name's tail, never a row number** — a UUID-keyed resource needs a short
+  handle of its own, and AWS assigns none, so `resolve_execution` accepts any
   unique suffix of `DurableExecutionName`, tried after both exact-name paths and erroring with the
   candidates when several match. A row number was built first and reverted: a position is only
   valid for the exact query that produced it, so `--status`, `--qualifier` and `--all-versions`
@@ -320,8 +331,19 @@ this repo's fakes encode: `FakeCloudWatchLogs` applies `startTime`, `endTime`,
 `startTime`; `test_durable.py`'s Lambda fake raises on a `Qualifier` that is an alias.
 `test_iceberg.py`'s Glue fake raises `EntityNotFoundException` for an unknown table and can
 serve a table carrying neither Iceberg parameter, and its S3 fake hands back a stream rather
-than bytes and gzips the names *Iceberg* gzips. When you learn a new constraint from the real
-API, encode it in the fake.
+than bytes and gzips the names *Iceberg* gzips. `test_lambda.py`'s session hands out a client
+bound to the botocore `Config` it was built with, and that client raises on an `Invoke` whose
+config still permits a retry. When you learn a new constraint from the real API, encode it in
+the fake.
+
+**botocore's retry loop sits below the client object, so no fake can reach it.** A duplicate
+invoke is issued without the code under test being called twice, which makes every fake-level
+assertion here a statement about the config rather than about the behaviour. `test_invoke.py`
+closes that gap against a socket that accepts connections and answers none, which is what a
+still-running function looks like to botocore: it counts the requests that actually arrive. Every
+other assertion in the repo rests on `total_max_attempts: 1` meaning exactly one request, and
+those two tests are the only place that is established — in requests, which no client object can
+show. Neither needs AWS, and both run in about a second.
 
 **`FakeS3.ICEBERG_GZIP_SUFFIXES` is read off the writers** — Java's `TableMetadataParser` and
 pyiceberg's `serializers.py` — rather than off `iceberg.GZIP_SUFFIXES`. That is what makes it

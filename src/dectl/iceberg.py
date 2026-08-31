@@ -232,8 +232,8 @@ def snapshot_timestamp_ms(snapshot: dict) -> int:
 def limited(rows: list, limit: int) -> list:
     """Take the first `limit` rows, where 0 means every one of them.
 
-    One reading of `--limit` for every verb of this resource. `cli-design.md` § "A sentinel
-    never steals a value the flag can mean" sanctions 0 as "all" on a limit, and a sentinel one
+    One reading of `--limit` for every verb of this resource. A sentinel may never steal a value
+    the flag can otherwise mean, which leaves 0 free to mean "all" on a limit. A sentinel one
     verb honours and its sibling does not is worse than no sentinel at all: both help rows read
     the same, the two answers differ, and the verb that slices to nothing then prints an
     empty-state sentence that is false about the table."""
