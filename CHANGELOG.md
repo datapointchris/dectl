@@ -1,6 +1,22 @@
 # CHANGELOG
 
 
+## v2.8.1 (2026-08-31)
+
+### Bug Fixes
+
+- **main**: Drop the click import that is not a declared dependency
+  ([`e8c42a8`](https://github.com/datapointchris/dectl/commit/e8c42a8bcd024d03293ea66440f69313a448998c))
+
+typer 0.27 vendors click as typer._click and no longer requires the real package, so a uv tool
+  install has no click and dectl fails at import with ModuleNotFoundError before any command runs.
+  The dev and CI environments resolve it transitively through another dependency, which is why every
+  gate passed.
+
+The two annotations it served have no public name: typer.Context is a subclass of the vendored
+  Context, so naming it narrows a parameter the base widens.
+
+
 ## v2.8.0 (2026-08-31)
 
 ### Bug Fixes
