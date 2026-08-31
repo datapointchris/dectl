@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from botocore.exceptions import ConnectTimeoutError
+from botocore.exceptions import EndpointConnectionError
 from botocore.exceptions import ReadTimeoutError
 
 from dectl.config import DectlConfig
@@ -182,8 +184,11 @@ def add_standard_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, conf
         The wait is the function's own Timeout plus a margin, and a call that does
         not answer within it is reported rather than retried.
         """
-        from dectl.session import invoke_read_timeout
-        from dectl.session import make_invoke_client
+        from dectl.invoke import invoke_read_timeout
+        from dectl.invoke import issue_invoke
+        from dectl.invoke import make_invoke_client
+        from dectl.invoke import timed_out_message
+        from dectl.invoke import unreachable_message
         from dectl.session import make_session
 
         fn = resolved()
@@ -193,9 +198,13 @@ def add_standard_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, conf
         invoke_client = make_invoke_client(session, read_timeout)
 
         try:
-            response = invoke_client.invoke(FunctionName=fn.name, Payload=payload.encode())
+            response = issue_invoke(invoke_client, FunctionName=fn.name, Payload=payload.encode())
         except ReadTimeoutError:
-            error(f'{fn.name} answered nothing in {read_timeout}s — it is still running, and dectl did not retry')
+            error(timed_out_message(fn.name, read_timeout, run_async=False))
+            error(f'see "dectl {pipeline_name} lambda {alias} logs"')
+            raise typer.Exit(1) from None
+        except (ConnectTimeoutError, EndpointConnectionError) as exc:
+            error(unreachable_message(fn.name, exc))
             raise typer.Exit(1) from None
 
         report_invocation(response, as_json)
@@ -252,15 +261,20 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         code. Synchronous invocation waits for the whole execution and is capped at 15 minutes —
         use --async for anything longer. A wait that expires is reported rather than retried.
         """
-        from dectl.session import invoke_read_timeout
-        from dectl.session import make_invoke_client
+        from dectl.invoke import invoke_read_timeout
+        from dectl.invoke import issue_invoke
+        from dectl.invoke import make_invoke_client
+        from dectl.invoke import timed_out_message
+        from dectl.invoke import unreachable_message
         from dectl.session import make_session
 
         fn = resolved()
         payload = read_payload(payload_file)
         session = make_session(config)
         client = session.client('lambda')
-        read_timeout = invoke_read_timeout(client, fn)
+        # After run_async, never before it: an Event invoke waits on Lambda taking the event, which
+        # is over in milliseconds and has nothing to do with how long the execution runs.
+        read_timeout = invoke_read_timeout(client, fn, run_async=run_async)
         invoke_client = make_invoke_client(session, read_timeout)
 
         kwargs: dict = {'FunctionName': fn.name, 'Qualifier': invoke_qualifier(fn), 'Payload': payload.encode()}
@@ -270,10 +284,13 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
             kwargs['DurableExecutionName'] = name
 
         try:
-            resp = invoke_client.invoke(**kwargs)
+            resp = issue_invoke(invoke_client, **kwargs)
         except ReadTimeoutError:
-            error(f'{fn.name} answered nothing in {read_timeout}s — the execution is still running, and dectl did not retry')
+            error(timed_out_message(fn.name, read_timeout, run_async=run_async))
             error(f'see "dectl {pipeline_name} lambda {alias} executions"')
+            raise typer.Exit(1) from None
+        except (ConnectTimeoutError, EndpointConnectionError) as exc:
+            error(unreachable_message(fn.name, exc))
             raise typer.Exit(1) from None
 
         execution_arn = resp.get('DurableExecutionArn')

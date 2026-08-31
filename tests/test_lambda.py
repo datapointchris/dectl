@@ -1,13 +1,16 @@
 import json
 from datetime import datetime
 
+from botocore.exceptions import ClientError
 from botocore.exceptions import ReadTimeoutError
 from typer.testing import CliRunner
 
 from dectl.commands.lambda_ import make_lambda_app
 from dectl.config import DectlConfig
-from dectl.session import DURABLE_SYNC_CAP_SECONDS
-from dectl.session import INVOKE_TIMEOUT_MARGIN_SECONDS
+from dectl.invoke import DURABLE_SYNC_CAP_SECONDS
+from dectl.invoke import EVENT_ACK_TIMEOUT_SECONDS
+from dectl.invoke import INVOKE_TIMEOUT_MARGIN_SECONDS
+from dectl.invoke import timed_out_message
 
 runner = CliRunner()
 
@@ -214,11 +217,11 @@ def test_run_reports_a_read_timeout_instead_of_retrying(monkeypatch):
     result = runner.invoke(plain_app(), ['notifier', 'run'])
 
     assert result.exit_code == 1
-    # The user has to know the function may still be running before deciding to invoke again.
+    # Asserted against the builder rather than its words, so rewording the refusal moves both.
     message = stderr_text(result)
-    assert 'still running' in message
-    assert 'did not retry' in message
-    assert '150s' in message
+    assert timed_out_message('fn', 150, run_async=False) in message
+    # A still-running function's output lands in logs, which is the command that changes this.
+    assert 'dectl proj lambda notifier logs' in message
 
 
 def test_durable_function_swaps_run_and_logs_for_execution_verbs():
@@ -285,6 +288,59 @@ def test_durable_async_run_also_refuses_to_retry(monkeypatch):
     assert session.invoke_config.retries['total_max_attempts'] == 1
 
 
+def test_durable_async_run_waits_on_the_acknowledgement_not_the_execution(monkeypatch):
+    # The wait is resolved after --async is read. Handing an Event invoke the synchronous ceiling
+    # blocks the command for a quarter of an hour on a stalled endpoint, for a call taking
+    # milliseconds — and the refusal would claim an execution is running that may never have queued.
+    session = patch_session(monkeypatch, FakeDurableLambda())
+
+    result = runner.invoke(durable_app(), ['workflow', 'run', '--async'])
+
+    assert result.exit_code == 0
+    assert session.invoke_config.read_timeout == EVENT_ACK_TIMEOUT_SECONDS
+
+
+def test_durable_async_run_reports_a_timeout_without_claiming_the_execution_started(monkeypatch):
+    class TimingOutDurableLambda(FakeDurableLambda):
+        def invoke(self, **kwargs):
+            raise ReadTimeoutError(endpoint_url='https://lambda.us-east-2.amazonaws.com')
+
+    patch_session(monkeypatch, TimingOutDurableLambda())
+
+    result = runner.invoke(durable_app(), ['workflow', 'run', '--async'])
+
+    assert result.exit_code == 1
+    assert timed_out_message('fn', EVENT_ACK_TIMEOUT_SECONDS, run_async=True) in stderr_text(result)
+
+
+def test_a_throttled_run_is_sent_again_and_succeeds(monkeypatch):
+    # The invoking client retries nothing, so the throttle Lambda used to absorb has to be re-issued
+    # here or a function at its concurrency limit fails the command with a traceback.
+    class ThrottledOnceLambda(FakeDurableLambda):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+
+        def invoke(self, **kwargs):
+            self.attempts += 1
+            if self.attempts == 1:
+                response = {
+                    'Error': {'Code': 'TooManyRequestsException', 'Message': 'Rate Exceeded.'},
+                    'ResponseMetadata': {'HTTPStatusCode': 429},
+                }
+                raise ClientError(response, 'Invoke')
+            return super().invoke(**kwargs)
+
+    client = ThrottledOnceLambda()
+    patch_session(monkeypatch, client)
+    monkeypatch.setattr('time.sleep', lambda seconds: None)
+
+    result = runner.invoke(durable_app(), ['workflow', 'run'])
+
+    assert result.exit_code == 0
+    assert client.attempts == 2
+
+
 def test_durable_run_reports_a_read_timeout_and_points_at_executions(monkeypatch):
     class TimingOutDurableLambda(FakeDurableLambda):
         def invoke(self, **kwargs):
@@ -296,10 +352,9 @@ def test_durable_run_reports_a_read_timeout_and_points_at_executions(monkeypatch
 
     assert result.exit_code == 1
     message = stderr_text(result)
-    assert 'still running' in message
-    assert 'did not retry' in message
+    assert timed_out_message('fn', DURABLE_SYNC_CAP_SECONDS + INVOKE_TIMEOUT_MARGIN_SECONDS, run_async=False) in message
     # The execution outlives the socket, so the listing is where its outcome is read.
-    assert 'executions' in message
+    assert 'dectl proj lambda workflow executions' in message
 
 
 def test_durable_run_without_a_live_alias_falls_back_to_latest(monkeypatch):

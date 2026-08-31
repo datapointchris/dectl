@@ -176,6 +176,7 @@ version = "2.8.1"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
+    { name = "botocore" },
     { name = "httpx" },
     { name = "pyclisteno" },
     { name = "pydantic" },
@@ -197,6 +198,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "boto3", specifier = ">=1.35.0" },
+    { name = "botocore", specifier = ">=1.35.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "pyclisteno", specifier = ">=0.8.0" },
     { name = "pydantic", specifier = ">=2.6.0" },

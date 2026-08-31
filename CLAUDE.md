@@ -156,7 +156,8 @@ and an eval'd `s3 export` stay clean.
 
 | Module | Responsibility |
 | --- | --- |
-| `session.py` | Builds the boto3 `Session` from config (region + optional profile). Every command that touches AWS goes through `make_session`. `invoke_read_timeout` and `make_invoke_client` build the one client that waits out a function and never retries — see the `Invoke` Gotchas entry. |
+| `session.py` | Builds the boto3 `Session` from config (region + optional profile). Every command that touches AWS goes through `make_session`. |
+| `invoke.py` | The Lambda Invoke domain: how long to wait for one, the client to send it through, and which failures may safely be sent again. Kept out of `session.py` for the reason `durable.py` is kept out of `logs.py` — it is the Lambda API, not the boto3 session. |
 | `output.py` | The two `rich` consoles and the `error`/`success`/`info`/`warn` helpers, plus `emit_json` (bare-print JSON for `--json`) and `format_duration`. Use these, not bare `print`, for anything human-facing. `error` and `warn` write to `stderr_console`; `success` and `info` write to stdout. |
 | `pipeline_view.py` | Shared pipeline rendering — `render_pipeline` (human) and `pipeline_to_dict` (the stable `--json` shape). Used by both `main.py` (`list`) and `config_cmd.py` (`show`); lives outside both to avoid the `main` ↔ `config_cmd` import cycle. |
 | `payloads.py` | `read_payload` — resolves a `--payload-file` path or `-` (stdin) to a JSON string for `lambda`/`sfn` `run`. |
@@ -185,26 +186,16 @@ and an eval'd `s3 export` stay clean.
 - **Lambda `$LATEST` vs. published alias** — `deploy` without `--publish` only moves `$LATEST`;
   alias-following triggers keep running the old published version until you `--publish` (which
   moves the configured `live_alias`). `run` always targets `$LATEST`.
-- **`Invoke` is the one call dectl makes that AWS cannot take back, so it is the one client that
-  must not inherit `make_session`'s defaults** — botocore's are a 60-second read timeout and five
-  attempts, which turn any function slower than a minute into five overlapping copies of itself.
-  Each retry is a fresh invocation and Lambda cancels nothing, so the copies race each other over
-  whatever the function writes; a run measured at 205 seconds produced five starts a minute apart,
-  and they deleted each other's S3 source object. The function's own `MaximumRetryAttempts`
-  reaches none of this, because those are the client's HTTP retries and Lambda never sees them.
-  `make_invoke_client` is the fix and it is used at the two `run` verbs alone — every other call
-  is a read, where a retry costs one round trip and is wanted.
-- **`total_max_attempts`, never `max_attempts`** — botocore accepts both and they differ by
-  exactly one invocation. `total_max_attempts` counts the initial request, so `1` is one call;
-  `max_attempts` counts retries on top of it, so `1` there still fires the duplicate. The two read
-  alike, and a config asserted only on its dict shape passes with either.
-- **The invoke wait is the function's own `Timeout` plus a margin, read through the *other*
-  client** — a fixed number is wrong in both directions: too low re-opens the retry storm, and too
-  high hangs a three-second function for the fifteen-minute ceiling when its socket dies. A durable
-  function skips the lookup, because a synchronous durable invoke waits for the whole execution and
-  Lambda caps that at 15 minutes whatever `Timeout` says. `Invoke` and `GetFunctionConfiguration`
-  are separate permissions, so a failed lookup falls back to that ceiling and warns rather than
-  losing the command.
+- **`Invoke` is the one call dectl makes that AWS cannot take back, so `invoke.py` owns it and
+  `make_session` is never what sends it** — the module's docstring and constants carry the whole
+  mechanism, including which failures may be sent again and why the two attempt-count keys are not
+  interchangeable. Two consequences are worth knowing before reading it: a botocore default reached
+  a 205-second function and ran it five times over, and the function's own `MaximumRetryAttempts`
+  cannot reach that, because those are the client's HTTP retries and Lambda never sees them.
+- **A wait is chosen per invocation, not per function** — a synchronous run waits on the function, a
+  durable one on the whole execution, and an `--async` one only on Lambda taking the event.
+  `invoke_read_timeout` is where the three are told apart, and the third is why the wait is resolved
+  after `--async` is read rather than before.
 - **`s3 export` / `s3 <alias> uri` must stay eval-safe** — a CLI cannot mutate its parent shell,
   so `export` prints `export name='s3://…'` lines for `eval "$(...)"` and `uri` prints a bare
   `s3://…`. Both use bare `print()`, not the rich console, so no markup or ANSI escapes leak into
@@ -238,8 +229,8 @@ and an eval'd `s3 export` stay clean.
   CloudWatch filtered on the execution ARN that the SDK logger stamps onto every record. Note the
   two Error shapes — `GetDurableExecution` returns `Error` unwrapped, history events wrap it in a
   `Payload`/`Truncated` envelope.
-- **The handle is the name's tail, never a row number** — `cli-design.md` § "A UUID-keyed resource
-  needs a short handle of its own": AWS assigns no short id, so `resolve_execution` accepts any
+- **The handle is the name's tail, never a row number** — a UUID-keyed resource needs a short
+  handle of its own, and AWS assigns none, so `resolve_execution` accepts any
   unique suffix of `DurableExecutionName`, tried after both exact-name paths and erroring with the
   candidates when several match. A row number was built first and reverted: a position is only
   valid for the exact query that produced it, so `--status`, `--qualifier` and `--all-versions`
@@ -347,12 +338,12 @@ the fake.
 
 **botocore's retry loop sits below the client object, so no fake can reach it.** A duplicate
 invoke is issued without the code under test being called twice, which makes every fake-level
-assertion here a statement about the config rather than about the behaviour. `test_session.py`
+assertion here a statement about the config rather than about the behaviour. `test_invoke.py`
 closes that gap against a socket that accepts connections and answers none, which is what a
 still-running function looks like to botocore: it counts the requests that actually arrive. Every
-other assertion in the repo rests on `total_max_attempts: 1` meaning one request, and those two
-tests are what establish it — one pins the request count at 1, the other pins `max_attempts: 1`
-at 2 so the wrong key stays visibly wrong. Neither needs AWS, and both run in about a second.
+other assertion in the repo rests on `total_max_attempts: 1` meaning exactly one request, and
+those two tests are the only place that is established — in requests, which no client object can
+show. Neither needs AWS, and both run in about a second.
 
 **`FakeS3.ICEBERG_GZIP_SUFFIXES` is read off the writers** — Java's `TableMetadataParser` and
 pyiceberg's `serializers.py` — rather than off `iceberg.GZIP_SUFFIXES`. That is what makes it
