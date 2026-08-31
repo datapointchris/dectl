@@ -1,6 +1,221 @@
 # CHANGELOG
 
 
+## v2.8.2 (2026-08-31)
+
+### Bug Fixes
+
+- **lambda**: Keep the retries that cannot duplicate a run, and split the wait per invocation
+  ([`d0d819f`](https://github.com/datapointchris/dectl/commit/d0d819f6b025ef388981fbd901aab166a60640fa))
+
+A client that retries nothing also drops the retries which never could start a second execution, and
+  a concurrency throttle is the common one. Lambda returns TooManyRequestsException whenever a
+  function is at its limit, so a routine refusal that botocore used to absorb became an unhandled
+  traceback. issue_invoke re-sends only what Lambda declined to admit — a 429 or an EC2 throttle,
+  where no execution started — with exponential backoff, and reports each attempt. Everything else
+  either started an execution or may have, and none of it is re-sent.
+
+The wait is now resolved after --async is read. An Event invoke returns as soon as Lambda has the
+  event, so the synchronous ceiling blocked the command for 15.5 minutes on a stalled endpoint, and
+  the refusal claimed an execution was running that may never have been queued.
+
+The fallback warning interpolates the wait it returns. It named a number 30 seconds short of the one
+  taken, so one invocation reported two different waits.
+
+A connect failure is reported rather than raised as a traceback. It is the one failure that
+  certainly invoked nothing, and it is not a ReadTimeoutError, so it can never be described as still
+  running.
+
+The invoke domain moves to invoke.py, leaving session.py to build sessions. Same boundary as
+  durable.py beside logs.py: this is the Lambda API rather than a boto3 concern, and session.py had
+  grown a Lambda read and two imports for it.
+
+botocore is declared. Six modules import it directly and none of them was covered by the boto3
+  declaration alone.
+
+The refusal messages are built by named functions, so the tests assert what the command emitted
+  rather than words that can be reworded out from under them. The plain run's refusal now names
+  logs, the command that shows a still-running function's output.
+
+- **lambda**: Stop a slow invoke from retrying into overlapping runs
+  ([`137e5b4`](https://github.com/datapointchris/dectl/commit/137e5b48b9f89d2eda050f543ed83a20ea59a1a3))
+
+Every client from make_session carries botocore's defaults: a 60-second read timeout, legacy retry
+  mode, five attempts. Invoke is the one call dectl makes that AWS cannot take back, so those
+  defaults turn any function slower than a minute into five overlapping copies of itself — each
+  retry is a fresh invocation, Lambda cancels nothing, and the copies race each other over whatever
+  the function writes. The function's own MaximumRetryAttempts reaches none of it, because these are
+  the client's HTTP retries.
+
+make_invoke_client builds a lambda client for Invoke alone: no retries, and a read timeout that
+  outlives the function. invoke_read_timeout takes that wait from the function's own Timeout, so a
+  three-second function fails in thirty-three seconds rather than hanging for the fifteen-minute
+  ceiling. A durable function skips the lookup, because a synchronous durable invoke waits for the
+  whole execution and Lambda caps that at fifteen minutes regardless. Invoke and
+  GetFunctionConfiguration are separate permissions, so a failed lookup falls back to the ceiling
+  and warns.
+
+make_session is untouched. Every other call dectl makes is a read, where a retry costs one round
+  trip and is wanted.
+
+The config uses total_max_attempts, which counts the initial request. The max_attempts key counts
+  retries on top of it, so 1 there still fires the duplicate. test_session.py pins both against a
+  socket that accepts connections and answers none, counting the requests that arrive — botocore's
+  retry loop sits below the client object, so no fake can reach it.
+
+- **lambda**: Stop a slow invoke from retrying into overlapping runs
+  ([#3](https://github.com/datapointchris/dectl/pull/3),
+  [`7284a11`](https://github.com/datapointchris/dectl/commit/7284a11c0dd61eed729d6ad4d9b41e39e70469fa))
+
+Every client `make_session` hands out carries botocore's defaults, and `Invoke` is the one call
+  dectl makes that AWS cannot take back. A function slower than the 60-second default read timeout
+  is therefore invoked five times, each retry a fresh run Lambda cannot cancel. This moves the
+  Invoke domain into `invoke.py`, sends it through a client that retries nothing, and re-issues by
+  hand the one failure class that provably started nothing.
+
+## What to look at
+
+- `src/dectl/invoke.py` — `make_invoke_client` uses `total_max_attempts`, not `max_attempts`. The
+  two keys differ by exactly one invocation and read alike, so check that one. -
+  `src/dectl/invoke.py` — `admission_refused` decides what may be sent twice. Check that every code
+  it admits is one where Lambda declined to start an execution, and that nothing ambiguous is in it.
+  A wrong answer here reintroduces the original bug by another route. - `src/dectl/invoke.py` —
+  `invoke_read_timeout` returns three different waits for three different things being waited on.
+  Check that the `run_async` branch precedes the `durable` one, and that the `ClientError` fallback
+  errs long rather than short. - `src/dectl/commands/lambda_.py:197` and `:277` — two clients from
+  one session. The read client answers `get_function_configuration`, and in the durable verb also
+  `get_alias` and `tail_durable_history`. Check that only the invoking client invokes, and that the
+  wait is resolved after `run_async` is known. - `tests/test_invoke.py` — the socket fixture. Check
+  that it asserts on requests that arrived, not on the config that was requested.
+
+## How it was verified
+
+`uv run pytest` — 276 passed, 6 skipped, 6.6s. The two socket tests add 1.1s and need no AWS.
+
+Five mutations were applied to the source and the suite re-run against each:
+
+| Mutation | Tests that failed | | --- | --- | | `total_max_attempts: 1` → `max_attempts: 1` | 16 |
+  | `--async` falls through to the synchronous wait | 3 | | the fallback warning names the ceiling,
+  not the wait taken | 1 | | no throttle is ever re-issued | 4 | | every failure is re-issued,
+  including an ambiguous 500 | 1 |
+
+The retry counts in `test_invoke.py` were read off a live botocore rather than assumed:
+  `total_max_attempts: 1` opens one connection, `max_attempts: 1` opens two, and the untouched
+  default opens five.
+
+## What changes
+
+`lambda <alias> run` waits the function's `Timeout` plus 30 seconds instead of 60 seconds. The
+  durable `run` waits 930 seconds, the ceiling Lambda applies to a synchronous durable invoke plus
+  the same margin. `run --async` waits 30 seconds, because an Event invoke waits on Lambda taking
+  the event and not on anything the function does.
+
+A concurrency throttle is re-sent with exponential backoff, up to five attempts, warning on each.
+  Lambda refuses the invocation outright under `TooManyRequestsException` and
+  `EC2ThrottledException` and at HTTP 429, so no execution starts and re-sending cannot duplicate
+  one. Nothing else is re-sent.
+
+A timed-out run exits 1 and says on stderr that the function is still running and was not retried,
+  naming `logs`. The durable one names `executions`. Under `--async` it says instead that the event
+  may or may not be queued, which is all an unacknowledged Event invoke supports.
+
+A connect failure exits 1 saying nothing ran, rather than raising a traceback.
+
+Each plain `run` makes one `GetFunctionConfiguration` call before invoking. A caller holding
+  `Invoke` without it still works: the wait falls back to 930 seconds and a warning goes to stderr,
+  so `--json` on stdout stays clean.
+
+`botocore` is now declared in `[project.dependencies]`. Six modules import it directly, and the lock
+  gains two lines — the direct edge only, since boto3 already installed it.
+
+`deploy`, `logs`, `executions` and `history` are unaffected.
+
+## Decisions, and what they rejected
+
+- **The Invoke domain is its own module** — `session.py` builds a session from config. Reading a
+  function's `Timeout` is the Lambda API, which is the boundary `durable.py` already keeps from
+  `logs.py`. - **The config goes on a second client, not on the session** — every other call dectl
+  makes is a read, where a retry costs one round trip and is wanted. - **A throttle is re-sent in
+  dectl rather than by botocore** — botocore's retry config is per-client and cannot separate a
+  refusal from a timeout. The safety argument is about which failures started an execution, so it is
+  written where it can be read. - **The wait is read from the function, not fixed** — a constant is
+  wrong in both directions. Too low re-opens the retry storm; too high hangs a three-second function
+  for fifteen minutes when its socket dies rather than its handler. - **Rejected: reserved
+  concurrency of 1 on the function.** It stops the overlap being destructive and leaves every caller
+  still issuing duplicate invocations, including callers that are not dectl. The retry is the
+  defect. - **Rejected: `max_attempts: 1`.** It normalises to `total_max_attempts: 2`, which still
+  fires one duplicate invoke. `tests/test_invoke.py` pins it at two connections so the wrong key
+  stays visibly wrong. - **A fake cannot verify this, so a socket does** — botocore's retry loop
+  sits below the client object, so a duplicate invoke never reaches the code under test.
+
+## Risk and rollback
+
+A revert restores the 60-second default and the five attempts. Nothing persists past the process, so
+  there is no state a revert cannot undo.
+
+Two new failure modes. A run ends at the function's `Timeout` plus 30 seconds where it previously
+  kept trying — intended, and Lambda was going to kill the function at its own `Timeout` regardless.
+  And a sustained throttle now fails after five attempts where botocore's five were silent; the
+  attempts are reported, so the cause is on screen rather than inferred from a delay.
+
+## What this does not do
+
+`deploy` keeps the session's client. `update_function_code`, `publish_version` and `update_alias`
+  are separate calls with different idempotency, and none waits on a running function.
+
+`sfn run` and `glue run` are untouched. `StartExecution` and `StartJobRun` return as soon as the
+  work is queued, so no read timeout applies to either.
+
+A `ServiceException` is never re-sent. Lambda may have reached the runtime before failing, so it
+  falls in the class that may have started an execution.
+
+There is no live-AWS test of the retry behaviour. Reproducing it would need a function that outruns
+  its caller's socket, and the socket harness settles the same question deterministically and for
+  free.
+
+## The review
+
+https://github.com/datapointchris/dectl/pull/3#pullrequestreview-5064706771 — 4 correctness, 4 break
+  a rule, 1 rule proposed, 1 design. All ten fixed in `d0d819f`, except the citation in
+  `iceberg.py`, which is `2503a2b`.
+
+1. fixed — `d0d819f`. `issue_invoke` re-sends an admission refusal. The no-retry client had dropped
+  the throttle retries too, and those cannot duplicate a run. 2. fixed — `d0d819f`. The wait is
+  resolved after `run_async`, and `--async` gets the acknowledgement timeout with a message that
+  claims no execution started. 3. fixed — `d0d819f`. The fallback warning interpolates the value it
+  returns. 4. fixed — `d0d819f`. The dict-shape sentence is gone; `Config` normalises at
+  construction, so a config assertion does catch the wrong key. The socket tests are described as
+  what establishes the meaning in requests. 5. fixed — `d0d819f`. The refusals are built by named
+  functions the tests import, so rewording moves both. `stderr_text` stays, normalising rich's soft
+  wrap. 6. fixed — `d0d819f`. The Gotchas entries name the module and stop; `invoke.py` carries the
+  mechanism. 7. fixed — `d0d819f`. The plain run's refusal names `logs`. 8. fixed — `2503a2b` and
+  `d0d819f`. Both citations carry their constraint inline instead. 9. fixed — `d0d819f`. `botocore`
+  is declared. Whether the general rule is written is not this PR's to settle. 10. fixed —
+  `d0d819f`. `invoke.py` holds the Invoke domain; `session.py` builds sessions.
+
+### Chores
+
+- **deps**: Refresh the lock to what a fresh install resolves
+  ([`e8be6ba`](https://github.com/datapointchris/dectl/commit/e8be6bab8f0aaf4d39b8d75298a2bb9af859a15c))
+
+The lock pinned typer 0.25.1, which requires click; a uv tool install resolves 0.27.2, which vendors
+  it as typer._click and requires nothing. So click sat in the dev and CI environments and in no
+  environment a user has, and an import of it passed every gate before failing at startup on the
+  installed tool.
+
+click is now absent locally, so the next such import fails where it is written. Everything else
+  moves with it, and the suite, mypy and ruff pass on the new resolution.
+
+### Documentation
+
+- **iceberg**: Carry the constraint in the docstring rather than citing it
+  ([`2503a2b`](https://github.com/datapointchris/dectl/commit/2503a2b470c36f0fdf84b14faa6cf95d1600d901))
+
+The repo is public, so a citation naming a private standards file points a reader at something they
+  cannot open and discloses apparatus that is not the project's. The sentence carries the rule
+  itself instead.
+
+
 ## v2.8.1 (2026-08-31)
 
 ### Bug Fixes
