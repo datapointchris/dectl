@@ -305,10 +305,9 @@ while editing the real config in another.
 
 ### Running from anywhere: `repo`
 
-Every read — `list`, `monitor`, `logs`, `watch`, `runs`, the Iceberg and S3 commands —
-talks to AWS and needs no local file, so it has always worked from any directory. Deploys
-are the exception: a Glue job's `scripts` and a Lambda's `source_dir` are paths, and
-without a `repo` they resolve against the directory you happen to be standing in.
+Every read talks to AWS and needs no local file, so a read runs from any directory.
+Deploys are the exception: a Glue job's `scripts` and a Lambda's `source_dir` are paths,
+and without a `repo` they resolve against the directory you happen to be standing in.
 
 Give a pipeline a `repo` and they resolve against that instead:
 
@@ -327,15 +326,25 @@ from wherever you run it. With several pipelines each naming their own `repo`, o
 drives every repo's deploys and you never change directory to do it.
 
 The value must be absolute or start with `~`. A relative one would resolve against the
-working directory, which is the dependency the key removes, so it fails validation. An
-individual `source_dir` or script that is already absolute is left alone, so a pipeline may
-mix repo-relative and absolute paths.
+working directory, which is the dependency the key removes, so it fails validation. A
+`{env}` token in it is substituted like any other name.
+
+A `source_dir` may be absolute and sit outside the repo — it is zipped and uploaded as
+bytes, so nothing else depends on where it came from. A glue `scripts` entry may not: its
+S3 key is built from the string you write, so an absolute path or a `..` produces a key
+carrying your machine's own layout, and S3 does not normalise it. Both are refused at
+validation.
 
 Omit `repo` and nothing changes: paths resolve against the working directory, and a deploy
 has to run from the checkout.
 
 `config validate` checks a pipeline that names a `repo` all the way down — the directory,
-every script, every `source_dir` — and names each path it could not find. It says nothing
-about a pipeline with no `repo`, since those paths depend on where you run it from.
-`config show` prints the resolved directory for every pipeline, with `~` expanded, and
-marks the ones falling back to the working directory.
+every script, every `source_dir` — and says of each one whether it is absent or present
+with the wrong type, since those have opposite fixes. It says nothing about a pipeline with
+no `repo`, because those paths depend on where you run it from.
+
+`config show` prints the resolved directory for every pipeline, with `~` expanded and
+`{env}` substituted, and marks the ones falling back to the working directory. It prints
+the resolved path of every script and `source_dir` beneath it, so the file a deploy would
+send is on the page rather than inferred. `config show --json` and `list --json` carry the
+same under `repo`, `script_paths` and `source_path`.

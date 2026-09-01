@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import NamedTuple
 
 import yaml
 from pyclisteno.paths import config_home
@@ -7,8 +8,26 @@ from pydantic import ConfigDict
 from pydantic import ValidationError
 from pydantic import field_validator
 
+from dectl.env import ENV_PLACEHOLDER
+from dectl.env import substitute_env
 from dectl.output import error
 from dectl.output import stderr_console
+
+
+def expand_home(value: str) -> Path:
+    """`~` expansion that reports an unresolvable home as a config error.
+
+    `Path.expanduser()` raises RuntimeError for a `~user` naming nobody — `~code/x`, a missing
+    slash, is the likeliest typo in a path key. Pydantic does not wrap RuntimeError into a
+    ValidationError, and `CONFIG_LOAD_ERRORS` catches only YAMLError and ValidationError, so an
+    uncaught one escapes main.py's import-time guard and takes down every command, including the
+    `config` commands that exist to repair the file. Raising ValueError puts it back inside the
+    schema failure every caller already handles."""
+    try:
+        return Path(value).expanduser()
+    except RuntimeError as exc:
+        raise ValueError(f'{value!r} names a home directory that cannot be resolved on this machine') from exc
+
 
 # `$XDG_CONFIG_HOME/dectl/config.yaml`, falling back to `~/.config` when the variable is unset.
 # `config_home()` reads the environment at import, so a process that exports the variable after
@@ -125,9 +144,39 @@ class GlueJobConfig(StrictModel):
     # Python shell jobs accept 0.0625 (1 GB) or 1 (16 GB); Spark jobs use WorkerType instead.
     max_capacity: float | None = None
 
+    @field_validator('scripts')
+    @classmethod
+    def scripts_are_relative(cls, value: list[str]) -> list[str]:
+        """Require a script to sit under the pipeline repo, because the S3 key is this string.
+
+        `upload_scripts` writes to `{script_prefix}/{script}`, and Glue's ScriptLocation and
+        --extra-py-files point at that key. S3 does not normalise a key, so neither shape below
+        survives the round trip:
+
+            /srv/shared/handler.py  ->  scripts//srv/shared/handler.py
+            ../sibling/util.py      ->  scripts/../sibling/util.py
+
+        The first carries the deploying machine's own filesystem layout, so two machines holding
+        the same file at different paths write two different objects and rewrite the job
+        definition against each other on every deploy. The second is a literal `..` segment in
+        the key, naming an object nothing else will look for.
+
+        A lambda's `source_dir` carries no such restriction. It is zipped and uploaded as bytes
+        with no key derived from it, so it may sit anywhere."""
+        for script in value:
+            expand_home(script)
+            probe = Path(script.replace(ENV_PLACEHOLDER, 'x')).expanduser()
+            if probe.is_absolute():
+                raise ValueError(f'{script!r} must be relative to the pipeline repo; the S3 key is built from it')
+            if '..' in probe.parts:
+                raise ValueError(f'{script!r} must not climb out of the pipeline repo; the S3 key is built from it')
+        return value
+
 
 class LambdaConfig(StrictModel):
     name: str
+    # Zipped whole and uploaded as bytes, with no key derived from it, so unlike a glue script
+    # this may sit outside the pipeline repo as an absolute path.
     source_dir: str
     # The AWS Lambda alias (e.g. "live") that `deploy --publish` repoints to the new version.
     # Named live_alias, not alias, to avoid colliding with the CLI "alias" (the config key you type).
@@ -138,11 +187,17 @@ class LambdaConfig(StrictModel):
     # at runtime so the command surface stays assembled at import, like every other resource.
     durable: bool = False
 
+    @field_validator('source_dir')
+    @classmethod
+    def source_dir_expands(cls, value: str) -> str:
+        expand_home(value)
+        return value
+
 
 class StepFunctionConfig(StrictModel):
     name: str
     # CloudWatch log group the state machine logs to. Required only to include this state
-    # machine in `monitor`; `sfn watch` reads the execution history API and needs no log group.
+    # machine in `monitor`; `sfn run` reads the execution history API and needs no log group.
     log_group: str = ''
 
 
@@ -184,10 +239,15 @@ class PipelineConfig(StrictModel):
         `~` counts as rooted because expansion makes it absolute. Existence is deliberately not
         checked here: a config is loaded on every invocation, including on a machine that holds
         none of the checkouts, and a read of an AWS resource needs no local file. `config
-        validate` is where the directory is required to actually be there."""
+        validate` is where the directory is required to actually be there.
+
+        The `{env}` token is stripped before the test rather than substituted, because the
+        active environment is not known at load — `--env` is parsed after this runs. A token
+        can only appear inside a path, never at its head, so it cannot change rootedness."""
         if value is None:
             return value
-        if not Path(value).expanduser().is_absolute():
+        expand_home(value)
+        if not Path(value.replace(ENV_PLACEHOLDER, 'x')).expanduser().is_absolute():
             raise ValueError(f'must be an absolute or ~-rooted path; {value!r} resolves against the working directory')
         return value
 
@@ -199,23 +259,82 @@ class DectlConfig(StrictModel):
 
 
 def pipeline_root(pipeline: PipelineConfig) -> Path:
-    """The directory this pipeline's relative paths resolve against."""
+    """The directory this pipeline's relative paths resolve against.
+
+    `{env}` is substituted here, so a repo under a per-environment root joins a substituted
+    `source_dir` without half of the result staying literal."""
     if pipeline.repo:
-        return Path(pipeline.repo).expanduser()
+        return expand_home(substitute_env(pipeline.repo))
     return Path.cwd()
 
 
 def resolve_in_repo(pipeline: PipelineConfig, relative: str) -> Path:
     """One of a pipeline's configured paths, as an absolute path.
 
+    Substitution is applied to both halves and is idempotent, so a caller passing an already
+    rendered value gets the same answer as one passing the raw config string.
+
     An entry that is already absolute is returned unchanged, which is what `Path.__truediv__`
-    does with an absolute right-hand side. So a config may mix a repo-relative `source_dir` with
-    an absolute one and both land where they read."""
-    return pipeline_root(pipeline) / Path(relative).expanduser()
+    does with an absolute right-hand side. A `source_dir` may therefore sit outside the repo. A
+    glue `scripts` entry may not — `GlueJobConfig.scripts_are_relative` refuses that, because the
+    S3 key is built from the configured string rather than from the resolved path."""
+    return pipeline_root(pipeline) / expand_home(substitute_env(relative))
 
 
-def missing_declared_paths(config: DectlConfig) -> list[str]:
-    """Every path a repo-declaring pipeline names that is not on this machine.
+class DeclaredPath(NamedTuple):
+    """One filesystem path a pipeline's config names, with `{env}` already substituted."""
+
+    label: str
+    value: str
+    is_dir: bool
+
+
+def declared_paths(pipeline: PipelineConfig) -> list[DeclaredPath]:
+    """Every path this pipeline's config names.
+
+    One place enumerates them, so a new path-bearing field is seen by `missing_declared_paths`
+    and by the resolved-config renderers at once. A field added without coming here leaves
+    `config validate` reporting nothing wrong, which is exactly what a correct config reports.
+
+    Values are substituted here rather than through `render_env_model`, which would also fire
+    `warn_if_environment_had_no_effect` and put a warning in the middle of a validate run."""
+    paths = [
+        DeclaredPath(f'glue/{alias} script', substitute_env(script), False)
+        for alias, job in pipeline.glue_jobs.items()
+        for script in job.scripts
+    ]
+    paths.extend(DeclaredPath(f'lambda/{alias} source_dir', substitute_env(fn.source_dir), True) for alias, fn in pipeline.lambdas.items())
+    return paths
+
+
+def path_fault(path: Path, is_dir: bool) -> str | None:
+    """Why this path cannot be used, or None when it can.
+
+    An absent path and one present with the wrong type have opposite remedies — check the tree
+    out, or fix the config key that names it — so they never share a wording."""
+    if not path.exists():
+        return 'not found'
+    if is_dir and not path.is_dir():
+        return 'is a file, not a directory'
+    if not is_dir and not path.is_file():
+        return 'is a directory, not a file'
+    return None
+
+
+class UnusablePath(NamedTuple):
+    """One declared path that this machine cannot supply, and why."""
+
+    pipeline: str
+    label: str
+    path: Path
+    fault: str
+
+    def __str__(self) -> str:
+        return f'{self.pipeline}: {self.label} {self.fault}: {self.path}'
+
+
+def missing_declared_paths(config: DectlConfig) -> list[UnusablePath]:
+    """Every path a repo-declaring pipeline names that this machine cannot supply.
 
     A pipeline without a repo is skipped rather than reported. Its paths resolve against whatever
     directory dectl is run from, so their absence right here says nothing about whether a deploy
@@ -230,20 +349,15 @@ def missing_declared_paths(config: DectlConfig) -> list[str]:
         if not pipeline.repo:
             continue
         root = pipeline_root(pipeline)
-        if not root.is_dir():
-            problems.append(f'{name}: repo not found: {root}')
+        root_fault = path_fault(root, is_dir=True)
+        if root_fault:
+            problems.append(UnusablePath(name, 'repo', root, root_fault))
             continue
-        for alias, job in pipeline.glue_jobs.items():
-            problems.extend(
-                f'{name}: glue/{alias} script not found: {resolve_in_repo(pipeline, script)}'
-                for script in job.scripts
-                if not resolve_in_repo(pipeline, script).is_file()
-            )
-        problems.extend(
-            f'{name}: lambda/{alias} source_dir not found: {resolve_in_repo(pipeline, fn.source_dir)}'
-            for alias, fn in pipeline.lambdas.items()
-            if not resolve_in_repo(pipeline, fn.source_dir).is_dir()
-        )
+        for declared in declared_paths(pipeline):
+            resolved = resolve_in_repo(pipeline, declared.value)
+            fault = path_fault(resolved, is_dir=declared.is_dir)
+            if fault:
+                problems.append(UnusablePath(name, declared.label, resolved, fault))
     return problems
 
 

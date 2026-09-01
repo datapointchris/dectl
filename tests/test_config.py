@@ -9,6 +9,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from dectl.config import CONFIG_LOAD_ERRORS
 from dectl.config import TEMPLATE_CONFIG
 from dectl.config import DectlConfig
 from dectl.config import PipelineConfig
@@ -17,6 +18,7 @@ from dectl.config import describe_config_error
 from dectl.config import load_config
 from dectl.config import pipeline_root
 from dectl.config import resolve_in_repo
+from dectl.env import set_active_environment
 
 
 def test_template_config_is_valid():
@@ -334,3 +336,42 @@ def test_relative_repo_is_rejected():
 
 def test_repo_is_absent_by_default():
     assert pipeline_with_repo(None).repo is None
+
+
+def test_a_repo_naming_no_real_user_fails_as_a_schema_error():
+    # `~code/x` is a missing slash, the likeliest typo in a path key. Path.expanduser() raises
+    # RuntimeError for it, pydantic does not wrap that, and CONFIG_LOAD_ERRORS does not catch
+    # it — so uncaught it escapes main.py's import guard and takes down `config edit` too.
+    with pytest.raises(ValidationError):
+        pipeline_with_repo('~code/salesdata')
+
+
+def test_a_source_dir_naming_no_real_user_fails_as_a_schema_error():
+    with pytest.raises(ValidationError):
+        PipelineConfig.model_validate({'lambdas': {'fn': {'name': 'n', 'source_dir': '~code/x'}}})
+
+
+def test_every_config_load_failure_is_one_the_callers_catch():
+    # The property behind both tests above. Every caller catches CONFIG_LOAD_ERRORS, so a load
+    # failure outside that tuple is one no command recovers from.
+    for bad in ('~code/salesdata', '../relative'):
+        with pytest.raises(CONFIG_LOAD_ERRORS):
+            pipeline_with_repo(bad)
+
+
+def test_the_env_token_is_substituted_into_the_repo():
+    # A token left literal in the repo while source_dir substitutes gives a half-resolved join,
+    # which is neither what the config says nor what --env asked for.
+    set_active_environment('prod', '--env')
+    try:
+        pipeline = pipeline_with_repo('/srv/{env}/salesdata')
+        assert resolve_in_repo(pipeline, 'modules/{env}/code') == Path('/srv/prod/salesdata/modules/prod/code')
+    finally:
+        set_active_environment('dev', 'default')
+
+
+def test_a_repo_whose_root_is_a_token_is_still_rejected_as_relative():
+    # The token is stripped rather than substituted for the rootedness test, because --env is
+    # parsed after the config loads.
+    with pytest.raises(ValidationError):
+        pipeline_with_repo('{env}/salesdata')

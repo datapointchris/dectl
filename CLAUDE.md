@@ -101,11 +101,31 @@ file so `config init` stays valid — a test asserts `TEMPLATE_CONFIG` round-tri
 
 A pipeline's optional `repo` is the directory its relative paths resolve against, which is what
 lets a deploy run from any working directory. **Every config value naming a file or directory
-goes through `resolve_in_repo(pipeline, value)`, never `Path(value)`** — that is the one rule a
-new resource type is most likely to miss, and missing it silently reintroduces the dependency on
-where dectl was invoked. `pipeline_root` is the fallback half: no `repo` means `Path.cwd()`.
-`missing_declared_paths` is the readiness check `config validate` runs, and a new path-bearing
-field belongs in it too, or `validate` reports converged on a config whose deploy cannot work.
+goes through `resolve_in_repo(pipeline, value)`, never `Path(value)`** — missing it reintroduces
+the dependency on where dectl was invoked, silently. `pipeline_root` is the fallback half: no
+`repo` means `Path.cwd()`. Both substitute `{env}`, so a path is resolved the same way every
+other name is.
+
+**`declared_paths` is the one enumeration of which config fields hold paths.** A new
+path-bearing field is added there and `config validate`, `config show` and `list --json` all see
+it at once. A field added anywhere else leaves `validate` reporting nothing wrong, which is what
+a correct config also reports — a failure that reads as success. `path_fault` is the shared
+answer to *why* a path is unusable, and it separates absent from present-with-the-wrong-type
+because those have opposite fixes.
+
+`expand_home` is the guarded `~` expansion. `Path.expanduser()` raises `RuntimeError` for a
+`~user` naming nobody, pydantic does not wrap that, and `CONFIG_LOAD_ERRORS` does not catch it —
+so an unguarded call escapes `main.py`'s import-time try/except and takes down the `config`
+commands that exist to repair the file. Every path field validates through it.
+
+A glue `scripts` entry must be relative and must not climb out of the repo, because its S3 key
+is built from the config string rather than from the resolved path. A lambda `source_dir` has no
+such restriction: it is zipped and uploaded as bytes with no key derived from it.
+
+`deploy` runs everything that can refuse before it writes anything — `resolve_scripts`, then
+`plan_glue_job_update`, then the upload, then `apply_glue_job_update`. `build_job_update` exits
+on a capacity Glue would reject and the confirmation can be declined, and either one landing
+after an upload leaves `ScriptLocation` pointing at code the user was just told not to deploy.
 
 `TEMPLATE_CONFIG` is the single source for the example config: `config init` writes it, `config
 example` prints it (syntax-highlighted on a TTY, plain when piped so `config example > config.yaml`

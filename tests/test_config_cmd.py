@@ -1,9 +1,12 @@
 import json
 
+import yaml
 from typer.testing import CliRunner
 
 from dectl.commands.config_cmd import config_app
 from dectl.config import TEMPLATE_CONFIG
+from dectl.config import DectlConfig
+from dectl.config import missing_declared_paths
 
 runner = CliRunner()
 
@@ -215,14 +218,20 @@ def test_validate_accepts_a_repo_whose_paths_are_all_present(monkeypatch, tmp_pa
     assert 'valid' in result.stdout
 
 
+def config_from(raw: str) -> DectlConfig:
+    return DectlConfig.model_validate(yaml.safe_load(raw))
+
+
 def test_validate_rejects_a_repo_that_is_not_on_this_machine(monkeypatch, tmp_path):
-    point_at(monkeypatch, tmp_path, config_naming(str(tmp_path / 'absent')))
+    # The value, not the rendered line: rich wraps a long path at the running terminal's width,
+    # and a path assertion against wrapped stderr passes or fails on the pane it ran in.
+    raw = config_naming(str(tmp_path / 'absent'))
+    point_at(monkeypatch, tmp_path, raw)
 
     result = runner.invoke(config_app, ['validate'])
 
     assert result.exit_code == 1
-    assert 'repo not found' in result.stderr
-    assert str(tmp_path / 'absent') in result.stderr
+    assert [(p.label, p.path, p.fault) for p in missing_declared_paths(config_from(raw))] == [('repo', tmp_path / 'absent', 'not found')]
 
 
 def test_validate_rejects_a_present_repo_that_is_missing_the_source(monkeypatch, tmp_path):
@@ -230,13 +239,88 @@ def test_validate_rejects_a_present_repo_that_is_missing_the_source(monkeypatch,
     # present and useless, and checking the directory alone would report it converged.
     repo = tmp_path / 'salesdata'
     repo.mkdir()
-    point_at(monkeypatch, tmp_path, config_naming(str(repo), source_dir='modules/code'))
+    raw = config_naming(str(repo), source_dir='modules/code')
+    point_at(monkeypatch, tmp_path, raw)
 
     result = runner.invoke(config_app, ['validate'])
 
     assert result.exit_code == 1
-    assert 'lambda/notifier source_dir not found' in result.stderr
-    assert str(repo / 'modules' / 'code') in result.stderr
+    assert [(p.label, p.path, p.fault) for p in missing_declared_paths(config_from(raw))] == [
+        ('lambda/notifier source_dir', repo / 'modules' / 'code', 'not found')
+    ]
+
+
+def test_validate_reports_a_file_named_as_a_source_dir_as_a_file(monkeypatch, tmp_path):
+    # Absent and present-with-the-wrong-type have opposite remedies, so the wording separates
+    # them: check the tree out, or fix the config key.
+    repo = tmp_path / 'salesdata'
+    repo.mkdir()
+    (repo / 'code').write_text('not a directory')
+    raw = config_naming(str(repo))
+    point_at(monkeypatch, tmp_path, raw)
+
+    result = runner.invoke(config_app, ['validate'])
+
+    assert result.exit_code == 1
+    assert [p.fault for p in missing_declared_paths(config_from(raw))] == ['is a file, not a directory']
+
+
+def test_validate_checks_glue_scripts_and_not_only_lambda_sources(monkeypatch, tmp_path):
+    # Deleting the glue half of the walk left the suite green, so the glue half was unproved.
+    repo = tmp_path / 'salesdata'
+    (repo / 'code').mkdir(parents=True)
+    raw = (
+        'defaults:\n'
+        '  account_id: "1"\n'
+        'pipelines:\n'
+        '  salesdata:\n'
+        f'    repo: {repo}\n'
+        '    glue_jobs:\n'
+        '      copy:\n'
+        '        name: n\n'
+        '        script_bucket: b\n'
+        '        role: r\n'
+        '        scripts:\n'
+        '          - jobs/copy.py\n'
+        '    lambdas:\n'
+        '      notifier:\n'
+        '        name: n\n'
+        '        source_dir: code\n'
+    )
+    point_at(monkeypatch, tmp_path, raw)
+
+    result = runner.invoke(config_app, ['validate'])
+
+    assert result.exit_code == 1
+    assert [(p.label, p.path) for p in missing_declared_paths(config_from(raw))] == [('glue/copy script', repo / 'jobs' / 'copy.py')]
+
+
+def test_env_is_substituted_before_a_declared_path_is_checked(monkeypatch, tmp_path):
+    # The deploys resolve these through render_env_model, so a validator reading the raw model
+    # would fail a config whose deploy works.
+    repo = tmp_path / 'salesdata'
+    (repo / 'modules' / 'dev' / 'code').mkdir(parents=True)
+    raw = config_naming(str(repo), source_dir='modules/{env}/code')
+    point_at(monkeypatch, tmp_path, raw)
+
+    result = runner.invoke(config_app, ['validate'])
+
+    assert result.exit_code == 0
+    assert missing_declared_paths(config_from(raw)) == []
+
+
+def test_env_is_substituted_inside_the_repo_itself(monkeypatch, tmp_path):
+    # Half-substituting the join is worse than not substituting at all: the resolved path is
+    # neither what the config says nor what the environment asked for.
+    repo = tmp_path / 'dev' / 'salesdata'
+    (repo / 'code').mkdir(parents=True)
+    raw = config_naming(str(tmp_path / '{env}' / 'salesdata'))
+    point_at(monkeypatch, tmp_path, raw)
+
+    result = runner.invoke(config_app, ['validate'])
+
+    assert result.exit_code == 0
+    assert missing_declared_paths(config_from(raw)) == []
 
 
 def test_validate_leaves_a_pipeline_without_a_repo_alone(monkeypatch, tmp_path):

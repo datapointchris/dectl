@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from dectl.config import DectlConfig
+from dectl.config import pipeline_root
 from dectl.env import active_environment
 from dectl.pipeline_view import pipeline_to_dict
 from dectl.pipeline_view import render_pipeline
@@ -91,15 +92,28 @@ def test_json_marks_an_undeclared_repo_as_the_working_directory():
     assert data['repo'] == {'path': str(Path.cwd()), 'declared': False}
 
 
-def test_render_names_the_working_directory_when_no_repo_is_set(monkeypatch, capsys):
-    # A tmp-length cwd plus the suffix runs past a default-width console, and rich would wrap
-    # the assertion's needle across two lines.
-    monkeypatch.setenv('COLUMNS', '200')
-    monkeypatch.setattr(active_environment, 'name', 'dev')
+def test_an_undeclared_repo_is_reported_as_the_working_directory():
+    # Asserted on the value rather than the printed line. A cwd long enough to wrap makes a
+    # stdout assertion pass or fail on the width of whichever terminal ran it.
     pipeline = make_pipeline().pipelines['salesdata']
 
-    render_pipeline('salesdata', pipeline)
+    assert pipeline_root(pipeline) == Path.cwd()
+    assert pipeline.repo is None
 
-    out = capsys.readouterr().out
-    assert f'repo: {Path.cwd()}' in out
-    assert 'no repo set' in out
+
+def test_a_repo_token_does_not_silence_the_no_effect_warning(monkeypatch, capsys):
+    # `repo` joining model_dump() put a {env} where contains_env_placeholder could find one, so
+    # a pipeline whose AWS names are all hardcoded stopped reporting that --env changed nothing.
+    monkeypatch.setattr(active_environment, 'name', 'prod')
+    monkeypatch.setattr(active_environment, 'source', '--env')
+    monkeypatch.setattr(active_environment, 'warned_about_missing_placeholder', False)
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '1'},
+            'pipelines': {'salesdata': {'repo': '~/code/{env}/salesdata', 'buckets': {'raw': 'hardcoded-bucket'}}},
+        }
+    )
+
+    pipeline_to_dict('salesdata', config.pipelines['salesdata'])
+
+    assert 'changed nothing' in capsys.readouterr().err

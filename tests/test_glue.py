@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 import typer
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from dectl import prompt
@@ -10,6 +11,7 @@ from dectl.commands.glue import build_job_update
 from dectl.commands.glue import follow_glue_run
 from dectl.commands.glue import job_definition_changes
 from dectl.commands.glue import make_glue_app
+from dectl.commands.glue import resolve_scripts
 from dectl.commands.glue import update_glue_job
 from dectl.commands.glue import upload_scripts
 from dectl.config import DectlConfig
@@ -343,9 +345,10 @@ def test_scripts_upload_from_the_repo_rather_than_the_working_directory(tmp_path
     (tmp_path / 'jobs').mkdir()
     (tmp_path / 'jobs' / 'copy.py').write_text('print("hi")')
     pipeline = glue_pipeline(str(tmp_path), ['jobs/copy.py'])
+    job = pipeline.glue_jobs['j']
     s3 = FakeS3Client()
 
-    upload_scripts(FakeS3Session(s3), pipeline.glue_jobs['j'], pipeline)
+    upload_scripts(FakeS3Session(s3), job, resolve_scripts(job, pipeline))
 
     assert s3.uploads == [(str(tmp_path / 'jobs' / 'copy.py'), 'b', 'scripts/jobs/copy.py')]
 
@@ -355,22 +358,110 @@ def test_the_s3_key_keeps_the_configured_path_not_the_resolved_one(tmp_path):
     # checkout would make the uploaded object's name depend on who ran the deploy.
     (tmp_path / 'copy.py').write_text('x')
     pipeline = glue_pipeline(str(tmp_path), ['copy.py'])
+    job = pipeline.glue_jobs['j']
     s3 = FakeS3Client()
 
-    upload_scripts(FakeS3Session(s3), pipeline.glue_jobs['j'], pipeline)
+    upload_scripts(FakeS3Session(s3), job, resolve_scripts(job, pipeline))
 
     assert s3.uploads[0][2] == 'scripts/copy.py'
 
 
-def test_one_missing_script_uploads_none_of_them(tmp_path):
+def test_an_absolute_script_is_refused_because_the_key_is_built_from_it(tmp_path):
+    # `scripts/` + an absolute path makes a key with an empty segment carrying the deploying
+    # machine's layout, and S3 does not normalise a key. Two machines holding the same file at
+    # different paths would write two different objects.
+    with pytest.raises(ValidationError):
+        glue_pipeline(str(tmp_path), ['/srv/shared/handler.py'])
+
+
+def test_a_parent_relative_script_is_refused(tmp_path):
+    # `scripts/../sibling/util.py` is a literal S3 key, not a path S3 collapses.
+    with pytest.raises(ValidationError):
+        glue_pipeline(str(tmp_path), ['../sibling/util.py'])
+
+
+def test_one_missing_script_resolves_none_of_them(tmp_path):
     # A partial upload leaves the job's scripts split across two revisions, and the next run
-    # mixes them.
+    # mixes them, so the whole set is checked before the first byte goes anywhere.
     (tmp_path / 'present.py').write_text('x')
     pipeline = glue_pipeline(str(tmp_path), ['present.py', 'absent.py'])
-    s3 = FakeS3Client()
 
     with pytest.raises(typer.Exit) as exit_info:
-        upload_scripts(FakeS3Session(s3), pipeline.glue_jobs['j'], pipeline)
+        resolve_scripts(pipeline.glue_jobs['j'], pipeline)
 
     assert exit_info.value.exit_code == 1
-    assert s3.uploads == []
+
+
+def test_a_directory_named_as_a_script_is_reported_as_a_directory(tmp_path, capsys):
+    # Present with the wrong type and absent have opposite remedies, so they never share a
+    # wording: fix the config key, or check the tree out.
+    (tmp_path / 'copy.py').mkdir()
+    pipeline = glue_pipeline(str(tmp_path), ['copy.py'])
+
+    with pytest.raises(typer.Exit):
+        resolve_scripts(pipeline.glue_jobs['j'], pipeline)
+
+    assert 'is a directory, not a file' in capsys.readouterr().err
+
+
+class FakeDeploySession:
+    """Serves both clients one deploy needs, and records what each was asked to do."""
+
+    def __init__(self, existing_job):
+        self.glue = FakeGlueClient(existing_job)
+        self.s3 = FakeS3Client()
+
+    def client(self, name):
+        return self.s3 if name == 's3' else self.glue
+
+
+def deploy_config(repo, max_capacity=None) -> DectlConfig:
+    job = {'name': 'my-job', 'script_bucket': 'b', 'scripts': ['copy.py'], 'role': 'new-role'}
+    if max_capacity is not None:
+        job['max_capacity'] = max_capacity
+    return DectlConfig.model_validate(
+        {'defaults': {'account_id': '1'}, 'pipelines': {'proj': {'repo': str(repo), 'glue_jobs': {'copy': job}}}}
+    )
+
+
+def test_a_refused_definition_change_uploads_nothing(monkeypatch, tmp_path):
+    # build_job_update exits on a max_capacity Glue would reject. Uploading first leaves
+    # ScriptLocation pointing at code the user is then told not to deploy.
+    (tmp_path / 'copy.py').write_text('x')
+    config = deploy_config(tmp_path, max_capacity=1)
+    session = FakeDeploySession({'Name': 'my-job', 'Role': 'old-role', 'WorkerType': 'G.1X', 'NumberOfWorkers': 2})
+    monkeypatch.setattr('dectl.session.make_session', lambda _config: session)
+
+    result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy', '--yes'])
+
+    assert result.exit_code == 1
+    assert session.s3.uploads == []
+    assert session.glue.captured_update is None
+
+
+def test_a_refused_confirmation_uploads_nothing(monkeypatch, tmp_path):
+    # Without --yes and with no terminal, confirm_or_exit refuses rather than blocking. The
+    # deploy stops there, and the point is that it stops before the upload rather than after.
+    (tmp_path / 'copy.py').write_text('x')
+    config = deploy_config(tmp_path)
+    session = FakeDeploySession({'Name': 'my-job', 'Role': 'old-role'})
+    monkeypatch.setattr('dectl.session.make_session', lambda _config: session)
+
+    result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy'])
+
+    assert result.exit_code == 1
+    assert session.s3.uploads == []
+    assert session.glue.captured_update is None
+
+
+def test_plan_refuses_a_missing_script_rather_than_reporting_a_clean_diff(monkeypatch, tmp_path):
+    # --plan is the rehearsal. Reporting a clean definition for a config whose real deploy exits
+    # makes the one command run to answer "will this work" the one that cannot.
+    config = deploy_config(tmp_path)
+    session = FakeDeploySession({'Name': 'my-job', 'Role': 'old-role'})
+    monkeypatch.setattr('dectl.session.make_session', lambda _config: session)
+
+    result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy', '--plan'])
+
+    assert result.exit_code == 1
+    assert session.s3.uploads == []

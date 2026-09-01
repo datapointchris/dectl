@@ -11,6 +11,8 @@ from botocore.exceptions import ReadTimeoutError
 
 from dectl.config import DectlConfig
 from dectl.config import LambdaConfig
+from dectl.config import PipelineConfig
+from dectl.config import path_fault
 from dectl.config import resolve_in_repo
 from dectl.durable import EXECUTION_STATUSES
 from dectl.durable import SUFFIX_SEARCH_LIMIT
@@ -42,8 +44,9 @@ LOG_WINDOW_BUFFER_MS = 60_000
 
 
 def zip_lambda(source: Path) -> Path:
-    if not source.is_dir():
-        error(f'source directory not found: {source}')
+    fault = path_fault(source, is_dir=True)
+    if fault:
+        error(f'lambda source {fault}: {source}')
         raise typer.Exit(1)
 
     zip_path = Path(tempfile.mkdtemp()) / 'lambda.zip'
@@ -79,7 +82,9 @@ def report_invocation(response: dict, as_json: bool) -> None:
         console.print_json(json.dumps(result, indent=2))
 
 
-def make_lambda_function_app(pipeline_name: str, alias: str, fn_config: LambdaConfig, config: DectlConfig) -> typer.Typer:
+def make_lambda_function_app(
+    pipeline_name: str, alias: str, fn_config: LambdaConfig, pipeline: PipelineConfig, config: DectlConfig
+) -> typer.Typer:
     """Build the per-function sub-app: `dectl PIPELINE lambda <alias> <verb>`.
 
     Verbs close over this function's config and resolve {env} at call time. A function flagged
@@ -126,7 +131,7 @@ def make_lambda_function_app(pipeline_name: str, alias: str, fn_config: LambdaCo
         session = make_session(config)
         client = session.client('lambda')
 
-        source = resolve_in_repo(config.pipelines[pipeline_name], fn.source_dir)
+        source = resolve_in_repo(pipeline, fn.source_dir)
         info(f'zipping {source}')
         zip_path = zip_lambda(source)
 
@@ -483,7 +488,7 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         )
 
 
-def make_lambda_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Typer:
+def make_lambda_app(pipeline_name: str, pipeline: PipelineConfig, config: DectlConfig) -> typer.Typer:
     lambdas = pipeline.lambdas
     alias_list = ', '.join(lambdas.keys()) or '(none configured)'
 
@@ -493,7 +498,7 @@ def make_lambda_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.
     )
     for alias, fn_config in lambdas.items():
         lambda_app.add_typer(
-            make_lambda_function_app(pipeline_name, alias, fn_config, config),
+            make_lambda_function_app(pipeline_name, alias, fn_config, pipeline, config),
             name=alias,
             rich_help_panel='Functions',
         )

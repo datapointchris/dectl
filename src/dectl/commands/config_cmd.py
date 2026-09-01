@@ -138,7 +138,7 @@ def config_validate() -> None:
 
     problems = missing_declared_paths(config)
     if problems:
-        error(f'config at {CONFIG_PATH} matches the schema, but names paths that are not on this machine:')
+        error(f'config at {CONFIG_PATH} matches the schema, but names paths this machine cannot supply:')
         for problem in problems:
             stderr_console.print(f'  {problem}', markup=False)
         raise typer.Exit(1)

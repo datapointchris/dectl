@@ -1,4 +1,5 @@
 import time
+from pathlib import Path
 from typing import Annotated
 
 import boto3
@@ -8,8 +9,10 @@ from rich.table import Table
 from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
 from dectl.config import PipelineConfig
+from dectl.config import path_fault
 from dectl.config import resolve_in_repo
 from dectl.env import render_env_model
+from dectl.env import substitute_env
 from dectl.logs import tail_glue_run
 from dectl.output import console
 from dectl.output import emit_json
@@ -28,21 +31,31 @@ FAILED_RUN_STATES = TERMINAL_RUN_STATES - {'SUCCEEDED'}
 READ_ONLY_KEYS = ('Name', 'CreatedOn', 'LastModifiedOn', 'ProfileName', 'AllocatedCapacity')
 
 
-def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, pipeline: PipelineConfig) -> None:
-    """Upload each configured script, resolving its path against the pipeline's repo.
+def resolve_scripts(glue_job: GlueJobConfig, pipeline: PipelineConfig) -> list[tuple[str, Path]]:
+    """Every script as (config key, file on disk), or exit reporting the ones that are unusable.
 
-    Every script is resolved and checked before the first upload, so a job with one bad entry
-    uploads nothing. Uploading the readable ones first would leave the job's scripts split across
-    two revisions, and the run that followed would mix them."""
+    Run before anything is uploaded and before the definition diff, so `deploy` and `deploy
+    --plan` refuse the same configs. A `--plan` that could not see a missing script would report
+    a clean definition on a config whose real deploy exits, which is the one question `--plan` is
+    run to answer."""
     sources = [(script, resolve_in_repo(pipeline, script)) for script in glue_job.scripts]
-    missing = [path for _, path in sources if not path.is_file()]
-    if missing:
-        error(f'script not found: {", ".join(str(path) for path in missing)}')
+    faults = [(path, fault) for _, path in sources if (fault := path_fault(path, is_dir=False))]
+    if faults:
+        for path, fault in faults:
+            error(f'script {fault}: {path}')
         raise typer.Exit(1)
+    return sources
 
+
+def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: list[tuple[str, Path]]) -> None:
+    """Upload each resolved script under the key its config string spells.
+
+    The key comes from the config string rather than the resolved path, so every machine
+    deploying this job writes the same object. `GlueJobConfig.scripts_are_relative` is what keeps
+    that key well-formed."""
     s3 = session.client('s3')
     for script, path in sources:
-        key = f'{glue_job.script_prefix}/{script}'
+        key = f'{glue_job.script_prefix}/{substitute_env(script)}'
         s3.upload_file(Filename=str(path), Bucket=glue_job.script_bucket, Key=key)
         success(f'uploaded {path} -> s3://{glue_job.script_bucket}/{key}')
 
@@ -151,6 +164,19 @@ def update_glue_job(session: boto3.Session, glue_job: GlueJobConfig, assume_yes:
     rewrites Role/Connections/DefaultArguments is how dectl's config drifts from the real
     definition. When nothing dectl manages differs, skip the call entirely — the steady state
     is then a pure code push with no drift surface at all."""
+    job_update = plan_glue_job_update(session, glue_job, assume_yes=assume_yes, plan=plan)
+    if job_update is not None:
+        apply_glue_job_update(session, glue_job, job_update)
+
+
+def plan_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig, assume_yes: bool = False, plan: bool = False) -> dict | None:
+    """Everything about a definition update that can refuse: build it, show it, confirm it.
+
+    Returns the update to apply, or None when there is nothing to apply. Split from the apply so
+    a caller can get every refusal out of the way before it writes anything. `build_job_update`
+    exits on a max_capacity that Glue would reject, and the confirmation can be declined; both
+    happening after a script upload leaves the job's ScriptLocation pointing at code the user was
+    then told not to deploy."""
     glue = session.client('glue')
     existing = glue.get_job(JobName=glue_job.name)['Job']
     job_update = build_job_update(existing, glue_job)
@@ -158,16 +184,19 @@ def update_glue_job(session: boto3.Session, glue_job: GlueJobConfig, assume_yes:
     changes = job_definition_changes(existing, job_update)
     if not changes:
         info(f'{glue_job.name}: job definition unchanged')
-        return
+        return None
 
     render_job_changes(glue_job.name, changes)
 
     if plan:
-        return
+        return None
     if not assume_yes:
         confirm_or_exit('apply these job definition changes?')
+    return job_update
 
-    glue.update_job(JobName=glue_job.name, JobUpdate=job_update)
+
+def apply_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig, job_update: dict) -> None:
+    session.client('glue').update_job(JobName=glue_job.name, JobUpdate=job_update)
     success(f'updated job {glue_job.name}')
 
 
@@ -249,7 +278,9 @@ def job_run_to_row(run: dict) -> list[str]:
     ]
 
 
-def make_glue_job_app(pipeline_name: str, alias: str, job_config: GlueJobConfig, config: DectlConfig) -> typer.Typer:
+def make_glue_job_app(
+    pipeline_name: str, alias: str, job_config: GlueJobConfig, pipeline: PipelineConfig, config: DectlConfig
+) -> typer.Typer:
     """Build the per-job sub-app: `dectl PIPELINE glue <alias> <verb>`.
 
     Verbs close over this job's config and resolve {env} at call time (never at import), so the
@@ -285,10 +316,15 @@ def make_glue_job_app(pipeline_name: str, alias: str, job_config: GlueJobConfig,
         from dectl.session import make_session
 
         job = resolved()
+        # Resolve and check before anything reaches AWS, so --plan refuses what deploy refuses.
+        sources = resolve_scripts(job, pipeline)
         session = make_session(config)
-        if not plan:
-            upload_scripts(session, job, config.pipelines[pipeline_name])
-        update_glue_job(session, job, assume_yes=yes, plan=plan)
+        job_update = plan_glue_job_update(session, job, assume_yes=yes, plan=plan)
+        if plan:
+            return
+        upload_scripts(session, job, sources)
+        if job_update is not None:
+            apply_glue_job_update(session, job, job_update)
 
     @job_app.command(epilog=f'Example:\n\ndectl {pipeline_name} glue {alias} run --follow')
     def run(
@@ -373,7 +409,7 @@ def make_glue_job_app(pipeline_name: str, alias: str, job_config: GlueJobConfig,
     return job_app
 
 
-def make_glue_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Typer:
+def make_glue_app(pipeline_name: str, pipeline: PipelineConfig, config: DectlConfig) -> typer.Typer:
     glue_jobs = pipeline.glue_jobs
     alias_list = ', '.join(glue_jobs.keys()) or '(none configured)'
 
@@ -383,7 +419,7 @@ def make_glue_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Ty
     )
     for alias, job_config in glue_jobs.items():
         glue_app.add_typer(
-            make_glue_job_app(pipeline_name, alias, job_config, config),
+            make_glue_job_app(pipeline_name, alias, job_config, pipeline, config),
             name=alias,
             rich_help_panel='Jobs',
         )
