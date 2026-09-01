@@ -106,21 +106,36 @@ the dependency on where dectl was invoked, silently. `pipeline_root` is the fall
 `repo` means `Path.cwd()`. Both substitute `{env}`, so a path is resolved the same way every
 other name is.
 
-**`declared_paths` is the one enumeration of which config fields hold paths.** A new
-path-bearing field is added there and `config validate`, `config show` and `list --json` all see
-it at once. A field added anywhere else leaves `validate` reporting nothing wrong, which is what
-a correct config also reports — a failure that reads as success. `path_fault` is the shared
-answer to *why* a path is unusable, and it separates absent from present-with-the-wrong-type
-because those have opposite fixes.
+**`declared_paths` is the one enumeration of which config fields hold paths, and everything that
+touches a path reads it.** `missing_declared_paths` checks it, `pipeline_to_dict` and
+`render_pipeline` display it through `resolved_paths`, `aws_names_only` excludes it from the
+env-effect guard, and `resolve_scripts` takes the glue subset. Adding a field there is the whole
+edit; adding it anywhere else gets it checked and never shown, or shown and never checked. Both
+failures read as success.
 
-`expand_home` is the guarded `~` expansion. `Path.expanduser()` raises `RuntimeError` for a
-`~user` naming nobody, pydantic does not wrap that, and `CONFIG_LOAD_ERRORS` does not catch it —
-so an unguarded call escapes `main.py`'s import-time try/except and takes down the `config`
-commands that exist to repair the file. Every path field validates through it.
+`path_fault` and `key_fault` say *why* a path is unusable and return a `PathFault`, never a
+sentence — `validate --json` publishes the name as its discriminator, so the wording lives in
+`FAULT_WORDING` and can change without breaking a caller. `key_fault` reads the configured
+string rather than a `Path` of it, because `pathlib` collapses `.`, `//` and a trailing slash,
+which are exactly the shapes S3 stores literally.
 
-A glue `scripts` entry must be relative and must not climb out of the repo, because its S3 key
-is built from the config string rather than from the resolved path. A lambda `source_dir` has no
-such restriction: it is zipped and uploaded as bytes with no key derived from it.
+**A malformed key is not a schema failure.** `main.py` falls back to `cfg = None` on a load
+error, so every pipeline command disappears — including the ones that would report the problem.
+Anything about how a value is *written* is checked by `config validate` and by the deploy;
+a field validator gets only what stops the value being a path at all.
+
+`expand_home` is the guarded `~` expansion, and `expands_at_load` is the half that skips a value
+carrying `{env}` — no stand-in preserves both a path's shape and its user name, so a templated
+path is decided by `render_env_model`'s re-validation inside the verb instead. That
+re-validation raises outside `CONFIG_LOAD_ERRORS`, so `render_env_model` catches it and reports
+the key rather than letting a pydantic traceback out.
+
+A glue `scripts` entry must be a plain relative path, because its S3 key is built from the
+config string. A lambda `source_dir` has no such restriction: it is zipped and uploaded as bytes
+with no key derived from it.
+
+`script_key` is the one place a glue S3 key is built. The upload, `ScriptLocation` and
+`--extra-py-files` all read it; any two disagreeing means Glue fetches an object nothing wrote.
 
 `deploy` runs everything that can refuse before it writes anything — `resolve_scripts`, then
 `plan_glue_job_update`, then the upload, then `apply_glue_job_update`. `build_job_update` exits

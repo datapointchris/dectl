@@ -129,9 +129,19 @@ def config_validate(
     it, the resolved path and the fault. A schema failure has no such shape, so it stays on
     stderr and stdout is an empty list.
     """
-    if not CONFIG_PATH.exists():
-        error(f'no config found at {CONFIG_PATH} — run "dectl config init" to create one')
+
+    def refuse(message: str) -> None:
+        """Report on stderr, keep stdout parseable, exit 1.
+
+        Every --json exit emits a list, including the two that carry no paths, so a caller
+        piping into jq never has to special-case an empty stdout."""
+        error(message)
+        if as_json:
+            emit_json([])
         raise typer.Exit(1)
+
+    if not CONFIG_PATH.exists():
+        refuse(f'no config found at {CONFIG_PATH} — run "dectl config init" to create one')
 
     try:
         config = load_config()
@@ -141,18 +151,30 @@ def config_validate(
             emit_json([])
         raise typer.Exit(1) from exc
     if config is None:
-        error(f'config at {CONFIG_PATH} was removed while it was being read')
+        refuse(f'config at {CONFIG_PATH} was removed while it was being read')
         raise typer.Exit(1)
 
     problems = missing_declared_paths(config)
     if as_json:
-        emit_json([{'pipeline': p.pipeline, 'field': p.label, 'path': str(p.path), 'fault': p.fault} for p in problems])
+        emit_json(
+            [
+                {
+                    'pipeline': p.pipeline,
+                    'resource': p.resource,
+                    'field': p.label,
+                    'path': str(p.path),
+                    'fault': str(p.fault),
+                }
+                for p in problems
+            ]
+        )
         raise typer.Exit(1 if problems else 0)
 
     if problems:
-        error(f'config at {CONFIG_PATH} matches the schema, but names paths this machine cannot supply:')
+        error(f'config at {CONFIG_PATH} matches the schema, but names paths that cannot be used:')
         for problem in problems:
             stderr_console.print(f'  {problem}', markup=False)
+        stderr_console.print('run "dectl config show" to see where each configured path resolves', style='dim')
         raise typer.Exit(1)
 
     success(f'config at {CONFIG_PATH} is valid')

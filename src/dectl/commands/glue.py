@@ -9,7 +9,7 @@ from rich.table import Table
 from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
 from dectl.config import PipelineConfig
-from dectl.config import path_fault
+from dectl.config import declared_path_faults
 from dectl.config import resolve_in_repo
 from dectl.env import render_env_model
 from dectl.env import substitute_env
@@ -31,33 +31,57 @@ FAILED_RUN_STATES = TERMINAL_RUN_STATES - {'SUCCEEDED'}
 READ_ONLY_KEYS = ('Name', 'CreatedOn', 'LastModifiedOn', 'ProfileName', 'AllocatedCapacity')
 
 
-def resolve_scripts(glue_job: GlueJobConfig, pipeline: PipelineConfig) -> list[tuple[str, Path]]:
-    """Every script as (config key, file on disk), or exit reporting the ones that are unusable.
+def script_key(glue_job: GlueJobConfig, script: str) -> str:
+    """The S3 key one script is uploaded to, and named by in the job definition.
+
+    The one place this is built. The upload, `ScriptLocation` and `--extra-py-files` all read it,
+    and any two of them disagreeing means Glue fetches an object nothing wrote. Both halves are
+    substituted, because a `{env}` surviving into a key names an object that cannot exist."""
+    return f'{substitute_env(glue_job.script_prefix)}/{substitute_env(script)}'
+
+
+def script_uri(glue_job: GlueJobConfig, script: str) -> str:
+    return f's3://{substitute_env(glue_job.script_bucket)}/{script_key(glue_job, script)}'
+
+
+def resolve_scripts(pipeline_name: str, pipeline: PipelineConfig, alias: str) -> list[tuple[str, Path]]:
+    """Every script of one job as (config string, file on disk), or exit naming what is wrong.
 
     Run before anything is uploaded and before the definition diff, so `deploy` and `deploy
     --plan` refuse the same configs. A `--plan` that could not see a missing script would report
     a clean definition on a config whose real deploy exits, which is the one question `--plan` is
-    run to answer."""
-    sources = [(script, resolve_in_repo(pipeline, script)) for script in glue_job.scripts]
-    faults = [(path, fault) for _, path in sources if (fault := path_fault(path, is_dir=False))]
-    if faults:
-        for path, fault in faults:
-            error(f'script {fault}: {path}')
+    run to answer.
+
+    The faults come from `declared_path_faults`, so this door and `config validate` report one
+    failure the same way rather than each describing it its own."""
+    problems = [p for p in declared_path_faults(pipeline_name, pipeline) if p.label.startswith(f'glue/{alias} ')]
+    if problems:
+        for problem in problems:
+            error(str(problem))
+        error('run "dectl config show" to see where each configured path resolves')
         raise typer.Exit(1)
-    return sources
+    job = pipeline.glue_jobs[alias]
+    return [(script, resolve_in_repo(pipeline, script)) for script in job.scripts]
 
 
 def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: list[tuple[str, Path]]) -> None:
     """Upload each resolved script under the key its config string spells.
 
-    The key comes from the config string rather than the resolved path, so every machine
-    deploying this job writes the same object. `GlueJobConfig.scripts_are_relative` is what keeps
-    that key well-formed."""
+    Every path is checked before the first byte goes anywhere: a partial upload leaves the job's
+    scripts split across two revisions, and the run that follows mixes them. The caller normally
+    checked them too, and repeating it here is what keeps that promise a property of this
+    function rather than of whoever calls it."""
+    missing = [path for _, path in sources if not path.is_file()]
+    if missing:
+        for path in missing:
+            error(f'script not found: {path}')
+        raise typer.Exit(1)
+
     s3 = session.client('s3')
     for script, path in sources:
-        key = f'{glue_job.script_prefix}/{substitute_env(script)}'
+        key = script_key(glue_job, script)
         s3.upload_file(Filename=str(path), Bucket=glue_job.script_bucket, Key=key)
-        success(f'uploaded {path} -> s3://{glue_job.script_bucket}/{key}')
+        success(f'uploaded {path} -> s3://{substitute_env(glue_job.script_bucket)}/{key}')
 
 
 def build_job_update(existing: dict, glue_job: GlueJobConfig) -> dict:
@@ -83,8 +107,7 @@ def build_job_update(existing: dict, glue_job: GlueJobConfig) -> dict:
     job_update['Role'] = glue_job.role
 
     command = job_update.get('Command', {})
-    script_key = f'{glue_job.script_prefix}/{glue_job.scripts[0]}'
-    command['ScriptLocation'] = f's3://{glue_job.script_bucket}/{script_key}'
+    command['ScriptLocation'] = script_uri(glue_job, glue_job.scripts[0])
     job_update['Command'] = command
 
     if glue_job.connections is None:
@@ -103,8 +126,7 @@ def build_job_update(existing: dict, glue_job: GlueJobConfig) -> dict:
     default_args = dict(existing.get('DefaultArguments', {}))
     default_args['--JOB_NAME'] = glue_job.name
     if len(glue_job.scripts) > 1:
-        extra_files = ','.join(f's3://{glue_job.script_bucket}/{glue_job.script_prefix}/{s}' for s in glue_job.scripts[1:])
-        default_args['--extra-py-files'] = extra_files
+        default_args['--extra-py-files'] = ','.join(script_uri(glue_job, s) for s in glue_job.scripts[1:])
     for key, value in glue_job.arguments.items():
         arg_key = key if key.startswith('--') else f'--{key}'
         default_args[arg_key] = value
@@ -157,26 +179,18 @@ def render_job_changes(job_name: str, changes: list[tuple[str, str, str]]) -> No
     console.print(table)
 
 
-def update_glue_job(session: boto3.Session, glue_job: GlueJobConfig, assume_yes: bool = False, plan: bool = False) -> None:
-    """Apply dectl's managed fields to the Glue job definition, after showing what would change.
-
-    Terraform owns these jobs once a pipeline is established, so an UpdateJob that silently
-    rewrites Role/Connections/DefaultArguments is how dectl's config drifts from the real
-    definition. When nothing dectl manages differs, skip the call entirely — the steady state
-    is then a pure code push with no drift surface at all."""
-    job_update = plan_glue_job_update(session, glue_job, assume_yes=assume_yes, plan=plan)
-    if job_update is not None:
-        apply_glue_job_update(session, glue_job, job_update)
-
-
 def plan_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig, assume_yes: bool = False, plan: bool = False) -> dict | None:
     """Everything about a definition update that can refuse: build it, show it, confirm it.
 
-    Returns the update to apply, or None when there is nothing to apply. Split from the apply so
-    a caller can get every refusal out of the way before it writes anything. `build_job_update`
-    exits on a max_capacity that Glue would reject, and the confirmation can be declined; both
-    happening after a script upload leaves the job's ScriptLocation pointing at code the user was
-    then told not to deploy."""
+    Terraform owns these jobs once a pipeline is established, so an UpdateJob that silently
+    rewrites Role/Connections/DefaultArguments is how dectl's config drifts from the real
+    definition. When nothing dectl manages differs, None comes back and the caller skips the
+    call entirely — the steady state is then a pure code push with no drift surface at all.
+
+    Everything that can refuse lives here rather than beside the apply, so a caller gets the
+    refusals out of the way before it writes anything. `build_job_update` exits on a
+    max_capacity Glue would reject, and the confirmation can be declined; either landing after a
+    script upload leaves ScriptLocation pointing at code the user was then told not to deploy."""
     glue = session.client('glue')
     existing = glue.get_job(JobName=glue_job.name)['Job']
     job_update = build_job_update(existing, glue_job)
@@ -317,7 +331,7 @@ def make_glue_job_app(
 
         job = resolved()
         # Resolve and check before anything reaches AWS, so --plan refuses what deploy refuses.
-        sources = resolve_scripts(job, pipeline)
+        sources = resolve_scripts(pipeline_name, pipeline, alias)
         session = make_session(config)
         job_update = plan_glue_job_update(session, job, assume_yes=yes, plan=plan)
         if plan:

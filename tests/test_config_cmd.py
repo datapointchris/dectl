@@ -1,12 +1,10 @@
 import json
+import re
 
-import yaml
 from typer.testing import CliRunner
 
 from dectl.commands.config_cmd import config_app
 from dectl.config import TEMPLATE_CONFIG
-from dectl.config import DectlConfig
-from dectl.config import missing_declared_paths
 
 runner = CliRunner()
 
@@ -204,9 +202,10 @@ def test_validate_json_emits_the_unusable_paths_as_objects(monkeypatch, tmp_path
     assert json.loads(result.stdout) == [
         {
             'pipeline': 'salesdata',
+            'resource': 'lambda',
             'field': 'lambda/notifier source_dir',
             'path': str(repo / 'modules' / 'code'),
-            'fault': 'not found',
+            'fault': 'absent',
         }
     ]
 
@@ -259,20 +258,22 @@ def test_validate_accepts_a_repo_whose_paths_are_all_present(monkeypatch, tmp_pa
     assert 'valid' in result.stdout
 
 
-def config_from(raw: str) -> DectlConfig:
-    return DectlConfig.model_validate(yaml.safe_load(raw))
+def strip_wrapping(text: str) -> str:
+    """Undo rich's soft wrap so a path assertion does not depend on the terminal's width.
+
+    The assertion is about what the command reported, so it has to read the command's own
+    output rather than recompute the answer beside it."""
+    return re.sub(r'\s+', ' ', text)
 
 
 def test_validate_rejects_a_repo_that_is_not_on_this_machine(monkeypatch, tmp_path):
-    # The value, not the rendered line: rich wraps a long path at the running terminal's width,
-    # and a path assertion against wrapped stderr passes or fails on the pane it ran in.
-    raw = config_naming(str(tmp_path / 'absent'))
-    point_at(monkeypatch, tmp_path, raw)
+    point_at(monkeypatch, tmp_path, config_naming(str(tmp_path / 'absent')))
 
     result = runner.invoke(config_app, ['validate'])
 
     assert result.exit_code == 1
-    assert [(p.label, p.path, p.fault) for p in missing_declared_paths(config_from(raw))] == [('repo', tmp_path / 'absent', 'not found')]
+    assert 'repo not found' in strip_wrapping(result.stderr)
+    assert str(tmp_path / 'absent') in strip_wrapping(result.stderr)
 
 
 def test_validate_rejects_a_present_repo_that_is_missing_the_source(monkeypatch, tmp_path):
@@ -286,9 +287,8 @@ def test_validate_rejects_a_present_repo_that_is_missing_the_source(monkeypatch,
     result = runner.invoke(config_app, ['validate'])
 
     assert result.exit_code == 1
-    assert [(p.label, p.path, p.fault) for p in missing_declared_paths(config_from(raw))] == [
-        ('lambda/notifier source_dir', repo / 'modules' / 'code', 'not found')
-    ]
+    assert 'lambda/notifier source_dir not found' in strip_wrapping(result.stderr)
+    assert str(repo / 'modules' / 'code') in strip_wrapping(result.stderr)
 
 
 def test_validate_reports_a_file_named_as_a_source_dir_as_a_file(monkeypatch, tmp_path):
@@ -303,11 +303,11 @@ def test_validate_reports_a_file_named_as_a_source_dir_as_a_file(monkeypatch, tm
     result = runner.invoke(config_app, ['validate'])
 
     assert result.exit_code == 1
-    assert [p.fault for p in missing_declared_paths(config_from(raw))] == ['is a file, not a directory']
+    assert 'is a file, not a directory' in strip_wrapping(result.stderr)
 
 
 def test_validate_checks_glue_scripts_and_not_only_lambda_sources(monkeypatch, tmp_path):
-    # Deleting the glue half of the walk left the suite green, so the glue half was unproved.
+    # Both halves of the walk are checked. Deleting either one has to turn this red.
     repo = tmp_path / 'salesdata'
     (repo / 'code').mkdir(parents=True)
     raw = (
@@ -333,7 +333,8 @@ def test_validate_checks_glue_scripts_and_not_only_lambda_sources(monkeypatch, t
     result = runner.invoke(config_app, ['validate'])
 
     assert result.exit_code == 1
-    assert [(p.label, p.path) for p in missing_declared_paths(config_from(raw))] == [('glue/copy script', repo / 'jobs' / 'copy.py')]
+    assert 'glue/copy script not found' in strip_wrapping(result.stderr)
+    assert str(repo / 'jobs' / 'copy.py') in strip_wrapping(result.stderr)
 
 
 def test_env_is_substituted_before_a_declared_path_is_checked(monkeypatch, tmp_path):
@@ -347,7 +348,7 @@ def test_env_is_substituted_before_a_declared_path_is_checked(monkeypatch, tmp_p
     result = runner.invoke(config_app, ['validate'])
 
     assert result.exit_code == 0
-    assert missing_declared_paths(config_from(raw)) == []
+    assert 'valid' in result.stdout
 
 
 def test_env_is_substituted_inside_the_repo_itself(monkeypatch, tmp_path):
@@ -361,7 +362,55 @@ def test_env_is_substituted_inside_the_repo_itself(monkeypatch, tmp_path):
     result = runner.invoke(config_app, ['validate'])
 
     assert result.exit_code == 0
-    assert missing_declared_paths(config_from(raw)) == []
+    assert 'valid' in result.stdout
+
+
+def test_validate_checks_key_shape_even_without_a_repo(monkeypatch, tmp_path):
+    # How a key is written is a property of the config, answerable on any machine. Only whether
+    # a file is present needs a repo to say where to look.
+    raw = (
+        'defaults:\n'
+        '  account_id: "1"\n'
+        'pipelines:\n'
+        '  salesdata:\n'
+        '    glue_jobs:\n'
+        '      copy:\n'
+        '        name: n\n'
+        '        script_bucket: b\n'
+        '        role: r\n'
+        '        scripts:\n'
+        '          - /srv/shared/handler.py\n'
+    )
+    point_at(monkeypatch, tmp_path, raw)
+
+    result = runner.invoke(config_app, ['validate', '--json'])
+
+    assert result.exit_code == 1
+    assert [p['fault'] for p in json.loads(result.stdout)] == ['escapes_repo']
+
+
+def test_a_malformed_key_leaves_the_rest_of_the_cli_working(monkeypatch, tmp_path):
+    # The whole reason the check is not a field validator. A schema failure sends main.py to
+    # cfg = None and every pipeline command disappears, including the ones that would report it.
+    raw = (
+        'defaults:\n'
+        '  account_id: "1"\n'
+        'pipelines:\n'
+        '  salesdata:\n'
+        '    glue_jobs:\n'
+        '      copy:\n'
+        '        name: n\n'
+        '        script_bucket: b\n'
+        '        role: r\n'
+        '        scripts:\n'
+        '          - /srv/shared/handler.py\n'
+    )
+    point_at(monkeypatch, tmp_path, raw)
+
+    result = runner.invoke(config_app, ['show', '--json'])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)[0]['pipeline'] == 'salesdata'
 
 
 def test_validate_leaves_a_pipeline_without_a_repo_alone(monkeypatch, tmp_path):

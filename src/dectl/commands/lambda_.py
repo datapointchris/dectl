@@ -9,6 +9,7 @@ from botocore.exceptions import ConnectTimeoutError
 from botocore.exceptions import EndpointConnectionError
 from botocore.exceptions import ReadTimeoutError
 
+from dectl.config import FAULT_WORDING
 from dectl.config import DectlConfig
 from dectl.config import LambdaConfig
 from dectl.config import PipelineConfig
@@ -44,16 +45,28 @@ LOG_WINDOW_BUFFER_MS = 60_000
 
 
 def zip_lambda(source: Path) -> Path:
+    """Zip a source directory's files at the archive root, refusing to build an empty one.
+
+    An archive with no entries is 22 bytes and perfectly valid, and `update_function_code`
+    accepts it, so the function's code is replaced with nothing. A directory that exists and
+    holds nothing reaches this on ordinary routes — an uninitialised submodule, or a source_dir
+    naming a build directory before the build ran — so the count is what is checked, not the
+    directory."""
     fault = path_fault(source, is_dir=True)
     if fault:
-        error(f'lambda source {fault}: {source}')
+        error(f'lambda source_dir {FAULT_WORDING[fault]}: {source}')
+        error('run "dectl config show" to see where each configured path resolves')
+        raise typer.Exit(1)
+
+    files = [f for f in sorted(source.rglob('*')) if f.is_file() and '__pycache__' not in f.parts]
+    if not files:
+        error(f'lambda source_dir holds nothing to deploy: {source}')
         raise typer.Exit(1)
 
     zip_path = Path(tempfile.mkdtemp()) / 'lambda.zip'
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for file in source.rglob('*'):
-            if file.is_file() and '__pycache__' not in file.parts:
-                zf.write(file, file.relative_to(source))
+        for file in files:
+            zf.write(file, file.relative_to(source))
     return zip_path
 
 

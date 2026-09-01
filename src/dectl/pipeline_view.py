@@ -1,6 +1,7 @@
 from typing import Any
 
 from dectl.config import PipelineConfig
+from dectl.config import declared_paths
 from dectl.config import pipeline_root
 from dectl.config import resolve_in_repo
 from dectl.env import substitute_env
@@ -24,25 +25,59 @@ def resource_types(pipeline: PipelineConfig) -> list[str]:
     return types
 
 
+def aws_names_only(pipeline: PipelineConfig) -> dict[str, Any]:
+    """The pipeline's config with every local path field removed.
+
+    `warn_if_environment_had_no_effect` asks whether `--env` changed an AWS name. A `{env}` in a
+    local path satisfies `contains_env_placeholder` without naming anything in AWS, so leaving
+    one in silences the warning for a pipeline whose bucket and job names all hardcode an
+    environment. Driven from `declared_paths`, so a new path field is excluded by being declared
+    rather than by being remembered here."""
+    dumped = pipeline.model_dump(exclude={'repo'})
+    for declared in declared_paths(pipeline):
+        if declared.resource == 'glue':
+            alias = declared.label.split('/')[1].split(' ')[0]
+            dumped.get('glue_jobs', {}).get(alias, {}).pop('scripts', None)
+        elif declared.resource == 'lambda':
+            alias = declared.label.split('/')[1].split(' ')[0]
+            dumped.get('lambdas', {}).get(alias, {}).pop('source_dir', None)
+    return dumped
+
+
+def resolved_paths(pipeline: PipelineConfig) -> dict[str, list[str]]:
+    """Every declared path of this pipeline, resolved, keyed by `<resource>/<alias>`.
+
+    Both renderers read this rather than walking the resource dicts themselves, so a field added
+    to `declared_paths` is displayed without either of them being edited."""
+    grouped: dict[str, list[str]] = {}
+    for declared in declared_paths(pipeline):
+        if declared.resource == 'repo':
+            continue
+        key = declared.label.rsplit(' ', 1)[0]
+        grouped.setdefault(key, []).append(str(resolve_in_repo(pipeline, declared.value)))
+    return grouped
+
+
 def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
     """Build the stable --json shape for a pipeline: alias -> resolved AWS name per resource.
 
     Names are env-substituted so the JSON reflects the active environment, matching what the
     human view prints. This is the documented schema for `list --json` / `config show --json`."""
-    warn_if_environment_had_no_effect(pipeline.model_dump(exclude={'repo'}))
+    warn_if_environment_had_no_effect(aws_names_only(pipeline))
+    resolved = resolved_paths(pipeline)
     return {
         'pipeline': name,
-        # The resolved directory, with `~` already expanded, plus whether the config named it.
-        # An undeclared repo still resolves — to the working directory — and a reader who cannot
-        # tell that apart from a declared one cannot tell what a deploy would reach.
+        # The resolved directory, with `~` expanded and `{env}` substituted, plus whether the
+        # config named it. An undeclared repo still resolves — to the working directory — and a
+        # reader who cannot tell that apart from a declared one cannot say what a deploy reaches.
         'repo': {'path': str(pipeline_root(pipeline)), 'declared': pipeline.repo is not None},
         'glue': {
             alias: {
                 'name': substitute_env(job.name),
                 'script_bucket': substitute_env(job.script_bucket),
-                'script_prefix': job.script_prefix,
+                'script_prefix': substitute_env(job.script_prefix),
                 'scripts': [substitute_env(script) for script in job.scripts],
-                'script_paths': [str(resolve_in_repo(pipeline, script)) for script in job.scripts],
+                'script_paths': resolved[f'glue/{alias}'],
             }
             for alias, job in pipeline.glue_jobs.items()
         },
@@ -51,7 +86,7 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
                 'name': substitute_env(fn.name),
                 'durable': fn.durable,
                 'source_dir': substitute_env(fn.source_dir),
-                'source_path': str(resolve_in_repo(pipeline, fn.source_dir)),
+                'source_path': resolved[f'lambda/{alias}'][0],
             }
             for alias, fn in pipeline.lambdas.items()
         },
@@ -69,23 +104,25 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
 
 def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
     """Print a pipeline's resources as human-readable, env-substituted alias -> AWS name lines."""
-    warn_if_environment_had_no_effect(pipeline.model_dump(exclude={'repo'}))
+    warn_if_environment_had_no_effect(aws_names_only(pipeline))
+    resolved = resolved_paths(pipeline)
     types = resource_types(pipeline)
     info(f'[bold]{name}[/bold] ({", ".join(types) or "none configured"})')
-    source = '' if pipeline.repo else ' [dim](working directory — no repo set)[/dim]'
+    source = '' if pipeline.repo else ' (working directory — no repo set)'
     info(f'  repo: {pipeline_root(pipeline)}{source}')
     for alias, job in pipeline.glue_jobs.items():
         info(f'  glue/{alias}: {substitute_env(job.name)}')
-        info(f'    bucket: s3://{substitute_env(job.script_bucket)}/{job.script_prefix}/')
+        info(f'    bucket: s3://{substitute_env(job.script_bucket)}/{substitute_env(job.script_prefix)}/')
         # The resolved path, not the config string: the reader is asking which file a deploy
         # would upload, and the config string does not answer that on its own.
-        for script in job.scripts:
-            info(f'      {resolve_in_repo(pipeline, script)}')
+        for path in resolved.get(f'glue/{alias}', []):
+            info(f'      {path}')
     for alias, fn in pipeline.lambdas.items():
         # Worth calling out inline: a durable function carries a different set of verbs.
         marker = ' (durable)' if fn.durable else ''
         info(f'  lambda/{alias}: {substitute_env(fn.name)}{marker}')
-        info(f'    source: {resolve_in_repo(pipeline, fn.source_dir)}')
+        for path in resolved.get(f'lambda/{alias}', []):
+            info(f'    source_dir: {path}')
     for alias, sfn in pipeline.step_functions.items():
         info(f'  sfn/{alias}: {substitute_env(sfn.name)}')
     for alias, bucket in pipeline.buckets.items():

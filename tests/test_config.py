@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import typer
 import yaml
 from pydantic import ValidationError
 
@@ -18,6 +19,7 @@ from dectl.config import describe_config_error
 from dectl.config import load_config
 from dectl.config import pipeline_root
 from dectl.config import resolve_in_repo
+from dectl.env import render_env_model
 from dectl.env import set_active_environment
 
 
@@ -375,3 +377,17 @@ def test_a_repo_whose_root_is_a_token_is_still_rejected_as_relative():
     # parsed after the config loads.
     with pytest.raises(ValidationError):
         pipeline_with_repo('{env}/salesdata')
+
+
+def test_a_substituted_value_that_fails_validation_exits_rather_than_raising():
+    # render_env_model re-validates, so a config that loaded can still fail inside a verb. A
+    # bare ValidationError reaches the reader as a pydantic traceback naming the model rather
+    # than the key they typed.
+    pipeline = PipelineConfig.model_validate({'lambdas': {'fn': {'name': 'n', 'source_dir': '~{env}/code'}}})
+    set_active_environment('nosuchuser', '--env')
+    try:
+        with pytest.raises(typer.Exit) as exit_info:
+            render_env_model(pipeline.lambdas['fn'])
+        assert exit_info.value.exit_code == 1
+    finally:
+        set_active_environment('dev', 'default')

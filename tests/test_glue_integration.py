@@ -18,7 +18,8 @@ import boto3
 import botocore.exceptions
 import pytest
 
-from dectl.commands.glue import update_glue_job
+from dectl.commands.glue import apply_glue_job_update
+from dectl.commands.glue import plan_glue_job_update
 from dectl.config import GlueJobConfig
 
 pytestmark = pytest.mark.integration
@@ -127,7 +128,9 @@ def test_deploy_preserves_existing_job_definition(session, glue_role_arn, capaci
             role=glue_role_arn,
             arguments={'new-flag': 'on'},
         )
-        update_glue_job(session, glue_job)
+        job_update = plan_glue_job_update(session, glue_job, assume_yes=True)
+        if job_update is not None:
+            apply_glue_job_update(session, glue_job, job_update)
 
         job = glue.get_job(JobName=job_name)['Job']
 

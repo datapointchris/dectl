@@ -1,7 +1,11 @@
 from typing import Any
 
+import typer
 from pydantic import BaseModel
+from pydantic import ValidationError
 
+from dectl.output import error
+from dectl.output import stderr_console
 from dectl.output import warn
 
 DEFAULT_ENV = 'dev'
@@ -87,7 +91,21 @@ def warn_if_environment_had_no_effect(value: Any) -> None:
 
 
 def render_env_model[ModelT: BaseModel](model: ModelT) -> ModelT:
-    """Return a copy of a config model with {env} substituted in every string field."""
+    """Return a copy of a config model with {env} substituted in every string field.
+
+    The re-validation is the point at which a field validator sees the substituted value rather
+    than the one in the file, so a config that loaded can still fail here. That failure is a
+    config problem and is reported as one: a bare ValidationError escaping a verb reaches the
+    reader as a pydantic traceback and a docs URL, which names the model rather than the key
+    they typed."""
     data = model.model_dump()
     warn_if_environment_had_no_effect(data)
-    return type(model).model_validate(render_value(data))
+    try:
+        return type(model).model_validate(render_value(data))
+    except ValidationError as exc:
+        error(f"--env {active_environment.name} makes this resource's config invalid:")
+        for err in exc.errors():
+            location = '.'.join(str(part) for part in err['loc']) or '(root)'
+            stderr_console.print(f'  {location}: {err["msg"]}', markup=False)
+        stderr_console.print('run "dectl config show" to see the substituted values', style='dim')
+        raise typer.Exit(1) from exc

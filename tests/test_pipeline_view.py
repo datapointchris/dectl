@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 from dectl.config import DectlConfig
@@ -101,9 +102,97 @@ def test_an_undeclared_repo_is_reported_as_the_working_directory():
     assert pipeline.repo is None
 
 
+def repo_pipeline(**overrides) -> DectlConfig:
+    pipeline = {
+        'repo': '/srv/salesdata',
+        'glue_jobs': {
+            'copy': {'name': 'j', 'script_bucket': 'b-{env}', 'script_prefix': 'scripts/{env}', 'scripts': ['jobs/copy.py'], 'role': 'r'}
+        },
+        'lambdas': {'notifier': {'name': 'n', 'source_dir': 'modules/notifier/code'}},
+    } | overrides
+    return DectlConfig.model_validate({'defaults': {'account_id': '1'}, 'pipelines': {'salesdata': pipeline}})
+
+
+def test_json_carries_the_resolved_path_of_every_declared_path():
+    # The reader is asking which file a deploy sends. The config string does not answer that,
+    # and the repo row alone does not either.
+    pipeline = repo_pipeline().pipelines['salesdata']
+
+    data = pipeline_to_dict('salesdata', pipeline)
+
+    assert data['glue']['copy']['script_paths'] == ['/srv/salesdata/jobs/copy.py']
+    assert data['lambda']['notifier']['source_path'] == '/srv/salesdata/modules/notifier/code'
+
+
+def test_json_substitutes_the_script_prefix_like_every_other_name(monkeypatch):
+    # The prefix is half the destination. Leaving it literal beside a substituted bucket names
+    # an S3 location no deploy writes to.
+    monkeypatch.setattr(active_environment, 'name', 'prod')
+    pipeline = repo_pipeline().pipelines['salesdata']
+
+    data = pipeline_to_dict('salesdata', pipeline)
+
+    assert data['glue']['copy']['script_prefix'] == 'scripts/prod'
+    assert data['glue']['copy']['script_bucket'] == 'b-prod'
+
+
+def test_render_prints_the_resolved_path_of_every_declared_path(capsys):
+    pipeline = repo_pipeline().pipelines['salesdata']
+
+    render_pipeline('salesdata', pipeline)
+
+    out = re.sub(r'\s+', ' ', capsys.readouterr().out)
+    assert '/srv/salesdata/jobs/copy.py' in out
+    assert 'source_dir: /srv/salesdata/modules/notifier/code' in out
+
+
+def test_a_source_dir_token_does_not_silence_the_no_effect_warning(monkeypatch, capsys):
+    # The guard asks whether --env changed an AWS name. Every local path field has to be out of
+    # the dump it reads, not just `repo`, or one of them satisfies the check and silences it.
+    monkeypatch.setattr(active_environment, 'name', 'prod')
+    monkeypatch.setattr(active_environment, 'source', '--env')
+    monkeypatch.setattr(active_environment, 'warned_about_missing_placeholder', False)
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '1'},
+            'pipelines': {
+                'salesdata': {
+                    'repo': '/srv/salesdata',
+                    'lambdas': {'notifier': {'name': 'hardcoded-dev', 'source_dir': 'modules/{env}/code'}},
+                }
+            },
+        }
+    )
+
+    pipeline_to_dict('salesdata', config.pipelines['salesdata'])
+
+    assert 'changed nothing' in capsys.readouterr().err
+
+
+def test_a_glue_script_token_does_not_silence_the_no_effect_warning(monkeypatch, capsys):
+    monkeypatch.setattr(active_environment, 'name', 'prod')
+    monkeypatch.setattr(active_environment, 'source', '--env')
+    monkeypatch.setattr(active_environment, 'warned_about_missing_placeholder', False)
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '1'},
+            'pipelines': {
+                'salesdata': {
+                    'repo': '/srv/salesdata',
+                    'glue_jobs': {'copy': {'name': 'hardcoded-dev', 'script_bucket': 'b', 'scripts': ['jobs/{env}/c.py'], 'role': 'r'}},
+                }
+            },
+        }
+    )
+
+    pipeline_to_dict('salesdata', config.pipelines['salesdata'])
+
+    assert 'changed nothing' in capsys.readouterr().err
+
+
 def test_a_repo_token_does_not_silence_the_no_effect_warning(monkeypatch, capsys):
-    # `repo` joining model_dump() put a {env} where contains_env_placeholder could find one, so
-    # a pipeline whose AWS names are all hardcoded stopped reporting that --env changed nothing.
+    # The guard asks whether --env changed an AWS name. A {env} in a local path satisfies
+    # contains_env_placeholder without naming anything in AWS, so it must not reach the dump.
     monkeypatch.setattr(active_environment, 'name', 'prod')
     monkeypatch.setattr(active_environment, 'source', '--env')
     monkeypatch.setattr(active_environment, 'warned_about_missing_placeholder', False)

@@ -332,9 +332,10 @@ working directory, which is the dependency the key removes, so it fails validati
 
 A `source_dir` may be absolute and sit outside the repo — it is zipped and uploaded as
 bytes, so nothing else depends on where it came from. A glue `scripts` entry may not: its
-S3 key is built from the string you write, so an absolute path or a `..` produces a key
-carrying your machine's own layout, and S3 does not normalise it. Both are refused at
-validation.
+S3 key is built from the string you write, and S3 stores that string as given. `../x.py`,
+`/srv/x.py`, `./x.py`, `jobs//x.py` and `x.py/` all name objects nothing will look for, so
+`config validate` and the deploy both refuse them. The config still loads either way, which
+is what keeps the rest of the CLI available to tell you.
 
 Omit `repo` and nothing changes: paths resolve against the working directory, and a deploy
 has to run from the checkout.

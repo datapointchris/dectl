@@ -2,21 +2,24 @@ from pathlib import Path
 
 import pytest
 import typer
-from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from dectl import prompt
 from dectl.commands.glue import GlueRunWatcher
+from dectl.commands.glue import apply_glue_job_update
 from dectl.commands.glue import build_job_update
 from dectl.commands.glue import follow_glue_run
 from dectl.commands.glue import job_definition_changes
 from dectl.commands.glue import make_glue_app
+from dectl.commands.glue import plan_glue_job_update
 from dectl.commands.glue import resolve_scripts
-from dectl.commands.glue import update_glue_job
 from dectl.commands.glue import upload_scripts
 from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
+from dectl.config import PathFault
 from dectl.config import PipelineConfig
+from dectl.config import declared_path_faults
+from dectl.env import active_environment
 
 runner = CliRunner()
 
@@ -72,7 +75,11 @@ def make_job(connections=None, arguments=None, max_capacity=None):
 
 
 def apply(glue, job):
-    update_glue_job(FakeSession(glue), job, assume_yes=True)
+    """The sequence `deploy` runs, so these tests exercise the path the CLI takes."""
+    session = FakeSession(glue)
+    job_update = plan_glue_job_update(session, job, assume_yes=True)
+    if job_update is not None:
+        apply_glue_job_update(session, job, job_update)
 
 
 def test_update_omits_connections_when_job_has_none():
@@ -138,7 +145,7 @@ def test_update_without_a_terminal_fails_naming_the_flag():
     glue = FakeGlueClient(existing_job={'Command': {'Name': 'pythonshell'}})
 
     with pytest.raises(typer.Exit) as raised:
-        update_glue_job(FakeSession(glue), make_job())
+        plan_glue_job_update(FakeSession(glue), make_job())
 
     assert raised.value.exit_code == 1
     assert glue.captured_update is None
@@ -150,7 +157,7 @@ def test_no_input_refuses_the_prompt_even_on_a_terminal(monkeypatch):
     glue = FakeGlueClient(existing_job={'Command': {'Name': 'pythonshell'}})
 
     with pytest.raises(typer.Exit):
-        update_glue_job(FakeSession(glue), make_job())
+        plan_glue_job_update(FakeSession(glue), make_job())
 
     assert glue.captured_update is None
 
@@ -166,7 +173,7 @@ def test_update_is_skipped_when_nothing_dectl_manages_changed():
         'MaxCapacity': 1.0,
     }
     glue = FakeGlueClient(existing_job=existing)
-    update_glue_job(FakeSession(glue), job)
+    apply(glue, job)
 
     assert glue.captured_update is None
 
@@ -348,7 +355,7 @@ def test_scripts_upload_from_the_repo_rather_than_the_working_directory(tmp_path
     job = pipeline.glue_jobs['j']
     s3 = FakeS3Client()
 
-    upload_scripts(FakeS3Session(s3), job, resolve_scripts(job, pipeline))
+    upload_scripts(FakeS3Session(s3), job, resolve_scripts('proj', pipeline, 'j'))
 
     assert s3.uploads == [(str(tmp_path / 'jobs' / 'copy.py'), 'b', 'scripts/jobs/copy.py')]
 
@@ -361,23 +368,64 @@ def test_the_s3_key_keeps_the_configured_path_not_the_resolved_one(tmp_path):
     job = pipeline.glue_jobs['j']
     s3 = FakeS3Client()
 
-    upload_scripts(FakeS3Session(s3), job, resolve_scripts(job, pipeline))
+    upload_scripts(FakeS3Session(s3), job, resolve_scripts('proj', pipeline, 'j'))
 
     assert s3.uploads[0][2] == 'scripts/copy.py'
 
 
-def test_an_absolute_script_is_refused_because_the_key_is_built_from_it(tmp_path):
-    # `scripts/` + an absolute path makes a key with an empty segment carrying the deploying
-    # machine's layout, and S3 does not normalise a key. Two machines holding the same file at
-    # different paths would write two different objects.
-    with pytest.raises(ValidationError):
-        glue_pipeline(str(tmp_path), ['/srv/shared/handler.py'])
+def test_the_upload_and_the_job_definition_name_one_object(tmp_path, monkeypatch):
+    # Three sites build this key. Any two disagreeing means Glue fetches an object nothing
+    # uploaded, and a surviving {env} is the way they diverge.
+    monkeypatch.setattr(active_environment, 'name', 'prod')
+    (tmp_path / 'jobs' / 'prod').mkdir(parents=True)
+    (tmp_path / 'jobs' / 'prod' / 'copy.py').write_text('x')
+    pipeline = glue_pipeline(str(tmp_path), ['jobs/{env}/copy.py'])
+    job = pipeline.glue_jobs['j']
+    s3 = FakeS3Client()
+
+    upload_scripts(FakeS3Session(s3), job, resolve_scripts('proj', pipeline, 'j'))
+    definition = build_job_update({'Name': 'my-job'}, job)
+
+    assert definition['Command']['ScriptLocation'] == f's3://b/{s3.uploads[0][2]}'
+    assert '{env}' not in definition['Command']['ScriptLocation']
 
 
-def test_a_parent_relative_script_is_refused(tmp_path):
-    # `scripts/../sibling/util.py` is a literal S3 key, not a path S3 collapses.
-    with pytest.raises(ValidationError):
-        glue_pipeline(str(tmp_path), ['../sibling/util.py'])
+def test_extra_py_files_name_the_same_objects_the_upload_wrote(tmp_path, monkeypatch):
+    monkeypatch.setattr(active_environment, 'name', 'prod')
+    (tmp_path / 'prod').mkdir()
+    for leaf in ('main.py', 'util.py'):
+        (tmp_path / 'prod' / leaf).write_text('x')
+    pipeline = glue_pipeline(str(tmp_path), ['{env}/main.py', '{env}/util.py'])
+    job = pipeline.glue_jobs['j']
+    s3 = FakeS3Client()
+
+    upload_scripts(FakeS3Session(s3), job, resolve_scripts('proj', pipeline, 'j'))
+    definition = build_job_update({'Name': 'my-job'}, job)
+
+    assert definition['DefaultArguments']['--extra-py-files'] == f's3://b/{s3.uploads[1][2]}'
+
+
+@pytest.mark.parametrize(
+    'written',
+    ['/srv/shared/handler.py', '../sibling/util.py', './copy.py', 'jobs//copy.py', 'jobs/./copy.py', 'copy.py/'],
+)
+def test_a_key_that_s3_would_store_literally_is_refused(tmp_path, written):
+    # S3 stores `.`, an empty segment and a trailing slash verbatim, so the object lands where
+    # no reader of the config would look for it. pathlib collapses exactly those, which is why
+    # the check reads the configured string rather than a parse of it.
+    pipeline = glue_pipeline(str(tmp_path), [written])
+
+    faults = declared_path_faults('proj', pipeline)
+
+    assert [f.fault for f in faults] in ([PathFault.NOT_A_CLEAN_KEY], [PathFault.ESCAPES_REPO])
+
+
+def test_a_malformed_script_still_loads_so_the_rest_of_the_cli_survives(tmp_path):
+    # A schema failure blanks every pipeline command, including the ones that would report the
+    # problem. The config loads and the deploy refuses instead.
+    pipeline = glue_pipeline(str(tmp_path), ['/srv/shared/handler.py'])
+
+    assert pipeline.glue_jobs['j'].scripts == ['/srv/shared/handler.py']
 
 
 def test_one_missing_script_resolves_none_of_them(tmp_path):
@@ -387,9 +435,23 @@ def test_one_missing_script_resolves_none_of_them(tmp_path):
     pipeline = glue_pipeline(str(tmp_path), ['present.py', 'absent.py'])
 
     with pytest.raises(typer.Exit) as exit_info:
-        resolve_scripts(pipeline.glue_jobs['j'], pipeline)
+        resolve_scripts('proj', pipeline, 'j')
 
     assert exit_info.value.exit_code == 1
+
+
+def test_upload_scripts_refuses_a_partial_set_handed_to_it_directly(tmp_path):
+    # The invariant belongs to the function, not to whoever calls it. Every live caller
+    # resolves first; this one does not, and the promise has to hold anyway.
+    (tmp_path / 'present.py').write_text('x')
+    pipeline = glue_pipeline(str(tmp_path), ['present.py'])
+    s3 = FakeS3Client()
+    sources = [('present.py', tmp_path / 'present.py'), ('absent.py', tmp_path / 'absent.py')]
+
+    with pytest.raises(typer.Exit):
+        upload_scripts(FakeS3Session(s3), pipeline.glue_jobs['j'], sources)
+
+    assert s3.uploads == []
 
 
 def test_a_directory_named_as_a_script_is_reported_as_a_directory(tmp_path, capsys):
@@ -399,9 +461,23 @@ def test_a_directory_named_as_a_script_is_reported_as_a_directory(tmp_path, caps
     pipeline = glue_pipeline(str(tmp_path), ['copy.py'])
 
     with pytest.raises(typer.Exit):
-        resolve_scripts(pipeline.glue_jobs['j'], pipeline)
+        resolve_scripts('proj', pipeline, 'j')
 
     assert 'is a directory, not a file' in capsys.readouterr().err
+
+
+def test_the_deploy_door_names_the_pipeline_and_the_config_key(tmp_path, capsys):
+    # config validate names both. The deploy is the door you are at when it matters, so it
+    # cannot say less.
+    pipeline = glue_pipeline(str(tmp_path), ['jobs/copy.py'])
+
+    with pytest.raises(typer.Exit):
+        resolve_scripts('salesdata', pipeline, 'j')
+
+    err = capsys.readouterr().err
+    assert 'salesdata' in err
+    assert 'glue/j script' in err
+    assert 'dectl config show' in err
 
 
 class FakeDeploySession:
