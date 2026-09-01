@@ -3,6 +3,7 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import NamedTuple
 
+import typer
 import yaml
 from pyclisteno.paths import config_home
 from pydantic import BaseModel
@@ -264,10 +265,20 @@ def pipeline_root(pipeline: PipelineConfig) -> Path:
     """The directory this pipeline's relative paths resolve against.
 
     `{env}` is substituted here, so a repo under a per-environment root joins a substituted
-    `source_dir` without half of the result staying literal."""
-    if pipeline.repo:
+    `source_dir` without half of the result staying literal.
+
+    This is the only door a `repo` is expanded through, and it is where an unresolvable one is
+    reported. `PipelineConfig` never passes through `render_env_model` — that runs per resource,
+    and `repo` belongs to the pipeline — so a `{env}` deferred at load has no other place to
+    surface, and a bare ValueError would traceback out of `show`, `validate` and `list` alike."""
+    if not pipeline.repo:
+        return Path.cwd()
+    try:
         return expand_home(substitute_env(pipeline.repo))
-    return Path.cwd()
+    except ValueError as exc:
+        error(f'repo cannot be resolved: {exc}')
+        stderr_console.print('run "dectl config edit" to fix it', style='dim')
+        raise typer.Exit(1) from exc
 
 
 def resolve_in_repo(pipeline: PipelineConfig, configured_path: str) -> Path:
@@ -294,6 +305,10 @@ class DeclaredPath(NamedTuple):
     # Empty for `repo`, which belongs to the pipeline rather than to a resource.
     alias: str
     field: str
+    # Where this value lives in the dumped model: the collection key and the field key inside
+    # it. Carried rather than reconstructed, so excluding a path field from a dump cannot fall
+    # open on a resource nobody wrote a branch for. Empty for `repo`, excluded by name.
+    model_path: tuple[str, str]
     value: str
     is_dir: bool
     # Whether an S3 key is built from the configured string, which constrains how it may be
@@ -318,14 +333,15 @@ def declared_paths(pipeline: PipelineConfig) -> list[DeclaredPath]:
     `warn_if_environment_had_no_effect` and put a warning in the middle of a validate run."""
     paths = []
     if pipeline.repo:
-        paths.append(DeclaredPath('repo', '', 'repo', substitute_env(pipeline.repo), True, False))
+        paths.append(DeclaredPath('repo', '', 'repo', ('', ''), substitute_env(pipeline.repo), True, False))
     paths.extend(
-        DeclaredPath('glue', alias, 'script', substitute_env(script), False, True)
+        DeclaredPath('glue', alias, 'script', ('glue_jobs', 'scripts'), substitute_env(script), False, True)
         for alias, job in pipeline.glue_jobs.items()
         for script in job.scripts
     )
     paths.extend(
-        DeclaredPath('lambda', alias, 'source_dir', substitute_env(fn.source_dir), True, False) for alias, fn in pipeline.lambdas.items()
+        DeclaredPath('lambda', alias, 'source_dir', ('lambdas', 'source_dir'), substitute_env(fn.source_dir), True, False)
+        for alias, fn in pipeline.lambdas.items()
     )
     return paths
 
@@ -342,6 +358,10 @@ class PathFault(StrEnum):
     NOT_A_CLEAN_KEY = 'not_a_clean_key'
     ESCAPES_REPO = 'escapes_repo'
 
+
+# The faults about how a value is spelled rather than about what is on disk. They are reported
+# against the configured string, since resolution normalises away the very thing they name.
+KEY_FAULTS = frozenset({PathFault.NOT_A_CLEAN_KEY, PathFault.ESCAPES_REPO})
 
 FAULT_WORDING = {
     PathFault.ABSENT: 'not found',
@@ -373,15 +393,20 @@ def key_fault(configured: str) -> PathFault | None:
     and a trailing slash, which are exactly the shapes S3 stores literally — so a normalised
     probe agrees with the raw string on every input except the ones that matter.
 
+    A leading `~` escapes the repo the way an absolute path does. `PurePosixPath` calls it
+    relative and holds no `..`, so both of the other arms miss it, and it resolves through
+    `$HOME` — the same dependence on where the deploy ran that `repo` exists to remove,
+    arriving by a different route.
+
     Checked here rather than in a field validator on purpose. A schema failure blanks the whole
     pipeline tree, because `main.py` falls back to `cfg = None` and every pipeline command
     disappears with it. A config carrying a malformed key still loads, `config validate` names
     it and the deploy refuses it, so the diagnosis reaches the reader without the CLI that
     delivers it going away."""
+    if configured.startswith('~') or PurePosixPath(configured).is_absolute() or '..' in PurePosixPath(configured).parts:
+        return PathFault.ESCAPES_REPO
     if configured != str(PurePosixPath(configured)) or configured.endswith('/'):
         return PathFault.NOT_A_CLEAN_KEY
-    if PurePosixPath(configured).is_absolute() or '..' in PurePosixPath(configured).parts:
-        return PathFault.ESCAPES_REPO
     return None
 
 
@@ -398,13 +423,23 @@ class UnusablePath(NamedTuple):
     field: str
     path: Path
     fault: PathFault
+    # The string as written. A key fault is about the spelling, and `path` has already had the
+    # `.`, the doubled separator and the trailing slash collapsed out of it by resolution — so
+    # three differently-malformed entries render as one identical row without this.
+    configured: str
 
     @property
     def label(self) -> str:
         return f'{self.resource}/{self.alias} {self.field}' if self.alias else self.field
 
+    @property
+    def shown(self) -> str:
+        """The value to show the reader: what they wrote for a spelling fault, the resolved
+        path for a fault about what is on disk."""
+        return self.configured if self.fault in KEY_FAULTS else str(self.path)
+
     def __str__(self) -> str:
-        return f'{self.pipeline}: {self.label} {FAULT_WORDING[self.fault]}: {self.path}'
+        return f'{self.pipeline}: {self.label} {FAULT_WORDING[self.fault]}: {self.shown}'
 
 
 def declared_path_faults(pipeline_name: str, pipeline: PipelineConfig, on_disk: bool = True) -> list[UnusablePath]:
@@ -417,13 +452,22 @@ def declared_path_faults(pipeline_name: str, pipeline: PipelineConfig, on_disk: 
     the config and is answerable anywhere; whether a file is present is a property of this
     machine and is only meaningful once a `repo` says where to look."""
     problems = []
+    # `script_prefix` is the other operand of the concatenation `script_key` performs, so it is
+    # subject to the same spelling rules as a script. It is not a filesystem path, so it is
+    # checked here rather than declared as one — nothing resolves it and nothing displays it as
+    # a file. One malformed prefix is one fault however many scripts hang off it.
+    for alias, job in pipeline.glue_jobs.items():
+        prefix = substitute_env(job.script_prefix)
+        prefix_fault = key_fault(prefix)
+        if prefix_fault:
+            problems.append(UnusablePath(pipeline_name, 'glue', alias, 'script_prefix', Path(prefix), prefix_fault, prefix))
     for declared in declared_paths(pipeline):
         resolved = resolve_in_repo(pipeline, declared.value)
         fault = key_fault(declared.value) if declared.is_s3_key else None
         if fault is None and on_disk:
             fault = path_fault(resolved, is_dir=declared.is_dir)
         if fault:
-            problems.append(UnusablePath(pipeline_name, declared.resource, declared.alias, declared.field, resolved, fault))
+            problems.append(UnusablePath(pipeline_name, declared.resource, declared.alias, declared.field, resolved, fault, declared.value))
     return problems
 
 
@@ -446,7 +490,7 @@ def missing_declared_paths(config: DectlConfig) -> list[UnusablePath]:
             continue
         root_fault = path_fault(pipeline_root(pipeline), is_dir=True)
         if root_fault:
-            problems.append(UnusablePath(name, 'repo', '', 'repo', pipeline_root(pipeline), root_fault))
+            problems.append(UnusablePath(name, 'repo', '', 'repo', pipeline_root(pipeline), root_fault, pipeline.repo or ''))
             continue
         problems.extend(declared_path_faults(name, pipeline))
     return problems

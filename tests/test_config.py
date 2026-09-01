@@ -379,6 +379,20 @@ def test_a_repo_whose_root_is_a_token_is_still_rejected_as_relative():
         pipeline_with_repo('{env}/salesdata')
 
 
+def test_an_unresolvable_repo_exits_rather_than_raising():
+    # PipelineConfig never passes through render_env_model — that runs per resource, and repo
+    # belongs to the pipeline — so a {env} deferred at load has no other door to surface at.
+    # A bare ValueError here tracebacks out of show, validate and list alike.
+    pipeline = pipeline_with_repo('~nosuchuser-{env}/code')
+    set_active_environment('prod', '--env')
+    try:
+        with pytest.raises(typer.Exit) as exit_info:
+            pipeline_root(pipeline)
+        assert exit_info.value.exit_code == 1
+    finally:
+        set_active_environment('dev', 'default')
+
+
 def test_a_substituted_value_that_fails_validation_exits_rather_than_raising():
     # render_env_model re-validates, so a config that loaded can still fail inside a verb. A
     # bare ValidationError reaches the reader as a pydantic traceback naming the model rather

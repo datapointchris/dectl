@@ -199,27 +199,37 @@ def test_validate_json_emits_the_unusable_paths_as_objects(monkeypatch, tmp_path
     result = runner.invoke(config_app, ['validate', '--json'])
 
     assert result.exit_code == 1
-    assert json.loads(result.stdout) == [
-        {
-            'pipeline': 'salesdata',
-            'resource': 'lambda',
-            'alias': 'notifier',
-            'field': 'source_dir',
-            'path': str(repo / 'modules' / 'code'),
-            'fault': 'absent',
-        }
-    ]
+    assert json.loads(result.stdout) == {
+        'outcome': 'unusable_paths',
+        'unusable_paths': [
+            {
+                'pipeline': 'salesdata',
+                'resource': 'lambda',
+                'alias': 'notifier',
+                'field': 'source_dir',
+                'configured': 'modules/code',
+                'path': str(repo / 'modules' / 'code'),
+                'fault': 'absent',
+            }
+        ],
+    }
 
 
-def test_validate_json_emits_an_empty_list_when_the_config_is_clean(monkeypatch, tmp_path):
+def test_validate_json_separates_a_clean_config_from_one_it_could_not_read(monkeypatch, tmp_path):
     repo = tmp_path / 'salesdata'
     (repo / 'code').mkdir(parents=True)
     point_at(monkeypatch, tmp_path, config_naming(str(repo)))
 
-    result = runner.invoke(config_app, ['validate', '--json'])
+    clean = runner.invoke(config_app, ['validate', '--json'])
+    point_at(monkeypatch, tmp_path, BAD_CONFIG)
+    unreadable = runner.invoke(config_app, ['validate', '--json'])
 
-    assert result.exit_code == 0
-    assert json.loads(result.stdout) == []
+    # Both carry an empty list. A caller that has dropped the exit status would otherwise be
+    # told nothing was wrong with a config that was never read.
+    assert clean.exit_code == 0
+    assert json.loads(clean.stdout) == {'outcome': 'valid', 'unusable_paths': []}
+    assert unreadable.exit_code == 1
+    assert json.loads(unreadable.stdout)['outcome'] == 'invalid_schema'
 
 
 def test_validate_json_keeps_stdout_parseable_on_a_schema_failure(monkeypatch, tmp_path):
@@ -230,7 +240,7 @@ def test_validate_json_keeps_stdout_parseable_on_a_schema_failure(monkeypatch, t
     result = runner.invoke(config_app, ['validate', '--json'])
 
     assert result.exit_code == 1
-    assert json.loads(result.stdout) == []
+    assert json.loads(result.stdout) == {'outcome': 'invalid_schema', 'unusable_paths': []}
     assert 'pipelines.p.step_function' in result.stderr
 
 
@@ -387,7 +397,7 @@ def test_validate_checks_key_shape_even_without_a_repo(monkeypatch, tmp_path):
     result = runner.invoke(config_app, ['validate', '--json'])
 
     assert result.exit_code == 1
-    assert [p['fault'] for p in json.loads(result.stdout)] == ['escapes_repo']
+    assert [p['fault'] for p in json.loads(result.stdout)['unusable_paths']] == ['escapes_repo']
 
 
 def test_a_malformed_key_leaves_the_rest_of_the_cli_working(monkeypatch, tmp_path):

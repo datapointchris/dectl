@@ -35,10 +35,10 @@ def aws_names_only(pipeline: PipelineConfig) -> dict[str, Any]:
     rather than by being remembered here."""
     dumped = pipeline.model_dump(exclude={'repo'})
     for declared in declared_paths(pipeline):
-        if declared.resource == 'glue':
-            dumped.get('glue_jobs', {}).get(declared.alias, {}).pop(declared.field + 's', None)
-        elif declared.resource == 'lambda':
-            dumped.get('lambdas', {}).get(declared.alias, {}).pop(declared.field, None)
+        collection, field = declared.model_path
+        if not collection:
+            continue
+        dumped.get(collection, {}).get(declared.alias, {}).pop(field, None)
     return dumped
 
 
@@ -75,7 +75,7 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
                 'script_bucket': substitute_env(job.script_bucket),
                 'script_prefix': substitute_env(job.script_prefix),
                 'scripts': [substitute_env(script) for script in job.scripts],
-                'script_paths': resolved[f'glue/{alias}'],
+                'script_paths': resolved.get(f'glue/{alias}', []),
             }
             for alias, job in pipeline.glue_jobs.items()
         },
@@ -84,7 +84,7 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
                 'name': substitute_env(fn.name),
                 'durable': fn.durable,
                 'source_dir': substitute_env(fn.source_dir),
-                'source_path': resolved[f'lambda/{alias}'][0],
+                'source_path': resolved.get(f'lambda/{alias}', [''])[0],
             }
             for alias, fn in pipeline.lambdas.items()
         },

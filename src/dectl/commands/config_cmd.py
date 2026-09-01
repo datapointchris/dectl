@@ -125,49 +125,54 @@ def config_validate(
     script, and every lambda source_dir. A pipeline that names none is left alone, since its
     paths resolve against wherever you run dectl from.
 
-    --json emits the unusable paths as objects, each carrying the pipeline, what the config calls
-    it, the resolved path and the fault. A schema failure has no such shape, so it stays on
-    stderr and stdout is an empty list.
+    --json emits an object carrying `outcome` and `unusable_paths`. The outcome separates a
+    clean config from one that could not be read at all, which an empty list alone folds
+    together — the detail of a schema failure stays on stderr, where it has a renderer.
     """
 
-    def refuse(message: str) -> None:
+    def refuse(outcome: str, message: str) -> None:
         """Report on stderr, keep stdout parseable, exit 1.
 
-        Every --json exit emits a list, including the two that carry no paths, so a caller
-        piping into jq never has to special-case an empty stdout."""
+        The document carries the outcome beside the list. A bare `[]` reads the same whether the
+        config was clean, unreadable, or absent — so a caller that has dropped the exit status is
+        told nothing was wrong with a config that was never read."""
         error(message)
         if as_json:
-            emit_json([])
+            emit_json({'outcome': outcome, 'unusable_paths': []})
         raise typer.Exit(1)
 
     if not CONFIG_PATH.exists():
-        refuse(f'no config found at {CONFIG_PATH} — run "dectl config init" to create one')
+        refuse('no_config', f'no config found at {CONFIG_PATH} — run "dectl config init" to create one')
 
     try:
         config = load_config()
     except CONFIG_LOAD_ERRORS as exc:
         report_config_error(exc)
         if as_json:
-            emit_json([])
+            emit_json({'outcome': 'invalid_schema', 'unusable_paths': []})
         raise typer.Exit(1) from exc
     if config is None:
-        refuse(f'config at {CONFIG_PATH} was removed while it was being read')
+        refuse('no_config', f'config at {CONFIG_PATH} was removed while it was being read')
         raise typer.Exit(1)
 
     problems = missing_declared_paths(config)
     if as_json:
         emit_json(
-            [
-                {
-                    'pipeline': p.pipeline,
-                    'resource': p.resource,
-                    'alias': p.alias,
-                    'field': p.field,
-                    'path': str(p.path),
-                    'fault': str(p.fault),
-                }
-                for p in problems
-            ]
+            {
+                'outcome': 'unusable_paths' if problems else 'valid',
+                'unusable_paths': [
+                    {
+                        'pipeline': p.pipeline,
+                        'resource': p.resource,
+                        'alias': p.alias,
+                        'field': p.field,
+                        'configured': p.configured,
+                        'path': str(p.path),
+                        'fault': str(p.fault),
+                    }
+                    for p in problems
+                ],
+            }
         )
         raise typer.Exit(1 if problems else 0)
 

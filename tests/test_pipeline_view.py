@@ -114,6 +114,24 @@ def repo_pipeline(**overrides) -> DectlConfig:
     return DectlConfig.model_validate({'defaults': {'account_id': '1'}, 'pipelines': {'salesdata': pipeline}})
 
 
+def test_a_glue_job_with_no_scripts_renders_through_both_doors():
+    # scripts: [] passes the schema, so declared_paths yields no row for the job and an indexed
+    # lookup raises. The human door survived it and the machine door did not, on a config main
+    # rendered fine.
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '1'},
+            'pipelines': {'p': {'repo': '/srv/x', 'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'b', 'scripts': [], 'role': 'r'}}}},
+        }
+    )
+    pipeline = config.pipelines['p']
+
+    data = pipeline_to_dict('p', pipeline)
+    render_pipeline('p', pipeline)
+
+    assert data['glue']['j']['script_paths'] == []
+
+
 def test_an_alias_with_a_space_survives_every_consumer():
     # The alias is a field on DeclaredPath, not something split back out of the human label.
     # A label-parsing consumer recovers 'weird' from 'glue/weird alias script' and loses the

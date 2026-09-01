@@ -78,10 +78,11 @@ def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: lis
         raise typer.Exit(1)
 
     s3 = session.client('s3')
+    bucket = substitute_env(glue_job.script_bucket)
     for script, path in sources:
         key = script_key(glue_job, script)
-        s3.upload_file(Filename=str(path), Bucket=glue_job.script_bucket, Key=key)
-        success(f'uploaded {path} -> s3://{substitute_env(glue_job.script_bucket)}/{key}')
+        s3.upload_file(Filename=str(path), Bucket=bucket, Key=key)
+        success(f'uploaded {path} -> s3://{bucket}/{key}')
 
 
 def build_job_update(existing: dict, glue_job: GlueJobConfig) -> dict:

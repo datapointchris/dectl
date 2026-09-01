@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -329,7 +330,12 @@ class FakeS3Client:
         filename = kwargs['Filename']
         if not Path(filename).is_file():
             raise FileNotFoundError(filename)
-        self.uploads.append((filename, kwargs['Bucket'], kwargs['Key']))
+        # Real S3 answers InvalidBucketName for anything outside this set, so a fake that took
+        # any string would let an unsubstituted `b-{env}` look identical to a substituted one.
+        bucket = kwargs['Bucket']
+        if not re.fullmatch(r'[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]', bucket):
+            raise ValueError(f'InvalidBucketName: {bucket}')
+        self.uploads.append((filename, bucket, kwargs['Key']))
 
 
 class FakeS3Session:
@@ -342,7 +348,9 @@ class FakeS3Session:
 
 
 def glue_pipeline(repo, scripts) -> PipelineConfig:
-    raw = {'glue_jobs': {'j': {'name': 'my-job', 'script_bucket': 'b', 'scripts': scripts, 'role': 'r'}}}
+    # A real bucket name, because FakeS3Client applies S3's own naming rule. 'b' is below the
+    # three-character minimum and would be rejected by the service.
+    raw = {'glue_jobs': {'j': {'name': 'my-job', 'script_bucket': 'salesdata-scripts', 'scripts': scripts, 'role': 'r'}}}
     if repo is not None:
         raw['repo'] = repo
     return PipelineConfig.model_validate(raw)
@@ -357,7 +365,7 @@ def test_scripts_upload_from_the_repo_rather_than_the_working_directory(tmp_path
 
     upload_scripts(FakeS3Session(s3), job, resolve_scripts('proj', pipeline, 'j'))
 
-    assert s3.uploads == [(str(tmp_path / 'jobs' / 'copy.py'), 'b', 'scripts/jobs/copy.py')]
+    assert s3.uploads == [(str(tmp_path / 'jobs' / 'copy.py'), 'salesdata-scripts', 'scripts/jobs/copy.py')]
 
 
 def test_the_s3_key_keeps_the_configured_path_not_the_resolved_one(tmp_path):
@@ -386,7 +394,7 @@ def test_the_upload_and_the_job_definition_name_one_object(tmp_path, monkeypatch
     upload_scripts(FakeS3Session(s3), job, resolve_scripts('proj', pipeline, 'j'))
     definition = build_job_update({'Name': 'my-job'}, job)
 
-    assert definition['Command']['ScriptLocation'] == f's3://b/{s3.uploads[0][2]}'
+    assert definition['Command']['ScriptLocation'] == f's3://{s3.uploads[0][1]}/{s3.uploads[0][2]}'
     assert '{env}' not in definition['Command']['ScriptLocation']
 
 
@@ -402,22 +410,58 @@ def test_extra_py_files_name_the_same_objects_the_upload_wrote(tmp_path, monkeyp
     upload_scripts(FakeS3Session(s3), job, resolve_scripts('proj', pipeline, 'j'))
     definition = build_job_update({'Name': 'my-job'}, job)
 
-    assert definition['DefaultArguments']['--extra-py-files'] == f's3://b/{s3.uploads[1][2]}'
+    assert definition['DefaultArguments']['--extra-py-files'] == f's3://{s3.uploads[1][1]}/{s3.uploads[1][2]}'
 
 
 @pytest.mark.parametrize(
-    'written',
-    ['/srv/shared/handler.py', '../sibling/util.py', './copy.py', 'jobs//copy.py', 'jobs/./copy.py', 'copy.py/'],
+    ('written', 'expected'),
+    [
+        ('/srv/shared/handler.py', PathFault.ESCAPES_REPO),
+        ('../sibling/util.py', PathFault.ESCAPES_REPO),
+        ('~/shared/lib.py', PathFault.ESCAPES_REPO),
+        ('./copy.py', PathFault.NOT_A_CLEAN_KEY),
+        ('jobs//copy.py', PathFault.NOT_A_CLEAN_KEY),
+        ('jobs/./copy.py', PathFault.NOT_A_CLEAN_KEY),
+        ('copy.py/', PathFault.NOT_A_CLEAN_KEY),
+    ],
 )
-def test_a_key_that_s3_would_store_literally_is_refused(tmp_path, written):
-    # S3 stores `.`, an empty segment and a trailing slash verbatim, so the object lands where
-    # no reader of the config would look for it. pathlib collapses exactly those, which is why
-    # the check reads the configured string rather than a parse of it.
+def test_a_key_that_s3_would_store_literally_is_refused(tmp_path, written, expected):
+    # Each shape is pinned to its own fault, not to "one of the two". `validate --json`
+    # publishes the name, so an assertion satisfied by either value pins neither: making
+    # NOT_A_CLEAN_KEY unreachable left the suite green.
+    #
+    # A leading ~ is ESCAPES_REPO rather than a spelling fault: it resolves through $HOME, which
+    # is the same dependence on where the deploy ran that `repo` exists to remove.
     pipeline = glue_pipeline(str(tmp_path), [written])
+
+    assert [f.fault for f in declared_path_faults('proj', pipeline)] == [expected]
+
+
+def test_a_malformed_script_prefix_is_refused_like_a_script(tmp_path):
+    # The prefix is the other operand of the concatenation script_key performs, so a `.` or a
+    # doubled separator in it lands in the key exactly as one in the script would.
+    (tmp_path / 'copy.py').write_text('x')
+    pipeline = PipelineConfig.model_validate(
+        {
+            'repo': str(tmp_path),
+            'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'b', 'script_prefix': './scripts', 'scripts': ['copy.py'], 'role': 'r'}},
+        }
+    )
 
     faults = declared_path_faults('proj', pipeline)
 
-    assert [f.fault for f in faults] in ([PathFault.NOT_A_CLEAN_KEY], [PathFault.ESCAPES_REPO])
+    assert [(f.field, f.fault) for f in faults] == [('script_prefix', PathFault.NOT_A_CLEAN_KEY)]
+
+
+def test_a_key_fault_reports_the_string_as_written(tmp_path):
+    # Resolution collapses the `.`, the doubled separator and the trailing slash, so reporting
+    # the resolved path shows a string that is not malformed and renders three different
+    # entries identically.
+    pipeline = glue_pipeline(str(tmp_path), ['./jobs/x.py', 'jobs//x.py', 'jobs/x.py/'])
+
+    shown = [f.shown for f in declared_path_faults('proj', pipeline)]
+
+    assert shown == ['./jobs/x.py', 'jobs//x.py', 'jobs/x.py/']
 
 
 def test_a_malformed_script_still_loads_so_the_rest_of_the_cli_survives(tmp_path):
