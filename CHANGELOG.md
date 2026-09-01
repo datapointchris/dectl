@@ -1,6 +1,21 @@
 # CHANGELOG
 
 
+## v2.8.3 (2026-09-01)
+
+### Bug Fixes
+
+- **config**: Resolve the config path through XDG_CONFIG_HOME
+  ([`f0983de`](https://github.com/datapointchris/dectl/commit/f0983de97ea7a0ec950ecb4673827e1ffc5520b5))
+
+The path was pinned to `~/.config/dectl`, so a machine setting XDG_CONFIG_HOME elsewhere had dectl
+  reading and writing outside the directory every other tool on it uses. pyclisteno is already a
+  dependency and ships `config_home()`, so the resolution is one call rather than a new helper.
+
+The two messages naming the path in prose now interpolate CONFIG_PATH, so they report where the
+  config actually is.
+
+
 ## v2.8.2 (2026-08-31)
 
 ### Bug Fixes
