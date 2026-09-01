@@ -188,3 +188,72 @@ def test_show_still_names_a_missing_config_as_missing(monkeypatch, tmp_path):
     assert result.exit_code == 1
     assert 'no config found' in result.stderr
     assert 'config init' in result.stderr
+
+
+def config_naming(repo: str, source_dir: str = 'code') -> str:
+    return (
+        'defaults:\n'
+        '  account_id: "1"\n'
+        'pipelines:\n'
+        '  salesdata:\n'
+        f'    repo: {repo}\n'
+        '    lambdas:\n'
+        '      notifier:\n'
+        '        name: n\n'
+        f'        source_dir: {source_dir}\n'
+    )
+
+
+def test_validate_accepts_a_repo_whose_paths_are_all_present(monkeypatch, tmp_path):
+    repo = tmp_path / 'salesdata'
+    (repo / 'code').mkdir(parents=True)
+    point_at(monkeypatch, tmp_path, config_naming(str(repo)))
+
+    result = runner.invoke(config_app, ['validate'])
+
+    assert result.exit_code == 0
+    assert 'valid' in result.stdout
+
+
+def test_validate_rejects_a_repo_that_is_not_on_this_machine(monkeypatch, tmp_path):
+    point_at(monkeypatch, tmp_path, config_naming(str(tmp_path / 'absent')))
+
+    result = runner.invoke(config_app, ['validate'])
+
+    assert result.exit_code == 1
+    assert 'repo not found' in result.stderr
+    assert str(tmp_path / 'absent') in result.stderr
+
+
+def test_validate_rejects_a_present_repo_that_is_missing_the_source(monkeypatch, tmp_path):
+    # The readiness half. A repo that exists and holds none of the source the pipeline names is
+    # present and useless, and checking the directory alone would report it converged.
+    repo = tmp_path / 'salesdata'
+    repo.mkdir()
+    point_at(monkeypatch, tmp_path, config_naming(str(repo), source_dir='modules/code'))
+
+    result = runner.invoke(config_app, ['validate'])
+
+    assert result.exit_code == 1
+    assert 'lambda/notifier source_dir not found' in result.stderr
+    assert str(repo / 'modules' / 'code') in result.stderr
+
+
+def test_validate_leaves_a_pipeline_without_a_repo_alone(monkeypatch, tmp_path):
+    # Its paths resolve against wherever dectl is run from, so their absence here says nothing.
+    # Checking them anyway would fail validate on a config that is correct.
+    raw = (
+        'defaults:\n'
+        '  account_id: "1"\n'
+        'pipelines:\n'
+        '  salesdata:\n'
+        '    lambdas:\n'
+        '      notifier:\n'
+        '        name: n\n'
+        '        source_dir: nowhere/at/all\n'
+    )
+    point_at(monkeypatch, tmp_path, raw)
+
+    result = runner.invoke(config_app, ['validate'])
+
+    assert result.exit_code == 0

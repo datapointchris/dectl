@@ -1,6 +1,7 @@
 from typing import Any
 
 from dectl.config import PipelineConfig
+from dectl.config import pipeline_root
 from dectl.env import substitute_env
 from dectl.env import warn_if_environment_had_no_effect
 from dectl.output import info
@@ -30,6 +31,10 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
     warn_if_environment_had_no_effect(pipeline.model_dump())
     return {
         'pipeline': name,
+        # The resolved directory, with `~` already expanded, plus whether the config named it.
+        # An undeclared repo still resolves — to the working directory — and a reader who cannot
+        # tell that apart from a declared one cannot tell what a deploy would reach.
+        'repo': {'path': str(pipeline_root(pipeline)), 'declared': pipeline.repo is not None},
         'glue': {
             alias: {
                 'name': substitute_env(job.name),
@@ -57,6 +62,8 @@ def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
     warn_if_environment_had_no_effect(pipeline.model_dump())
     types = resource_types(pipeline)
     info(f'[bold]{name}[/bold] ({", ".join(types) or "none configured"})')
+    source = '' if pipeline.repo else ' [dim](working directory — no repo set)[/dim]'
+    info(f'  repo: {pipeline_root(pipeline)}{source}')
     for alias, job in pipeline.glue_jobs.items():
         info(f'  glue/{alias}: {substitute_env(job.name)}')
         info(f'    bucket: s3://{substitute_env(job.script_bucket)}/{job.script_prefix}/')

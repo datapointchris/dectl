@@ -13,11 +13,13 @@ from dectl.config import CONFIG_PATH
 from dectl.config import TEMPLATE_CONFIG
 from dectl.config import init_config
 from dectl.config import load_config
+from dectl.config import missing_declared_paths
 from dectl.config import report_config_error
 from dectl.output import console
 from dectl.output import emit_json
 from dectl.output import error
 from dectl.output import info
+from dectl.output import stderr_console
 from dectl.output import success
 from dectl.pipeline_view import pipeline_to_dict
 from dectl.pipeline_view import render_pipeline
@@ -115,15 +117,30 @@ def config_edit() -> None:
 
 @config_app.command('validate')
 def config_validate() -> None:
-    """Check that the config exists, is valid YAML, and matches the expected schema."""
+    """Check the config parses, matches the schema, and that declared repo paths are on this machine.
+
+    A pipeline that names a `repo` is checked all the way down: the directory itself, every glue
+    script, and every lambda source_dir. A pipeline that names none is left alone, since its
+    paths resolve against wherever you run dectl from.
+    """
     if not CONFIG_PATH.exists():
         error(f'no config found at {CONFIG_PATH} — run "dectl config init" to create one')
         raise typer.Exit(1)
 
     try:
-        load_config()
+        config = load_config()
     except CONFIG_LOAD_ERRORS as exc:
         report_config_error(exc)
         raise typer.Exit(1) from exc
+    if config is None:
+        error(f'config at {CONFIG_PATH} was removed while it was being read')
+        raise typer.Exit(1)
+
+    problems = missing_declared_paths(config)
+    if problems:
+        error(f'config at {CONFIG_PATH} matches the schema, but names paths that are not on this machine:')
+        for problem in problems:
+            stderr_console.print(f'  {problem}', markup=False)
+        raise typer.Exit(1)
 
     success(f'config at {CONFIG_PATH} is valid')

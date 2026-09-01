@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from dectl.config import DectlConfig
 from dectl.env import active_environment
@@ -63,3 +64,42 @@ def test_render_pipeline_prints_alias_to_name_lines(monkeypatch, capsys):
     assert 'glue/source-copy: salesdata-dev-source-copy' in out
     assert 's3/raw: salesdata-dev-raw' in out
     assert 'iceberg/events: salesdata-dev-catalog.events' in out
+
+
+def test_json_carries_the_repo_with_its_tilde_already_expanded():
+    # The expansion happens between the file and the behaviour, so a reader who sees only the
+    # written value cannot tell which directory a deploy would reach.
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '1'},
+            'pipelines': {'salesdata': {'repo': '~/code/salesdata', 'buckets': {'raw': 'b'}}},
+        }
+    )
+
+    data = pipeline_to_dict('salesdata', config.pipelines['salesdata'])
+
+    assert data['repo'] == {'path': str(Path.home() / 'code' / 'salesdata'), 'declared': True}
+
+
+def test_json_marks_an_undeclared_repo_as_the_working_directory():
+    # An undeclared repo still resolves. Reporting the path with no flag beside it would read
+    # as a declared value and hide that the resolution follows the shell.
+    pipeline = make_pipeline().pipelines['salesdata']
+
+    data = pipeline_to_dict('salesdata', pipeline)
+
+    assert data['repo'] == {'path': str(Path.cwd()), 'declared': False}
+
+
+def test_render_names_the_working_directory_when_no_repo_is_set(monkeypatch, capsys):
+    # A tmp-length cwd plus the suffix runs past a default-width console, and rich would wrap
+    # the assertion's needle across two lines.
+    monkeypatch.setenv('COLUMNS', '200')
+    monkeypatch.setattr(active_environment, 'name', 'dev')
+    pipeline = make_pipeline().pipelines['salesdata']
+
+    render_pipeline('salesdata', pipeline)
+
+    out = capsys.readouterr().out
+    assert f'repo: {Path.cwd()}' in out
+    assert 'no repo set' in out

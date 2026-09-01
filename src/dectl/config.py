@@ -29,9 +29,12 @@ pipelines:
   example-pipeline:
     # Where this pipeline's code lives. The relative paths below — every glue `scripts` entry and
     # every lambda `source_dir` — resolve against it, so a deploy reaches the same files from any
-    # directory. Absolute or ~-rooted; a relative value is rejected. Omitted, those paths resolve
-    # against the directory dectl is run from, so deploys then require the pipeline's checkout.
-    repo: ~/code/example-pipeline
+    # directory. Absolute or ~-rooted; a relative value is rejected.
+    #
+    # Left out, those paths resolve against the directory dectl is run from, so a deploy has to
+    # be run from the checkout. Set it and `config validate` checks the directory and every path
+    # resolving against it, which is why the example below stays commented.
+    # repo: ~/code/example-pipeline
     glue_jobs:
       source-copy:
         name: my-{env}-source-copy-job
@@ -209,6 +212,39 @@ def resolve_in_repo(pipeline: PipelineConfig, relative: str) -> Path:
     does with an absolute right-hand side. So a config may mix a repo-relative `source_dir` with
     an absolute one and both land where they read."""
     return pipeline_root(pipeline) / Path(relative).expanduser()
+
+
+def missing_declared_paths(config: DectlConfig) -> list[str]:
+    """Every path a repo-declaring pipeline names that is not on this machine.
+
+    A pipeline without a repo is skipped rather than reported. Its paths resolve against whatever
+    directory dectl is run from, so their absence right here says nothing about whether a deploy
+    run from the checkout would find them, and reporting it would fail `validate` on a config
+    that is correct.
+
+    Checking the repo directory alone would answer half the question. A repo that exists and
+    holds none of the source the pipeline names is present and useless, and the deploy is where
+    that surfaces today."""
+    problems = []
+    for name, pipeline in config.pipelines.items():
+        if not pipeline.repo:
+            continue
+        root = pipeline_root(pipeline)
+        if not root.is_dir():
+            problems.append(f'{name}: repo not found: {root}')
+            continue
+        for alias, job in pipeline.glue_jobs.items():
+            problems.extend(
+                f'{name}: glue/{alias} script not found: {resolve_in_repo(pipeline, script)}'
+                for script in job.scripts
+                if not resolve_in_repo(pipeline, script).is_file()
+            )
+        problems.extend(
+            f'{name}: lambda/{alias} source_dir not found: {resolve_in_repo(pipeline, fn.source_dir)}'
+            for alias, fn in pipeline.lambdas.items()
+            if not resolve_in_repo(pipeline, fn.source_dir).is_dir()
+        )
+    return problems
 
 
 def load_config() -> DectlConfig | None:
