@@ -293,7 +293,7 @@ resolved path.
 dectl config init        # write a starter config (fails if one already exists)
 dectl config example     # print a full example of every option, for side-by-side reference
 dectl config edit        # open it in $VISUAL / $EDITOR (seeds one from the template if missing)
-dectl config validate    # check it parses and matches the schema
+dectl config validate    # check it parses, matches the schema, and its repo paths exist
 dectl config show        # resolved pipelines with alias -> AWS name mapping
 dectl config path        # print the config file path
 ```
@@ -302,3 +302,40 @@ Unknown keys are rejected, so `config validate` catches a typo like `step_functi
 instead of silently ignoring it. `config example` prints to stdout (highlighted in a
 terminal, plain when redirected), so you can display the full reference in one pane
 while editing the real config in another.
+
+### Running from anywhere: `repo`
+
+Every read — `list`, `monitor`, `logs`, `watch`, `runs`, the Iceberg and S3 commands —
+talks to AWS and needs no local file, so it has always worked from any directory. Deploys
+are the exception: a Glue job's `scripts` and a Lambda's `source_dir` are paths, and
+without a `repo` they resolve against the directory you happen to be standing in.
+
+Give a pipeline a `repo` and they resolve against that instead:
+
+```yaml
+pipelines:
+  salesdata:
+    repo: ~/code/salesdata
+    lambdas:
+      notifier:
+        name: salesdata-{env}-notifier
+        source_dir: modules/lambda/notifier/code
+```
+
+`dectl salesdata lambda notifier deploy` now zips `~/code/salesdata/modules/lambda/notifier/code`
+from wherever you run it. With several pipelines each naming their own `repo`, one config
+drives every repo's deploys and you never change directory to do it.
+
+The value must be absolute or start with `~`. A relative one would resolve against the
+working directory, which is the dependency the key removes, so it fails validation. An
+individual `source_dir` or script that is already absolute is left alone, so a pipeline may
+mix repo-relative and absolute paths.
+
+Omit `repo` and nothing changes: paths resolve against the working directory, and a deploy
+has to run from the checkout.
+
+`config validate` checks a pipeline that names a `repo` all the way down — the directory,
+every script, every `source_dir` — and names each path it could not find. It says nothing
+about a pipeline with no `repo`, since those paths depend on where you run it from.
+`config show` prints the resolved directory for every pipeline, with `~` expanded, and
+marks the ones falling back to the working directory.

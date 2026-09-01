@@ -99,9 +99,19 @@ its own block listing which lambdas / step machines to tail, kept separate so th
 is defined in one scannable place. When you change a model, update `TEMPLATE_CONFIG` in the same
 file so `config init` stays valid — a test asserts `TEMPLATE_CONFIG` round-trips through the models.
 
+A pipeline's optional `repo` is the directory its relative paths resolve against, which is what
+lets a deploy run from any working directory. **Every config value naming a file or directory
+goes through `resolve_in_repo(pipeline, value)`, never `Path(value)`** — that is the one rule a
+new resource type is most likely to miss, and missing it silently reintroduces the dependency on
+where dectl was invoked. `pipeline_root` is the fallback half: no `repo` means `Path.cwd()`.
+`missing_declared_paths` is the readiness check `config validate` runs, and a new path-bearing
+field belongs in it too, or `validate` reports converged on a config whose deploy cannot work.
+
 `TEMPLATE_CONFIG` is the single source for the example config: `config init` writes it, `config
 example` prints it (syntax-highlighted on a TTY, plain when piped so `config example > config.yaml`
 stays clean), and it exercises every option so it doubles as side-by-side reference while editing.
+Its `repo` line stays commented — uncommented it would name a directory no machine has, and
+`config validate` checks declared repo paths, so `config init` would write a config that fails.
 
 All models inherit `StrictModel` (`extra='forbid'`), so an unknown key — a typo like
 `step_function:` — is a loud error rather than a silently dropped field. Because forbidding
