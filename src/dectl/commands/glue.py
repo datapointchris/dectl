@@ -7,6 +7,8 @@ from rich.table import Table
 
 from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
+from dectl.config import PipelineConfig
+from dectl.config import resolve_in_repo
 from dectl.env import render_env_model
 from dectl.logs import tail_glue_run
 from dectl.output import console
@@ -26,12 +28,23 @@ FAILED_RUN_STATES = TERMINAL_RUN_STATES - {'SUCCEEDED'}
 READ_ONLY_KEYS = ('Name', 'CreatedOn', 'LastModifiedOn', 'ProfileName', 'AllocatedCapacity')
 
 
-def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig) -> None:
+def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, pipeline: PipelineConfig) -> None:
+    """Upload each configured script, resolving its path against the pipeline's repo.
+
+    Every script is resolved and checked before the first upload, so a job with one bad entry
+    uploads nothing. Uploading the readable ones first would leave the job's scripts split across
+    two revisions, and the run that followed would mix them."""
+    sources = [(script, resolve_in_repo(pipeline, script)) for script in glue_job.scripts]
+    missing = [path for _, path in sources if not path.is_file()]
+    if missing:
+        error(f'script not found: {", ".join(str(path) for path in missing)}')
+        raise typer.Exit(1)
+
     s3 = session.client('s3')
-    for script in glue_job.scripts:
+    for script, path in sources:
         key = f'{glue_job.script_prefix}/{script}'
-        s3.upload_file(Filename=script, Bucket=glue_job.script_bucket, Key=key)
-        success(f'uploaded {script} -> s3://{glue_job.script_bucket}/{key}')
+        s3.upload_file(Filename=str(path), Bucket=glue_job.script_bucket, Key=key)
+        success(f'uploaded {path} -> s3://{glue_job.script_bucket}/{key}')
 
 
 def build_job_update(existing: dict, glue_job: GlueJobConfig) -> dict:
@@ -274,7 +287,7 @@ def make_glue_job_app(pipeline_name: str, alias: str, job_config: GlueJobConfig,
         job = resolved()
         session = make_session(config)
         if not plan:
-            upload_scripts(session, job)
+            upload_scripts(session, job, config.pipelines[pipeline_name])
         update_glue_job(session, job, assume_yes=yes, plan=plan)
 
     @job_app.command(epilog=f'Example:\n\ndectl {pipeline_name} glue {alias} run --follow')

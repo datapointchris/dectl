@@ -5,6 +5,7 @@ from pyclisteno.paths import config_home
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import ValidationError
+from pydantic import field_validator
 
 from dectl.output import error
 from dectl.output import stderr_console
@@ -26,6 +27,11 @@ defaults:
 
 pipelines:
   example-pipeline:
+    # Where this pipeline's code lives. The relative paths below — every glue `scripts` entry and
+    # every lambda `source_dir` — resolve against it, so a deploy reaches the same files from any
+    # directory. Absolute or ~-rooted; a relative value is rejected. Omitted, those paths resolve
+    # against the directory dectl is run from, so deploys then require the pipeline's checkout.
+    repo: ~/code/example-pipeline
     glue_jobs:
       source-copy:
         name: my-{env}-source-copy-job
@@ -152,6 +158,11 @@ class MonitorConfig(StrictModel):
 
 
 class PipelineConfig(StrictModel):
+    # Directory holding this pipeline's code. Every relative path in the block below — a lambda's
+    # source_dir, a glue job's scripts — resolves against it, so a deploy targets the same files
+    # from any working directory. Where no repo is set, they resolve against the process's
+    # working directory, so a config that names none has to be run from the pipeline's checkout.
+    repo: str | None = None
     glue_jobs: dict[str, GlueJobConfig] = {}
     lambdas: dict[str, LambdaConfig] = {}
     step_functions: dict[str, StepFunctionConfig] = {}
@@ -162,11 +173,42 @@ class PipelineConfig(StrictModel):
     monitor: MonitorConfig = MonitorConfig()
     jenkins: JenkinsJobConfig | None = None
 
+    @field_validator('repo')
+    @classmethod
+    def repo_is_rooted(cls, value: str | None) -> str | None:
+        """Reject a relative repo, which would reintroduce the dependency the key removes.
+
+        `~` counts as rooted because expansion makes it absolute. Existence is deliberately not
+        checked here: a config is loaded on every invocation, including on a machine that holds
+        none of the checkouts, and a read of an AWS resource needs no local file. `config
+        validate` is where the directory is required to actually be there."""
+        if value is None:
+            return value
+        if not Path(value).expanduser().is_absolute():
+            raise ValueError(f'must be an absolute or ~-rooted path; {value!r} resolves against the working directory')
+        return value
+
 
 class DectlConfig(StrictModel):
     defaults: Defaults
     jenkins: JenkinsConfig | None = None
     pipelines: dict[str, PipelineConfig]
+
+
+def pipeline_root(pipeline: PipelineConfig) -> Path:
+    """The directory this pipeline's relative paths resolve against."""
+    if pipeline.repo:
+        return Path(pipeline.repo).expanduser()
+    return Path.cwd()
+
+
+def resolve_in_repo(pipeline: PipelineConfig, relative: str) -> Path:
+    """One of a pipeline's configured paths, as an absolute path.
+
+    An entry that is already absolute is returned unchanged, which is what `Path.__truediv__`
+    does with an absolute right-hand side. So a config may mix a repo-relative `source_dir` with
+    an absolute one and both land where they read."""
+    return pipeline_root(pipeline) / Path(relative).expanduser()
 
 
 def load_config() -> DectlConfig | None:

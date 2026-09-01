@@ -1,12 +1,18 @@
 import json
+import zipfile
 from datetime import datetime
 
+import pytest
+import typer
 from botocore.exceptions import ClientError
 from botocore.exceptions import ReadTimeoutError
 from typer.testing import CliRunner
 
 from dectl.commands.lambda_ import make_lambda_app
+from dectl.commands.lambda_ import zip_lambda
 from dectl.config import DectlConfig
+from dectl.config import PipelineConfig
+from dectl.config import resolve_in_repo
 from dectl.invoke import DURABLE_SYNC_CAP_SECONDS
 from dectl.invoke import EVENT_ACK_TIMEOUT_SECONDS
 from dectl.invoke import INVOKE_TIMEOUT_MARGIN_SECONDS
@@ -444,3 +450,50 @@ def test_durable_logs_scope_to_the_resolved_execution(monkeypatch):
     assert logs_client.calls[0]['filterPattern'] == f'"{DURABLE_ARN}"'
     assert logs_client.calls[0]['logGroupName'] == '/aws/lambda/fn'
     assert logs_client.calls[0]['endTime'] > logs_client.calls[0]['startTime']
+
+
+def test_zip_holds_the_resolved_directorys_files_at_the_archive_root(tmp_path):
+    source = tmp_path / 'repo' / 'modules' / 'code'
+    source.mkdir(parents=True)
+    (source / 'handler.py').write_text('def handler(event, context): pass')
+    (source / 'vendor').mkdir()
+    (source / 'vendor' / 'lib.py').write_text('x = 1')
+    pipeline = PipelineConfig.model_validate(
+        {'repo': str(tmp_path / 'repo'), 'lambdas': {'fn': {'name': 'n', 'source_dir': 'modules/code'}}}
+    )
+
+    zip_path = zip_lambda(resolve_in_repo(pipeline, pipeline.lambdas['fn'].source_dir))
+
+    with zipfile.ZipFile(zip_path) as archive:
+        assert sorted(archive.namelist()) == ['handler.py', 'vendor/lib.py']
+
+
+def test_pycache_is_left_out_of_the_zip(tmp_path):
+    source = tmp_path / 'code'
+    (source / '__pycache__').mkdir(parents=True)
+    (source / 'handler.py').write_text('x')
+    (source / '__pycache__' / 'handler.cpython-313.pyc').write_text('bytecode')
+
+    zip_path = zip_lambda(source)
+
+    with zipfile.ZipFile(zip_path) as archive:
+        assert archive.namelist() == ['handler.py']
+
+
+def test_zipping_a_missing_directory_exits_rather_than_shipping_an_empty_archive(tmp_path):
+    with pytest.raises(typer.Exit) as exit_info:
+        zip_lambda(tmp_path / 'not-here')
+
+    assert exit_info.value.exit_code == 1
+
+
+def test_zipping_a_file_exits_rather_than_shipping_an_empty_archive(tmp_path):
+    # rglob on a file yields nothing, so a source_dir pointing at a file would upload a valid
+    # but empty archive and replace the function's code with nothing.
+    handler = tmp_path / 'handler.py'
+    handler.write_text('x')
+
+    with pytest.raises(typer.Exit) as exit_info:
+        zip_lambda(handler)
+
+    assert exit_info.value.exit_code == 1

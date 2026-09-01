@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 import typer
 from typer.testing import CliRunner
@@ -9,8 +11,10 @@ from dectl.commands.glue import follow_glue_run
 from dectl.commands.glue import job_definition_changes
 from dectl.commands.glue import make_glue_app
 from dectl.commands.glue import update_glue_job
+from dectl.commands.glue import upload_scripts
 from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
+from dectl.config import PipelineConfig
 
 runner = CliRunner()
 
@@ -301,3 +305,72 @@ def test_following_a_successful_run_returns_cleanly(monkeypatch):
     session = FakeRunSession(FakeRunGlueClient(['SUCCEEDED']))
 
     follow_glue_run(session, make_job(), 'jr_test')
+
+
+class FakeS3Client:
+    """S3 stand-in that refuses a Filename it cannot read, exactly as upload_file does.
+
+    A fake accepting any string would let a resolver that produces a wrong path look identical
+    to one that produces the right path, which is the whole of what these tests measure."""
+
+    def __init__(self) -> None:
+        self.uploads: list[tuple[str, str, str]] = []
+
+    def upload_file(self, **kwargs):
+        filename = kwargs['Filename']
+        if not Path(filename).is_file():
+            raise FileNotFoundError(filename)
+        self.uploads.append((filename, kwargs['Bucket'], kwargs['Key']))
+
+
+class FakeS3Session:
+    def __init__(self, s3_client):
+        self.s3_client = s3_client
+
+    def client(self, name):
+        assert name == 's3'
+        return self.s3_client
+
+
+def glue_pipeline(repo, scripts) -> PipelineConfig:
+    raw = {'glue_jobs': {'j': {'name': 'my-job', 'script_bucket': 'b', 'scripts': scripts, 'role': 'r'}}}
+    if repo is not None:
+        raw['repo'] = repo
+    return PipelineConfig.model_validate(raw)
+
+
+def test_scripts_upload_from_the_repo_rather_than_the_working_directory(tmp_path):
+    (tmp_path / 'jobs').mkdir()
+    (tmp_path / 'jobs' / 'copy.py').write_text('print("hi")')
+    pipeline = glue_pipeline(str(tmp_path), ['jobs/copy.py'])
+    s3 = FakeS3Client()
+
+    upload_scripts(FakeS3Session(s3), pipeline.glue_jobs['j'], pipeline)
+
+    assert s3.uploads == [(str(tmp_path / 'jobs' / 'copy.py'), 'b', 'scripts/jobs/copy.py')]
+
+
+def test_the_s3_key_keeps_the_configured_path_not_the_resolved_one(tmp_path):
+    # The key is what the Glue job's ScriptLocation points at, so anchoring it to a machine's
+    # checkout would make the uploaded object's name depend on who ran the deploy.
+    (tmp_path / 'copy.py').write_text('x')
+    pipeline = glue_pipeline(str(tmp_path), ['copy.py'])
+    s3 = FakeS3Client()
+
+    upload_scripts(FakeS3Session(s3), pipeline.glue_jobs['j'], pipeline)
+
+    assert s3.uploads[0][2] == 'scripts/copy.py'
+
+
+def test_one_missing_script_uploads_none_of_them(tmp_path):
+    # A partial upload leaves the job's scripts split across two revisions, and the next run
+    # mixes them.
+    (tmp_path / 'present.py').write_text('x')
+    pipeline = glue_pipeline(str(tmp_path), ['present.py', 'absent.py'])
+    s3 = FakeS3Client()
+
+    with pytest.raises(typer.Exit) as exit_info:
+        upload_scripts(FakeS3Session(s3), pipeline.glue_jobs['j'], pipeline)
+
+    assert exit_info.value.exit_code == 1
+    assert s3.uploads == []

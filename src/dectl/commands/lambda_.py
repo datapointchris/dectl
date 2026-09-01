@@ -11,6 +11,7 @@ from botocore.exceptions import ReadTimeoutError
 
 from dectl.config import DectlConfig
 from dectl.config import LambdaConfig
+from dectl.config import resolve_in_repo
 from dectl.durable import EXECUTION_STATUSES
 from dectl.durable import SUFFIX_SEARCH_LIMIT
 from dectl.durable import epoch_millis
@@ -40,10 +41,9 @@ from dectl.payloads import read_payload
 LOG_WINDOW_BUFFER_MS = 60_000
 
 
-def zip_lambda(source_dir: str) -> Path:
-    source = Path(source_dir)
-    if not source.exists():
-        error(f'source directory not found: {source_dir}')
+def zip_lambda(source: Path) -> Path:
+    if not source.is_dir():
+        error(f'source directory not found: {source}')
         raise typer.Exit(1)
 
     zip_path = Path(tempfile.mkdtemp()) / 'lambda.zip'
@@ -126,8 +126,9 @@ def make_lambda_function_app(pipeline_name: str, alias: str, fn_config: LambdaCo
         session = make_session(config)
         client = session.client('lambda')
 
-        info(f'zipping {fn.source_dir}')
-        zip_path = zip_lambda(fn.source_dir)
+        source = resolve_in_repo(config.pipelines[pipeline_name], fn.source_dir)
+        info(f'zipping {source}')
+        zip_path = zip_lambda(source)
 
         info(f'updating code for {fn.name}')
         with zip_path.open('rb') as f:

@@ -11,9 +11,12 @@ from pydantic import ValidationError
 
 from dectl.config import TEMPLATE_CONFIG
 from dectl.config import DectlConfig
+from dectl.config import PipelineConfig
 from dectl.config import config_error_headline
 from dectl.config import describe_config_error
 from dectl.config import load_config
+from dectl.config import pipeline_root
+from dectl.config import resolve_in_repo
 
 
 def test_template_config_is_valid():
@@ -281,3 +284,53 @@ def test_config_path_falls_back_to_dot_config_when_xdg_is_unset():
     resolved = config_path_in_a_fresh_interpreter(env)
 
     assert resolved == str(Path.home() / '.config' / 'dectl' / 'config.yaml')
+
+
+def pipeline_with_repo(repo) -> PipelineConfig:
+    raw = {'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}}}
+    if repo is not None:
+        raw['repo'] = repo
+    return PipelineConfig.model_validate(raw)
+
+
+def test_repo_anchors_a_relative_path(tmp_path):
+    pipeline = pipeline_with_repo(str(tmp_path))
+
+    assert resolve_in_repo(pipeline, 'modules/lambda/code') == tmp_path / 'modules' / 'lambda' / 'code'
+
+
+def test_repo_expands_a_leading_tilde():
+    pipeline = pipeline_with_repo('~/code/salesdata')
+
+    assert resolve_in_repo(pipeline, 'code') == Path.home() / 'code' / 'salesdata' / 'code'
+
+
+def test_paths_resolve_against_the_working_directory_without_a_repo():
+    # The behaviour a config that names no repo depends on: dectl is run from the checkout and
+    # relative paths mean what they would mean to any other command in that shell.
+    pipeline = pipeline_with_repo(None)
+
+    assert resolve_in_repo(pipeline, 'code') == Path.cwd() / 'code'
+
+
+def test_an_absolute_configured_path_ignores_the_repo(tmp_path):
+    # Mixed absolute and repo-relative entries are legal, so an absolute one has to survive
+    # being joined onto a repo that is nowhere near it.
+    pipeline = pipeline_with_repo(str(tmp_path / 'repo'))
+
+    assert resolve_in_repo(pipeline, '/srv/shared/handler') == Path('/srv/shared/handler')
+
+
+def test_pipeline_root_is_the_working_directory_without_a_repo():
+    assert pipeline_root(pipeline_with_repo(None)) == Path.cwd()
+
+
+def test_relative_repo_is_rejected():
+    # A relative repo would resolve against the working directory, which is the dependency the
+    # key exists to remove — so it fails validation rather than half-working.
+    with pytest.raises(ValidationError):
+        pipeline_with_repo('../salesdata')
+
+
+def test_repo_is_absent_by_default():
+    assert pipeline_with_repo(None).repo is None
