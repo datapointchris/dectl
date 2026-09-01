@@ -294,6 +294,7 @@ dectl config init        # write a starter config (fails if one already exists)
 dectl config example     # print a full example of every option, for side-by-side reference
 dectl config edit        # open it in $VISUAL / $EDITOR (seeds one from the template if missing)
 dectl config validate    # check it parses, matches the schema, and its repo paths exist
+                         # add --json for the unusable paths as objects
 dectl config show        # resolved pipelines with alias -> AWS name mapping
 dectl config path        # print the config file path
 ```

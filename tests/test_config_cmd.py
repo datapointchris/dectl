@@ -193,6 +193,47 @@ def test_show_still_names_a_missing_config_as_missing(monkeypatch, tmp_path):
     assert 'config init' in result.stderr
 
 
+def test_validate_json_emits_the_unusable_paths_as_objects(monkeypatch, tmp_path):
+    repo = tmp_path / 'salesdata'
+    repo.mkdir()
+    point_at(monkeypatch, tmp_path, config_naming(str(repo), source_dir='modules/code'))
+
+    result = runner.invoke(config_app, ['validate', '--json'])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == [
+        {
+            'pipeline': 'salesdata',
+            'field': 'lambda/notifier source_dir',
+            'path': str(repo / 'modules' / 'code'),
+            'fault': 'not found',
+        }
+    ]
+
+
+def test_validate_json_emits_an_empty_list_when_the_config_is_clean(monkeypatch, tmp_path):
+    repo = tmp_path / 'salesdata'
+    (repo / 'code').mkdir(parents=True)
+    point_at(monkeypatch, tmp_path, config_naming(str(repo)))
+
+    result = runner.invoke(config_app, ['validate', '--json'])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == []
+
+
+def test_validate_json_keeps_stdout_parseable_on_a_schema_failure(monkeypatch, tmp_path):
+    # A caller piping into jq gets a parseable empty list and the reason on stderr, matching
+    # what `show --json` does with the same config.
+    point_at(monkeypatch, tmp_path, BAD_CONFIG)
+
+    result = runner.invoke(config_app, ['validate', '--json'])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == []
+    assert 'pipelines.p.step_function' in result.stderr
+
+
 def config_naming(repo: str, source_dir: str = 'code') -> str:
     return (
         'defaults:\n'
