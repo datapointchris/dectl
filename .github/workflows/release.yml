@@ -19,10 +19,53 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      released: ${{ steps.release.outputs.released }}
+      tag: ${{ steps.release.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: python-semantic-release/python-semantic-release@v9
+        id: release
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  # A separate job in the same workflow, gated on the one above.
+  #
+  # Same workflow because a tag pushed with GITHUB_TOKEN does not trigger
+  # another workflow run, so a publish keyed on `push: tags` would never fire.
+  # Separate job so the index credentials are reachable from these steps only,
+  # and not from the release job that runs python-semantic-release.
+  #
+  # A commit type that bumps nothing leaves `released` false, and this job is
+  # skipped. A skipped publish on a green run is the correct result there.
+  publish:
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The tag, not the branch: python-semantic-release pushed a commit to
+          # main from inside the job above, so the branch head is one commit
+          # past what was released.
+          ref: ${{ needs.release.outputs.tag }}
+
+      - uses: astral-sh/setup-uv@v7
+
+      # The version is static in pyproject.toml and python-semantic-release
+      # wrote it into the tagged commit, so building here reads the released
+      # number rather than deriving one from the tag.
+      - run: uv build
+
+      # pypiserver rejects a second upload of a filename it already holds and
+      # offers no yank, so the sdist and wheel are checked while the upload is
+      # still avoidable.
+      - run: uv run --no-project --with twine twine check dist/*
+
+      - name: Publish to pypi.ichrisbirch.com
+        run: uv publish --publish-url https://pypi.ichrisbirch.com/
+        env:
+          UV_PUBLISH_USERNAME: ${{ secrets.PYPI_ICB_USERNAME }}
+          UV_PUBLISH_PASSWORD: ${{ secrets.PYPI_ICB_PASSWORD }}
