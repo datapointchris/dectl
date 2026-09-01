@@ -5,6 +5,7 @@ from typing import Annotated
 
 import typer
 
+from dectl.config import CONFIG_PATH
 from dectl.config import DectlConfig
 from dectl.config import JenkinsJobConfig
 from dectl.output import emit_json
@@ -29,7 +30,7 @@ def jenkins_request(config: DectlConfig, method: str, path: str, **kwargs):
 
     jenkins = config.jenkins
     if not jenkins:
-        error('no jenkins config in ~/.config/dectl/config.yaml')
+        error(f'no jenkins config in {CONFIG_PATH}')
         raise typer.Exit(1)
 
     url = f'{jenkins.url.rstrip("/")}/{path.lstrip("/")}'

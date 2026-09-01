@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -252,3 +255,29 @@ def test_the_headline_distinguishes_the_two_failures():
 
     assert 'does not match the expected schema' in config_error_headline(schema_error)
     assert 'is not valid YAML' in config_error_headline(caught.value)
+
+
+def config_path_in_a_fresh_interpreter(env: dict[str, str]) -> str:
+    """The path is resolved at import, so the environment has to be set before the process starts."""
+    result = subprocess.run(
+        [sys.executable, '-c', 'from dectl.config import CONFIG_PATH; print(CONFIG_PATH)'],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def test_config_path_follows_xdg_config_home(tmp_path):
+    resolved = config_path_in_a_fresh_interpreter({**os.environ, 'XDG_CONFIG_HOME': str(tmp_path)})
+
+    assert resolved == str(tmp_path / 'dectl' / 'config.yaml')
+
+
+def test_config_path_falls_back_to_dot_config_when_xdg_is_unset():
+    env = {key: value for key, value in os.environ.items() if key != 'XDG_CONFIG_HOME'}
+
+    resolved = config_path_in_a_fresh_interpreter(env)
+
+    assert resolved == str(Path.home() / '.config' / 'dectl' / 'config.yaml')

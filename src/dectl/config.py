@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import yaml
+from pyclisteno.paths import config_home
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import ValidationError
@@ -8,7 +9,10 @@ from pydantic import ValidationError
 from dectl.output import error
 from dectl.output import stderr_console
 
-CONFIG_DIR = Path.home() / '.config' / 'dectl'
+# `$XDG_CONFIG_HOME/dectl/config.yaml`, falling back to `~/.config` when the variable is unset.
+# `config_home()` reads the environment at import, so a process that exports the variable after
+# importing dectl keeps the path it started with.
+CONFIG_DIR = config_home() / 'dectl'
 CONFIG_PATH = CONFIG_DIR / 'config.yaml'
 
 TEMPLATE_CONFIG = """\

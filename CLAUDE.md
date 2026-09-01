@@ -9,9 +9,9 @@ is specific to dectl.
 
 There is no static command tree. `src/dectl/main.py` calls `load_config()` **at module import**
 and then builds the Typer app dynamically: it loops over the pipelines in
-`~/.config/dectl/config.yaml` and, for each one, attaches only the resource sub-apps that the
-pipeline actually defines. A pipeline with just `buckets` gets an `s3` command and nothing
-else; add `glue_jobs` and a `glue` command appears. Running `dectl` with no config still works
+`$XDG_CONFIG_HOME/dectl/config.yaml` and, for each one, attaches only the resource sub-apps
+that the pipeline actually defines. A pipeline with just `buckets` gets an `s3` command and
+nothing else; add `glue_jobs` and a `glue` command appears. Running `dectl` with no config still works
 (commands like `config init` are always present) because `load_config()` returns `None` rather
 than raising.
 
@@ -85,8 +85,10 @@ selected resource's CloudWatch log group as one interleaved, time-ordered stream
 ## Config
 
 `src/dectl/config.py` — Pydantic models plus `load_config()` / `init_config()`. Config lives at
-`~/.config/dectl/config.yaml`. `buckets` is an `alias -> real-bucket-name` mapping (same
-alias→name shape as `glue_jobs` and `lambdas`), not a fixed set of roles. A lambda's
+`$XDG_CONFIG_HOME/dectl/config.yaml`, resolved by `pyclisteno.paths.config_home()` so the
+variable is honoured rather than `~/.config` being hardcoded. `buckets` is an
+`alias -> real-bucket-name` mapping (same alias→name shape as `glue_jobs` and `lambdas`), not
+a fixed set of roles. A lambda's
 `live_alias` (renamed from `alias` to avoid colliding with the CLI "alias" = the config key) is
 the AWS Lambda alias that `deploy --publish` repoints; its `durable` flag selects the durable
 verb set and doubles as the invocation qualifier's source. `step_functions` maps

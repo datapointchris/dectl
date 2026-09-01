@@ -24,7 +24,7 @@ from dectl.pipeline_view import render_pipeline
 
 config_app = typer.Typer(
     no_args_is_help=True,
-    help='Manage dectl configuration at ~/.config/dectl/config.yaml.',
+    help=f'Manage dectl configuration at {CONFIG_PATH}.',
 )
 
 

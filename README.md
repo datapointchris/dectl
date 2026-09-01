@@ -285,7 +285,9 @@ dectl config show                      # inspect the loaded config (--json for t
 
 ## Config
 
-Config lives at `~/.config/dectl/config.yaml`.
+Config lives at `$XDG_CONFIG_HOME/dectl/config.yaml`, which is
+`~/.config/dectl/config.yaml` when the variable is unset. `dectl config path` prints the
+resolved path.
 
 ```bash
 dectl config init        # write a starter config (fails if one already exists)
