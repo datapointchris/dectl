@@ -203,7 +203,8 @@ def test_validate_json_emits_the_unusable_paths_as_objects(monkeypatch, tmp_path
         {
             'pipeline': 'salesdata',
             'resource': 'lambda',
-            'field': 'lambda/notifier source_dir',
+            'alias': 'notifier',
+            'field': 'source_dir',
             'path': str(repo / 'modules' / 'code'),
             'fault': 'absent',
         }

@@ -36,11 +36,9 @@ def aws_names_only(pipeline: PipelineConfig) -> dict[str, Any]:
     dumped = pipeline.model_dump(exclude={'repo'})
     for declared in declared_paths(pipeline):
         if declared.resource == 'glue':
-            alias = declared.label.split('/')[1].split(' ')[0]
-            dumped.get('glue_jobs', {}).get(alias, {}).pop('scripts', None)
+            dumped.get('glue_jobs', {}).get(declared.alias, {}).pop(declared.field + 's', None)
         elif declared.resource == 'lambda':
-            alias = declared.label.split('/')[1].split(' ')[0]
-            dumped.get('lambdas', {}).get(alias, {}).pop('source_dir', None)
+            dumped.get('lambdas', {}).get(declared.alias, {}).pop(declared.field, None)
     return dumped
 
 
@@ -53,7 +51,7 @@ def resolved_paths(pipeline: PipelineConfig) -> dict[str, list[str]]:
     for declared in declared_paths(pipeline):
         if declared.resource == 'repo':
             continue
-        key = declared.label.rsplit(' ', 1)[0]
+        key = f'{declared.resource}/{declared.alias}'
         grouped.setdefault(key, []).append(str(resolve_in_repo(pipeline, declared.value)))
     return grouped
 

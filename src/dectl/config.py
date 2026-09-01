@@ -284,15 +284,26 @@ def resolve_in_repo(pipeline: PipelineConfig, configured_path: str) -> Path:
 
 
 class DeclaredPath(NamedTuple):
-    """One filesystem path a pipeline's config names, with `{env}` already substituted."""
+    """One filesystem path a pipeline's config names, with `{env}` already substituted.
+
+    The three components are separate fields and `label` is derived from them. Folding them
+    into a sentence and recovering them with a split makes a string built for a human to read
+    load-bearing for a lookup, and every consumer then re-derives the same split."""
 
     resource: str
-    label: str
+    # Empty for `repo`, which belongs to the pipeline rather than to a resource.
+    alias: str
+    field: str
     value: str
     is_dir: bool
     # Whether an S3 key is built from the configured string, which constrains how it may be
     # written. Only a glue script is: a lambda source_dir is uploaded as bytes.
     is_s3_key: bool
+
+    @property
+    def label(self) -> str:
+        """How this path is named to a reader, in errors and in `config validate`."""
+        return f'{self.resource}/{self.alias} {self.field}' if self.alias else self.field
 
 
 def declared_paths(pipeline: PipelineConfig) -> list[DeclaredPath]:
@@ -307,15 +318,14 @@ def declared_paths(pipeline: PipelineConfig) -> list[DeclaredPath]:
     `warn_if_environment_had_no_effect` and put a warning in the middle of a validate run."""
     paths = []
     if pipeline.repo:
-        paths.append(DeclaredPath('repo', 'repo', substitute_env(pipeline.repo), True, False))
+        paths.append(DeclaredPath('repo', '', 'repo', substitute_env(pipeline.repo), True, False))
     paths.extend(
-        DeclaredPath('glue', f'glue/{alias} script', substitute_env(script), False, True)
+        DeclaredPath('glue', alias, 'script', substitute_env(script), False, True)
         for alias, job in pipeline.glue_jobs.items()
         for script in job.scripts
     )
     paths.extend(
-        DeclaredPath('lambda', f'lambda/{alias} source_dir', substitute_env(fn.source_dir), True, False)
-        for alias, fn in pipeline.lambdas.items()
+        DeclaredPath('lambda', alias, 'source_dir', substitute_env(fn.source_dir), True, False) for alias, fn in pipeline.lambdas.items()
     )
     return paths
 
@@ -376,13 +386,22 @@ def key_fault(configured: str) -> PathFault | None:
 
 
 class UnusablePath(NamedTuple):
-    """One declared path that this config or this machine cannot supply, and why."""
+    """One declared path that this config or this machine cannot supply, and why.
+
+    Carries the components rather than the rendered sentence, for the same reason
+    `DeclaredPath` does: `validate --json` emits them separately, and `__str__` is the one
+    place they are joined."""
 
     pipeline: str
     resource: str
-    label: str
+    alias: str
+    field: str
     path: Path
     fault: PathFault
+
+    @property
+    def label(self) -> str:
+        return f'{self.resource}/{self.alias} {self.field}' if self.alias else self.field
 
     def __str__(self) -> str:
         return f'{self.pipeline}: {self.label} {FAULT_WORDING[self.fault]}: {self.path}'
@@ -404,7 +423,7 @@ def declared_path_faults(pipeline_name: str, pipeline: PipelineConfig, on_disk: 
         if fault is None and on_disk:
             fault = path_fault(resolved, is_dir=declared.is_dir)
         if fault:
-            problems.append(UnusablePath(pipeline_name, declared.resource, declared.label, resolved, fault))
+            problems.append(UnusablePath(pipeline_name, declared.resource, declared.alias, declared.field, resolved, fault))
     return problems
 
 
@@ -427,7 +446,7 @@ def missing_declared_paths(config: DectlConfig) -> list[UnusablePath]:
             continue
         root_fault = path_fault(pipeline_root(pipeline), is_dir=True)
         if root_fault:
-            problems.append(UnusablePath(name, 'repo', 'repo', pipeline_root(pipeline), root_fault))
+            problems.append(UnusablePath(name, 'repo', '', 'repo', pipeline_root(pipeline), root_fault))
             continue
         problems.extend(declared_path_faults(name, pipeline))
     return problems

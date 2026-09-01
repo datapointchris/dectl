@@ -161,7 +161,8 @@ def config_validate(
                 {
                     'pipeline': p.pipeline,
                     'resource': p.resource,
-                    'field': p.label,
+                    'alias': p.alias,
+                    'field': p.field,
                     'path': str(p.path),
                     'fault': str(p.fault),
                 }

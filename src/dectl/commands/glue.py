@@ -54,7 +54,7 @@ def resolve_scripts(pipeline_name: str, pipeline: PipelineConfig, alias: str) ->
 
     The faults come from `declared_path_faults`, so this door and `config validate` report one
     failure the same way rather than each describing it its own."""
-    problems = [p for p in declared_path_faults(pipeline_name, pipeline) if p.label.startswith(f'glue/{alias} ')]
+    problems = [p for p in declared_path_faults(pipeline_name, pipeline) if p.resource == 'glue' and p.alias == alias]
     if problems:
         for problem in problems:
             error(str(problem))

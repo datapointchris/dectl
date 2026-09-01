@@ -5,6 +5,7 @@ from pathlib import Path
 from dectl.config import DectlConfig
 from dectl.config import pipeline_root
 from dectl.env import active_environment
+from dectl.pipeline_view import aws_names_only
 from dectl.pipeline_view import pipeline_to_dict
 from dectl.pipeline_view import render_pipeline
 from dectl.pipeline_view import resource_types
@@ -111,6 +112,29 @@ def repo_pipeline(**overrides) -> DectlConfig:
         'lambdas': {'notifier': {'name': 'n', 'source_dir': 'modules/notifier/code'}},
     } | overrides
     return DectlConfig.model_validate({'defaults': {'account_id': '1'}, 'pipelines': {'salesdata': pipeline}})
+
+
+def test_an_alias_with_a_space_survives_every_consumer():
+    # The alias is a field on DeclaredPath, not something split back out of the human label.
+    # A label-parsing consumer recovers 'weird' from 'glue/weird alias script' and loses the
+    # rest, so this is the input that separates structure from a split.
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '1'},
+            'pipelines': {
+                'salesdata': {
+                    'repo': '/srv/salesdata',
+                    'lambdas': {'weird alias': {'name': 'n', 'source_dir': 'code'}},
+                }
+            },
+        }
+    )
+    pipeline = config.pipelines['salesdata']
+
+    data = pipeline_to_dict('salesdata', pipeline)
+
+    assert data['lambda']['weird alias']['source_path'] == '/srv/salesdata/code'
+    assert aws_names_only(pipeline)['lambdas']['weird alias'].get('source_dir') is None
 
 
 def test_json_carries_the_resolved_path_of_every_declared_path():
