@@ -1,4 +1,3 @@
-import re
 from pathlib import Path
 
 import pytest
@@ -337,18 +336,14 @@ class FakeS3Client:
         filename = kwargs['Filename']
         if not Path(filename).is_file():
             raise FileNotFoundError(filename)
-        # Real S3 answers InvalidBucketName for anything outside this, so a fake that took any
-        # string would let an unsubstituted `b-{env}` look identical to a substituted one. Read
-        # off S3's own rule rather than off `paths.bucket_fault`, which is what lets this catch
-        # that check being too permissive — importing its regex would make this pass on whatever
-        # the check gets wrong.
+        # Real S3 answers InvalidBucketName for anything outside its naming rule, so a fake that
+        # took any string would let an unsubstituted `b-{env}` look identical to a substituted
+        # one. The rule is `bucket_fault`, read rather than restated: a second copy of the same
+        # expression here could not disagree with it on any input, so it proved nothing while
+        # reading as an independent reading. `BUCKET_NAMES` is what holds the rule honest — a
+        # table written from S3's documentation and measured against the check and this fake.
         bucket = kwargs['Bucket']
-        refused = (
-            not re.fullmatch(r'[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]', bucket)
-            or '..' in bucket
-            or re.fullmatch(r'\d{1,3}(\.\d{1,3}){3}', bucket)
-        )
-        if refused:
+        if bucket_fault(bucket) is not None:
             raise ValueError(f'InvalidBucketName: {bucket}')
         self.uploads.append((filename, bucket, kwargs['Key']))
 
@@ -485,8 +480,10 @@ def test_a_script_prefix_is_refused_for_every_shape_a_script_is(tmp_path, writte
     assert [(f.site.field, f.fault) for f in faults] == [('script_prefix', expected)]
 
 
-# Names S3 accepts and names it refuses, written from the service's own rule rather than from
-# either implementation. Both the check and the fake are measured against this table.
+# Names S3 accepts and names it refuses, written from the service's documentation rather than
+# from the code. This is the oracle: `bucket_fault` is one expression and the fake calls it, so
+# nothing in the repo can disagree with itself about the rule — what catches the rule being
+# wrong is a table that was not derived from it.
 BUCKET_NAMES = [
     ('sales-scripts', True),
     ('a1b', True),
@@ -499,6 +496,12 @@ BUCKET_NAMES = [
     ('192.168.5.4', False),  # an IP address is reserved
     ('b' * 64, False),  # over the sixty-three character maximum
     ('bucket-{env}', False),  # braces, so a token that never got substituted is caught too
+    # Affixes S3 reserves for its own addressing forms. A bucket cannot be created with any of
+    # them, so a check that accepts one sends a deploy to a name that can never exist.
+    ('xn--example-bucket', False),
+    ('sthree-example', False),
+    ('example--ol-s3', False),
+    ('example-s3alias', False),
 ]
 # Every row but the templated one, which never reaches the walk as written: `declared_names`
 # substitutes first, so the walk sees the name that actually goes to S3.
@@ -523,11 +526,10 @@ def test_a_bucket_name_s3_would_refuse_is_refused(tmp_path, written, accepted):
     assert [(f.site.field, f.fault) for f in faults] == expected
 
 
-def test_the_fake_and_the_check_agree_on_bucket_names():
-    # FakeS3Client encodes S3's rule independently of `bucket_fault`, which is what lets a
-    # deploy test catch the check being too permissive. Independent readings drift, so the
-    # agreement is asserted rather than arranged by sharing a constant — importing the check's
-    # regex into the fake would make every such test pass on whatever the check gets wrong.
+def test_the_fake_refuses_every_name_the_table_says_s3_refuses():
+    # The fake calls `bucket_fault`, so this asserts the shared rule against the table rather
+    # than two implementations against each other. What it catches is the rule being wrong: a
+    # deploy test uploading to a name S3 would refuse goes green unless the fake refuses it too.
     s3 = FakeS3Client()
     for written, accepted in BUCKET_NAMES:
         fake_accepts = True

@@ -366,27 +366,35 @@ def render_unusable_values(problems: list[UnusableValue]) -> list[str]:
     return [str(problem) for problem in problems] + recovery_lines(problems)
 
 
-# S3's own bucket naming rule, read off the service's documentation rather than off any check
-# in this repo. Length, character set and the first and last character are the whole of it in
-# one expression; the doubled dot and the IP-address form need their own arms below.
+# S3's own bucket naming rule, read off the service's documentation. Length, character set and
+# the first and last character are the whole of it in one expression; the doubled dot, the
+# IP-address form and the reserved affixes need their own arms below.
 #
-# Deliberately not shared with `FakeS3Client`, which encodes the same rule independently. A fake
-# reading this constant would go green on whatever this expression gets wrong, which is the one
-# input a test named for the property most needs to catch — CLAUDE.md § "A fake enforces the
-# service's constraints". `test_the_fake_and_the_check_agree_on_bucket_names` pins the two
-# together without joining them, so a drift in either is a red test rather than a silent one.
+# `FakeS3Client` refuses an upload by calling `bucket_fault`, so the rule is written once. What
+# keeps that honest is `BUCKET_NAMES` in the tests: a table of accepted and refused names
+# written from S3's documentation rather than from this code, and measured against both. A
+# second hand-written copy of the expression inside the fake could not disagree with this one on
+# any input, so it proved nothing while reading as an independent reading.
 BUCKET_NAME = re.compile(r'[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]')
 IP_ADDRESS = re.compile(r'\d{1,3}(\.\d{1,3}){3}')
+# Affixes S3 reserves for its own addressing forms. A bucket cannot be created with any of them,
+# so refusing one here never blocks a deploy that would have worked.
+RESERVED_BUCKET_PREFIXES = ('xn--', 'sthree-', 'amzn-s3-demo-')
+RESERVED_BUCKET_SUFFIXES = ('-s3alias', '--ol-s3', '--x-s3')
 
 
 def bucket_fault(configured: str) -> ConfigFault | None:
     """Why this configured string cannot name an S3 bucket, or None when it can.
 
     Answerable on any machine, so `config validate` asks it wherever the config is read.
-    Reserved prefixes and suffixes are left out on purpose: AWS adds to that list, and a check
-    refusing a name the service accepts is worse than one that misses a case, because the
-    deploy it blocks would have worked."""
+
+    The reserved affixes are refused. The direction that costs something is refusing a name S3
+    accepts, because the deploy that blocks would have worked — and these cannot do that, since
+    S3 refuses every one of them itself. A list that goes stale as AWS reserves more errs the
+    harmless way: dectl accepts the name and S3 is the one that says no."""
     if not BUCKET_NAME.fullmatch(configured) or '..' in configured or IP_ADDRESS.fullmatch(configured):
+        return ConfigFault.NOT_A_BUCKET_NAME
+    if configured.startswith(RESERVED_BUCKET_PREFIXES) or configured.endswith(RESERVED_BUCKET_SUFFIXES):
         return ConfigFault.NOT_A_BUCKET_NAME
     return None
 

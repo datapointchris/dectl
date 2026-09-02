@@ -566,11 +566,46 @@ def test_an_absolute_source_dir_still_sits_where_it_likes(tmp_path):
 
 def test_every_fault_has_a_sentence():
     # FAULT_WORDING is indexed with no default, so a member added without one raises at the
-    # moment a reader needs the answer. It and SPELLING_FAULTS are the two per-member properties
-    # beside this enum and they fail in opposite directions: a missing wording raises, while a
-    # missing SPELLING_FAULTS entry silently reports the resolved path for a spelling fault.
+    # moment a reader needs the answer.
     assert set(FAULT_WORDING) == set(ConfigFault)
-    assert set(ConfigFault) >= SPELLING_FAULTS
+
+
+# Which side of the spelling line each fault falls on, written out rather than derived. A fault
+# about how a value is *written* is reported against the configured string, because resolution
+# normalises away the very thing it names and a bucket name resolves to nothing at all. A fault
+# about what this machine holds carries the resolved path and is answered by `config show`.
+SPELLING = frozenset(
+    {
+        ConfigFault.NOT_A_CLEAN_KEY,
+        ConfigFault.KEY_ESCAPES_ROOT,
+        ConfigFault.NOT_A_BUCKET_NAME,
+    }
+)
+ON_DISK = frozenset(
+    {
+        ConfigFault.ABSENT,
+        ConfigFault.EXPECTED_DIRECTORY,
+        ConfigFault.EXPECTED_FILE,
+        ConfigFault.EMPTY_DIRECTORY,
+        ConfigFault.DECLARES_NOTHING,
+        ConfigFault.UNRESOLVABLE_HOME,
+        ConfigFault.ESCAPES_ROOT,
+    }
+)
+
+
+def test_every_fault_is_classified_as_a_spelling_or_an_on_disk_one():
+    # `SPELLING_FAULTS` is built out of `ConfigFault` members, so `set(ConfigFault) >=` it holds
+    # for every subset including the empty one — it cannot fail, and it was the only thing named
+    # as pinning the property. The table above can: dropping a member from `SPELLING_FAULTS`
+    # fails the first assertion, and adding a fault without deciding its side fails the second.
+    #
+    # The cost of getting it wrong is silent. A spelling fault outside the set is reported with
+    # a resolved path that has the malformation normalised out of it, and its reader is sent to
+    # `config show`, which that fault's own remedy says cannot help.
+    assert SPELLING_FAULTS == SPELLING
+    assert set(ConfigFault) == SPELLING | ON_DISK
+    assert not SPELLING & ON_DISK
 
 
 def rooted_pipeline_naming(tmp_path, source_dir: str) -> PipelineConfig:
