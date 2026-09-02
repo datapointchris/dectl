@@ -1,6 +1,5 @@
 import contextlib
 import operator
-import os
 
 import pytest
 from botocore.exceptions import ClientError
@@ -8,6 +7,8 @@ from typer.testing import CliRunner
 
 from dectl.env import DEFAULT_ENV
 from dectl.env import set_active_environment
+from dectl.output import console
+from dectl.output import stderr_console
 
 # Every rendered assertion in this suite is otherwise an assertion about the window the suite was
 # run in. A rich console wraps to the terminal it finds, so `'is not a name S3 will accept' in
@@ -15,13 +16,15 @@ from dectl.env import set_active_environment
 # folds a UUID across rows or truncates it with an ellipsis depending on the same number.
 # Measured at 40 columns: thirteen tests across six files, none of them about width.
 #
-# Set before `dectl.output` builds its two consoles, which is why it is a module-level statement
-# rather than a fixture. Wide enough that every table under test renders its columns unfolded,
-# which is what makes an assertion about a rendered value an assertion about the value.
+# Set on the console objects rather than through COLUMNS, because the environment variable only
+# wins where nothing else has spoken and this file's own `dectl` imports build both consoles
+# before any statement here runs. An explicit width cannot regress on import order.
 #
-# A test whose subject *is* the width sets its own, through `at_width`. Pinning wide would make
-# those pass on a table that folds and on one that truncates alike.
-os.environ['COLUMNS'] = '160'
+# Wide enough that every table under test renders its columns unfolded, which is what makes an
+# assertion about a rendered value an assertion about the value. A test whose subject *is* the
+# width sets its own through `at_width`: pinned wide, a fold and an ellipsis render alike.
+console.width = 160
+stderr_console.width = 160
 
 
 class RefusalRunner(CliRunner):

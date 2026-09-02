@@ -30,6 +30,7 @@ from dectl.iceberg import summary_int
 from dectl.output import console
 from tests.conftest import RefusalRunner
 from tests.conftest import at_width
+from tests.conftest import unwrapped
 
 runner = RefusalRunner()
 
@@ -912,7 +913,9 @@ def test_files_help_says_there_is_no_row_per_data_file(monkeypatch):
 
     result = runner.invoke(app, ['events', 'files', '--help'])
 
-    assert 'no row-per-file view' in result.stdout.replace('\n', ' ')
+    # Click formats its own help to its own width detection, which the console pin does not
+    # reach — so the phrase wraps with the next line's indentation still attached to it.
+    assert 'no row-per-file view' in unwrapped(result.stdout)
 
 
 def test_diff_json_carries_the_commits_and_the_counter_changes(monkeypatch):

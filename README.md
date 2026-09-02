@@ -348,10 +348,10 @@ holds nothing is refused too — it zips to a valid empty archive, which replace
 function's code with nothing.
 
 Bucket names are checked the same way, on any machine. A `script_bucket` and every entry
-under `buckets` has to be a name S3 accepts: 3 to 63 characters of lowercase letters,
-digits, dots and hyphens, starting and ending with a letter or digit, with no doubled dot,
-and not an IP address. The check reads the name the active environment resolves to, since
-that is the one that reaches S3.
+under `buckets` has to be a name S3 accepts, and the check reads the name the active
+environment resolves to, since that is the one that reaches S3. The rule has more arms than
+are worth reading here, and `dectl config validate` prints all of them beside the name it
+refused — reserved affixes included, which is where a name that looks fine is rejected.
 
 Omit `resolve_paths_from` and nothing changes: paths resolve from the working directory,
 and a deploy has to run from the checkout.
