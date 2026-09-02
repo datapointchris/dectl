@@ -2,8 +2,10 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import get_args
+from typing import get_origin
 from unittest.mock import patch
 
 import pytest
@@ -347,13 +349,33 @@ UNCHECKED_FIELDS = {
     (MonitorConfig, 'step_functions'): 'aliases into this pipeline; build_monitor_sources warns on a dangling one',
 }
 
+
 # What a declared field's value may be: one string, or a list or mapping of them. Anything else
 # is not a value dectl resolves.
-STRING_ANNOTATIONS = (str, str | None, list[str], list[str] | None, dict[str, str])
+def carries_strings(annotation) -> bool:
+    """Whether this annotation's values are strings dectl might have to resolve.
+
+    Derived from the annotation rather than matched against a list of spellings. A list of the
+    forms in use today is a narrower tree than the models hold: a string-bearing field written
+    any other way — `tuple[str, ...]`, `set[str]`, a nested container — is invisible to the
+    guard below, which then reports every field classified while one is checked by nothing.
+
+    A mapping is judged by its value type, so `dict[str, str]` carries strings and
+    `dict[str, GlueJobConfig]` does not: the key there names an alias rather than a value the
+    config points at something with."""
+    if annotation is str:
+        return True
+    args = [a for a in get_args(annotation) if a is not type(None)]
+    if not args:
+        return False
+    origin = get_origin(annotation)
+    if origin in (dict, Mapping):
+        return carries_strings(args[-1])
+    return any(carries_strings(arg) for arg in args)
 
 
 def string_fields(model: type[BaseModel]) -> set[str]:
-    return {name for name, field in model.model_fields.items() if field.annotation in STRING_ANNOTATIONS}
+    return {name for name, field in model.model_fields.items() if carries_strings(field.annotation)}
 
 
 def config_models(root: type[BaseModel] = DectlConfig) -> set[type[StrictModel]]:
