@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from typer.testing import CliRunner
 
@@ -216,7 +217,7 @@ def test_validate_json_emits_the_unusable_paths_as_objects(monkeypatch, tmp_path
 
 def test_validate_json_separates_a_clean_config_from_one_it_could_not_read(monkeypatch, tmp_path):
     root = tmp_path / 'salesdata'
-    (root / 'code').mkdir(parents=True)
+    deployable(root / 'code')
     point_at(monkeypatch, tmp_path, config_naming(str(root)))
 
     clean = runner.invoke(config_app, ['validate', '--json'])
@@ -257,6 +258,16 @@ def config_naming(root: str, source_dir: str = 'code') -> str:
     )
 
 
+def deployable(path: Path) -> Path:
+    """A source directory holding something, which is what a valid one has to be.
+
+    An empty directory is a fault of its own: it zips to a 22-byte archive that
+    `update_function_code` accepts, replacing the function's code with nothing."""
+    path.mkdir(parents=True)
+    (path / 'handler.py').write_text('def handler(event, context): pass')
+    return path
+
+
 def faults_from(result) -> list[tuple[str, str, str]]:
     """The (resource, field, fault) triples `validate --json` reported.
 
@@ -269,7 +280,7 @@ def faults_from(result) -> list[tuple[str, str, str]]:
 
 def test_validate_accepts_a_root_whose_paths_are_all_present(monkeypatch, tmp_path):
     root = tmp_path / 'salesdata'
-    (root / 'code').mkdir(parents=True)
+    deployable(root / 'code')
     point_at(monkeypatch, tmp_path, config_naming(str(root)))
 
     result = runner.invoke(config_app, ['validate'])
@@ -319,7 +330,7 @@ def test_validate_reports_a_file_named_as_a_source_dir_as_a_file(monkeypatch, tm
 def test_validate_checks_glue_scripts_and_not_only_lambda_sources(monkeypatch, tmp_path):
     # Both halves of the walk are checked. Deleting either one has to turn this red.
     root = tmp_path / 'salesdata'
-    (root / 'code').mkdir(parents=True)
+    deployable(root / 'code')
     raw = (
         'defaults:\n'
         '  account_id: "1"\n'
@@ -351,7 +362,7 @@ def test_env_is_substituted_before_a_declared_path_is_checked(monkeypatch, tmp_p
     # The deploys resolve these through render_env_model, so a validator reading the raw model
     # would fail a config whose deploy works.
     root = tmp_path / 'salesdata'
-    (root / 'modules' / 'dev' / 'code').mkdir(parents=True)
+    deployable(root / 'modules' / 'dev' / 'code')
     raw = config_naming(str(root), source_dir='modules/{env}/code')
     point_at(monkeypatch, tmp_path, raw)
 
@@ -365,7 +376,7 @@ def test_env_is_substituted_inside_the_root_itself(monkeypatch, tmp_path):
     # Half-substituting the join is worse than not substituting at all: the resolved path is
     # neither what the config says nor what the environment asked for.
     root = tmp_path / 'dev' / 'salesdata'
-    (root / 'code').mkdir(parents=True)
+    deployable(root / 'code')
     raw = config_naming(str(tmp_path / '{env}' / 'salesdata'))
     point_at(monkeypatch, tmp_path, raw)
 

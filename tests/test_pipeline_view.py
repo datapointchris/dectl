@@ -2,9 +2,14 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from dectl.config import DectlConfig
+from dectl.config import GlueJobConfig
+from dectl.config import LambdaConfig
 from dectl.config import pipeline_root
 from dectl.env import active_environment
+from dectl.env import render_env_model
 from dectl.pipeline_view import aws_names_only
 from dectl.pipeline_view import pipeline_to_dict
 from dectl.pipeline_view import render_pipeline
@@ -58,15 +63,19 @@ def test_pipeline_to_dict_has_stable_shape_and_substitutes_env(monkeypatch):
 
 
 def test_render_pipeline_prints_alias_to_name_lines(monkeypatch, capsys):
+    # Every alias and every resolved name reaches the page. Asserted as tokens rather than as
+    # `alias: name` phrases, because rich soft-wraps between the two at a width the consumer
+    # owns — and normalising the wrap to keep a phrase assertion alive is a width pin by
+    # another name, which fails at exactly the widths a width pin would have covered.
     monkeypatch.setattr(active_environment, 'name', 'dev')
     pipeline = make_pipeline().pipelines['salesdata']
 
     render_pipeline('salesdata', pipeline)
 
-    out = capsys.readouterr().out
-    assert 'glue/source-copy: salesdata-dev-source-copy' in out
-    assert 's3/raw: salesdata-dev-raw' in out
-    assert 'iceberg/events: salesdata-dev-catalog.events' in out
+    printed = set(capsys.readouterr().out.split())
+    assert {'glue/source-copy:', 'salesdata-dev-source-copy'} <= printed
+    assert {'s3/raw:', 'salesdata-dev-raw'} <= printed
+    assert {'iceberg/events:', 'salesdata-dev-catalog.events'} <= printed
 
 
 def test_json_carries_the_root_with_its_tilde_already_expanded():
@@ -230,6 +239,28 @@ def test_a_glue_script_token_does_not_silence_the_no_effect_warning(monkeypatch,
     )
 
     pipeline_to_dict('salesdata', config.pipelines['salesdata'])
+
+    assert 'changed nothing' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    'resource',
+    [
+        LambdaConfig(name='hardcoded-dev', source_dir='modules/{env}/code'),
+        GlueJobConfig(name='hardcoded-dev', script_bucket='b', scripts=['jobs/{env}/c.py'], role='r'),
+    ],
+    ids=['lambda', 'glue'],
+)
+def test_a_path_token_does_not_silence_the_warning_at_the_deploy_door(monkeypatch, capsys, resource):
+    # The read door and the write door ask the same question of the same resource, so they get
+    # the same answer. `render_env_model` is what every deploy verb resolves through, and it
+    # passed the whole dump — so the guard fired on `list` and went quiet on the deploy that
+    # acts on the wrong environment, which is the case it exists for.
+    monkeypatch.setattr(active_environment, 'name', 'prod')
+    monkeypatch.setattr(active_environment, 'source', '--env')
+    monkeypatch.setattr(active_environment, 'warned_about_missing_placeholder', False)
+
+    render_env_model(resource)
 
     assert 'changed nothing' in capsys.readouterr().err
 

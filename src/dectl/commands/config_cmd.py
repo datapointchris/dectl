@@ -4,6 +4,7 @@ import shutil
 import subprocess
 from itertools import starmap
 from typing import Annotated
+from typing import NoReturn
 
 import typer
 from rich.syntax import Syntax
@@ -21,6 +22,7 @@ from dectl.output import error
 from dectl.output import info
 from dectl.output import stderr_console
 from dectl.output import success
+from dectl.paths import recovery_lines
 from dectl.pipeline_view import pipeline_to_dict
 from dectl.pipeline_view import render_pipeline
 
@@ -131,12 +133,16 @@ def config_validate(
     together — the detail of a schema failure stays on stderr, where it has a renderer.
     """
 
-    def refuse(outcome: str, message: str) -> None:
+    def refuse(outcome: str, message: str) -> NoReturn:
         """Report on stderr, keep stdout parseable, exit 1.
 
         The document carries the outcome beside the list. A bare `[]` reads the same whether the
         config was clean, unreadable, or absent — so a caller that has dropped the exit status is
-        told nothing was wrong with a config that was never read."""
+        told nothing was wrong with a config that was never read.
+
+        `NoReturn`, because every path through it raises. Annotated `-> None` it read as
+        fall-through, and one of its two call sites carried a `raise typer.Exit(1)` afterwards
+        that could never run while the other did not."""
         error(message)
         if as_json:
             emit_json({'outcome': outcome, 'unusable_paths': []})
@@ -154,7 +160,6 @@ def config_validate(
         raise typer.Exit(1) from exc
     if config is None:
         refuse('no_config', f'config at {CONFIG_PATH} was removed while it was being read')
-        raise typer.Exit(1)
 
     problems = config_path_faults(config)
     if as_json:
@@ -168,7 +173,7 @@ def config_validate(
                         'alias': p.site.alias,
                         'field': p.site.field,
                         'configured': p.configured,
-                        'path': str(p.path),
+                        'path': str(p.path) if p.path is not None else None,
                         'fault': str(p.fault),
                     }
                     for p in problems
@@ -181,7 +186,8 @@ def config_validate(
         error(f'config at {CONFIG_PATH} matches the schema, but names paths that cannot be used:')
         for problem in problems:
             stderr_console.print(f'  {problem}', markup=False)
-        stderr_console.print('run "dectl config show" to see where each configured path resolves')
+        for line in recovery_lines(problems):
+            stderr_console.print(line)
         raise typer.Exit(1)
 
     success(f'config at {CONFIG_PATH} is valid')

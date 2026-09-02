@@ -5,6 +5,8 @@ from dectl.config import PipelineConfig
 from dectl.config import declared_paths
 from dectl.config import pipeline_root
 from dectl.config import resolve_from_root
+from dectl.config import resource_members
+from dectl.env import aws_names_of
 from dectl.env import substitute_env
 from dectl.env import warn_if_environment_had_no_effect
 from dectl.output import info
@@ -32,14 +34,15 @@ def aws_names_only(pipeline: PipelineConfig) -> dict[str, Any]:
     `warn_if_environment_had_no_effect` asks whether `--env` changed an AWS name. A `{env}` in a
     local path satisfies `contains_env_placeholder` without naming anything in AWS, so leaving
     one in silences the warning for a pipeline whose bucket and job names all hardcode an
-    environment. Every exclusion comes from `declared_paths`, the pipeline's own root included,
-    so a new path field is excluded by being declared rather than by being remembered here. A
-    name in this signature would keep working while the declaration did nothing, which is a
-    mechanism that reads as load-bearing and is not."""
-    dumped = pipeline.model_dump()
-    for declared in declared_paths(pipeline):
-        owner = dumped.get(declared.collection, {}).get(declared.site.alias, {}) if declared.collection else dumped
-        owner.pop(declared.site.field, None)
+    environment. `env.aws_names_of` answers the same question one level down, for the resource a
+    verb resolves, and both read each model's `PATH_FIELDS`.
+
+    The pipeline's own root is dropped through `declared_paths` like everything else. Naming it
+    in `model_dump(exclude=...)` kept the output right while the declaration did nothing, which
+    is a mechanism that reads as load-bearing and is not."""
+    dumped = aws_names_of(pipeline)
+    for collection, alias, member in resource_members(pipeline):
+        dumped[collection][alias] = aws_names_of(member)
     return dumped
 
 

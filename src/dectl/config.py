@@ -1,5 +1,7 @@
+from collections.abc import Mapping
 from pathlib import Path
 from pathlib import PurePosixPath
+from typing import ClassVar
 
 import yaml
 from pyclisteno.paths import config_home
@@ -14,11 +16,12 @@ from dectl.output import error
 from dectl.output import stderr_console
 from dectl.paths import DeclaredKey
 from dectl.paths import DeclaredPath
+from dectl.paths import PathFault
 from dectl.paths import PathKind
 from dectl.paths import PathSite
 from dectl.paths import UnusablePath
-from dectl.paths import expand_home_or_exit
-from dectl.paths import expands_at_load
+from dectl.paths import expand_home
+from dectl.paths import home_fault
 from dectl.paths import key_fault
 from dectl.paths import path_fault
 
@@ -104,6 +107,24 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
 
+class ResourceModel(StrictModel):
+    """One resource a pipeline holds by alias, and which of its fields dectl resolves locally.
+
+    `RESOURCE` is the word the CLI, the error text and `validate --json` use for this kind.
+    `PATH_FIELDS` maps each field naming something on this machine to what that has to be, and
+    `KEY_FIELDS` names each field a glue S3 key is built from. A field can be in both — a glue
+    script is uploaded from disk and named by a key built from what was written.
+
+    Declared here, beside the fields, because three mechanisms read them and each one used to
+    carry its own copy: `declared_paths`, `declared_keys` and `render_env_model`'s env-effect
+    guard. A resource whose paths are listed in two of the three is checked and never excluded,
+    or excluded and never checked, and both read as success."""
+
+    RESOURCE: ClassVar[str] = ''
+    PATH_FIELDS: ClassVar[Mapping[str, PathKind]] = {}
+    KEY_FIELDS: ClassVar[frozenset[str]] = frozenset()
+
+
 class Defaults(StrictModel):
     account_id: str
     region: str = 'us-east-2'
@@ -122,7 +143,13 @@ class JenkinsJobConfig(StrictModel):
     parameters: dict[str, str] = {}
 
 
-class GlueJobConfig(StrictModel):
+class GlueJobConfig(ResourceModel):
+    RESOURCE: ClassVar[str] = 'glue'
+    PATH_FIELDS: ClassVar[Mapping[str, PathKind]] = {'scripts': PathKind.FILE}
+    # Both operands of the concatenation `script_key` performs. Checking only the one a bug was
+    # found in leaves every shape it refuses passing silently in the other.
+    KEY_FIELDS: ClassVar[frozenset[str]] = frozenset({'script_prefix', 'scripts'})
+
     name: str
     script_bucket: str
     script_prefix: str = 'scripts'
@@ -137,24 +164,14 @@ class GlueJobConfig(StrictModel):
     # Python shell jobs accept 0.0625 (1 GB) or 1 (16 GB); Spark jobs use WorkerType instead.
     max_capacity: float | None = None
 
-    @field_validator('scripts')
-    @classmethod
-    def scripts_expand(cls, value: list[str]) -> list[str]:
-        """Reject only what cannot be turned into a path at all.
 
-        How a script may be *written* — relative, no `..`, no `.` or doubled separator — is
-        `key_fault`, checked by `config validate` and by the deploy rather than here. A schema
-        failure blanks the whole pipeline tree, which is out of proportion to a key that is
-        merely malformed, and it takes away the commands that would report it."""
-        for script in value:
-            expands_at_load(script)
-        return value
+class LambdaConfig(ResourceModel):
+    RESOURCE: ClassVar[str] = 'lambda'
+    PATH_FIELDS: ClassVar[Mapping[str, PathKind]] = {'source_dir': PathKind.NON_EMPTY_DIRECTORY}
 
-
-class LambdaConfig(StrictModel):
     name: str
     # Zipped whole and uploaded as bytes, with no key derived from it, so unlike a glue script
-    # this may sit outside the pipeline repo as an absolute path.
+    # this may sit outside the pipeline's root as an absolute path.
     source_dir: str
     # The AWS Lambda alias (e.g. "live") that `deploy --publish` repoints to the new version.
     # Named live_alias, not alias, to avoid colliding with the CLI "alias" (the config key you type).
@@ -165,26 +182,19 @@ class LambdaConfig(StrictModel):
     # at runtime so the command surface stays assembled at import, like every other resource.
     durable: bool = False
 
-    @field_validator('source_dir')
-    @classmethod
-    def source_dir_expands(cls, value: str) -> str:
-        """Reject a `~user` that names nobody, testing a token-free stand-in.
 
-        `--env` is parsed after the config loads, so the substituted form is not available here.
-        `render_env_model` re-validates with the real value inside every verb, and that is where
-        a `~{env}` resolving to a missing user is caught."""
-        expands_at_load(value)
-        return value
+class StepFunctionConfig(ResourceModel):
+    RESOURCE: ClassVar[str] = 'sfn'
 
-
-class StepFunctionConfig(StrictModel):
     name: str
     # CloudWatch log group the state machine logs to. Required only to include this state
     # machine in `monitor`; `sfn logs` reads the execution history API and needs no log group.
     log_group: str = ''
 
 
-class IcebergTableConfig(StrictModel):
+class IcebergTableConfig(ResourceModel):
+    RESOURCE: ClassVar[str] = 'iceberg'
+
     # An Iceberg table is addressed by the Glue Data Catalog pair that owns it. dectl reads its
     # state from the table's own metadata file, whose S3 location Glue stores on the table.
     database: str
@@ -198,7 +208,12 @@ class MonitorConfig(StrictModel):
     step_functions: list[str] = []
 
 
-class PipelineConfig(StrictModel):
+class PipelineConfig(ResourceModel):
+    # The pipeline is not a resource held by alias, so it has no `RESOURCE` of its own — the
+    # word below is what names it in an error and in `validate --json`.
+    RESOURCE: ClassVar[str] = 'pipeline'
+    PATH_FIELDS: ClassVar[Mapping[str, PathKind]] = {'resolve_paths_from': PathKind.DIRECTORY}
+
     # Directory holding this pipeline's code. Every relative path in the block below — a lambda's
     # source_dir, a glue job's scripts — resolves against it, so a deploy targets the same files
     # from any working directory. Left unset they resolve against the process's working
@@ -222,14 +237,15 @@ class PipelineConfig(StrictModel):
         `~` counts as rooted because expansion makes it absolute. Existence is deliberately not
         checked here: a config is loaded on every invocation, including on a machine that holds
         none of the checkouts, and a read of an AWS resource needs no local file. `config
-        validate` is where the directory is required to actually be there.
+        validate` is where the directory is required to actually be there, and so is whether a
+        `~user` in it resolves — both are properties of a machine rather than of the value.
 
-        The `{env}` token is stripped before the test rather than substituted, because the
-        active environment is not known at load — `--env` is parsed after this runs. A token
-        can only appear inside a path, never at its head, so it cannot change rootedness."""
+        The `{env}` token is replaced with a plain name before the test rather than substituted,
+        because the active environment is not known at load — `--env` is parsed after this runs.
+        A leading token then reads as relative, which is what it is: `{env}/salesdata` names a
+        directory under wherever dectl was invoked whatever the environment resolves to."""
         if value is None:
             return value
-        expands_at_load(value)
         if not (value.startswith('~') or PurePosixPath(value.replace(ENV_PLACEHOLDER, 'x')).is_absolute()):
             raise ValueError(f'must be an absolute or ~-rooted path; {value!r} resolves against the working directory')
         return value
@@ -251,10 +267,15 @@ def pipeline_root(pipeline: PipelineConfig) -> Path:
     """The directory this pipeline's relative paths resolve against.
 
     `{env}` is substituted here, so a root under a per-environment directory joins a substituted
-    `source_dir` without half of the result staying literal."""
+    `source_dir` without half of the result staying literal.
+
+    Total, and it never exits. An unresolvable `~user` comes back as the literal string and is
+    reported by `pipeline_path_faults` as `unresolvable_home`, because a refusal raised from
+    here runs beneath a command that has already committed to emitting a document — which is
+    how `validate --json` came to have an exit that wrote zero bytes."""
     if not pipeline.resolve_paths_from:
         return Path.cwd()
-    return expand_home_or_exit(substitute_env(pipeline.resolve_paths_from))
+    return expand_home(substitute_env(pipeline.resolve_paths_from))
 
 
 def resolve_from_root(pipeline: PipelineConfig, configured_path: str) -> Path:
@@ -264,11 +285,31 @@ def resolve_from_root(pipeline: PipelineConfig, configured_path: str) -> Path:
     rendered value gets the same answer as one passing the raw config string.
 
     An entry that is already absolute is returned unchanged, which is what `Path.__truediv__`
-    does with an absolute right-hand side. A `source_dir` may therefore sit outside the repo. A
+    does with an absolute right-hand side. A `source_dir` may therefore sit outside the root. A
     glue `scripts` entry may not — `key_fault` refuses that, and `pipeline_path_faults` runs it
     from `config validate` and from the deploy, because the S3 key is built from the configured
     string rather than from the resolved path."""
-    return pipeline_root(pipeline) / expand_home_or_exit(substitute_env(configured_path))
+    return pipeline_root(pipeline) / expand_home(substitute_env(configured_path))
+
+
+def as_values(configured: str | list[str]) -> list[str]:
+    """A declared field's values, whether it holds one or a list of them."""
+    return configured if isinstance(configured, list) else [configured]
+
+
+def resource_members(pipeline: PipelineConfig) -> list[tuple[str, str, ResourceModel]]:
+    """Each (collection, alias, resource) the pipeline holds, walked off the model.
+
+    A resource kind added to `PipelineConfig` is enumerated here without this being edited, so
+    the two enumerations below cannot be missing one. `buckets` is a plain `dict[str, str]` and
+    holds no model, so it is not reached — nothing about a bucket name is a local path."""
+    return [
+        (collection, alias, member)
+        for collection, value in pipeline
+        if isinstance(value, dict)
+        for alias, member in value.items()
+        if isinstance(member, ResourceModel)
+    ]
 
 
 def declared_paths(pipeline: PipelineConfig) -> list[DeclaredPath]:
@@ -276,23 +317,21 @@ def declared_paths(pipeline: PipelineConfig) -> list[DeclaredPath]:
 
     The single enumeration of what is checked and resolved. `pipeline_path_faults` checks what
     it returns, `resolved_paths` resolves it for both renderers, and `aws_names_only` excludes
-    it from the env-effect guard. A path-bearing field added here is checked, resolved and
-    excluded at once; one added anywhere else is checked and never resolved, or resolved and
-    never checked.
+    it from the env-effect guard. Built from each model's `PATH_FIELDS`, so a path-bearing field
+    is declared once beside the field itself rather than restated as a literal here.
 
     Values are substituted here rather than through `render_env_model`, which would also fire
     `warn_if_environment_had_no_effect` and put a warning in the middle of a validate run."""
-    paths = []
-    if pipeline.resolve_paths_from:
-        paths.append(DeclaredPath(ROOT_SITE, '', substitute_env(pipeline.resolve_paths_from), PathKind.DIRECTORY))
+    paths = [
+        DeclaredPath(PathSite(PipelineConfig.RESOURCE, '', field), '', substitute_env(value), kind)
+        for field, kind in PipelineConfig.PATH_FIELDS.items()
+        if (value := getattr(pipeline, field))
+    ]
     paths.extend(
-        DeclaredPath(PathSite('glue', alias, 'scripts'), 'glue_jobs', substitute_env(script), PathKind.FILE)
-        for alias, job in pipeline.glue_jobs.items()
-        for script in job.scripts
-    )
-    paths.extend(
-        DeclaredPath(PathSite('lambda', alias, 'source_dir'), 'lambdas', substitute_env(fn.source_dir), PathKind.DIRECTORY)
-        for alias, fn in pipeline.lambdas.items()
+        DeclaredPath(PathSite(type(member).RESOURCE, alias, field), collection, substitute_env(value), kind)
+        for collection, alias, member in resource_members(pipeline)
+        for field, kind in type(member).PATH_FIELDS.items()
+        for value in as_values(getattr(member, field))
     )
     return paths
 
@@ -304,18 +343,32 @@ def declared_keys(pipeline: PipelineConfig) -> list[DeclaredKey]:
     same spelling rules, and checking only the operand a bug was found in leaves the other
     silent. A prefix names nothing on disk, so it is a key and not a path; a script is both,
     and appears here and in `declared_paths`."""
-    keys = []
-    for alias, job in pipeline.glue_jobs.items():
-        keys.append(DeclaredKey(PathSite('glue', alias, 'script_prefix'), substitute_env(job.script_prefix)))
-        keys.extend(DeclaredKey(PathSite('glue', alias, 'scripts'), substitute_env(script)) for script in job.scripts)
-    return keys
+    return [
+        DeclaredKey(PathSite(type(member).RESOURCE, alias, field), substitute_env(value))
+        for _, alias, member in resource_members(pipeline)
+        for field in sorted(type(member).KEY_FIELDS)
+        for value in as_values(getattr(member, field))
+    ]
+
+
+def declares_nothing(pipeline: PipelineConfig, alias: str = '') -> list[tuple[PathSite, str]]:
+    """Each glue job that names no script at all, as a site and the pipeline's name for it.
+
+    A Glue job is defined by a `ScriptLocation`, which `build_job_update` takes from
+    `scripts[0]`. An empty list passes the schema and yields no `DeclaredPath`, so every check
+    driven by that enumeration has nothing to look at and the deploy reaches the index."""
+    return [
+        (PathSite(GlueJobConfig.RESOURCE, job_alias, 'scripts'), '')
+        for job_alias, job in pipeline.glue_jobs.items()
+        if not job.scripts and (not alias or job_alias == alias)
+    ]
 
 
 def pipeline_path_faults(
     pipeline_name: str,
     pipeline: PipelineConfig,
     *,
-    on_disk: bool = True,
+    on_disk: bool,
     resource: str = '',
     alias: str = '',
 ) -> list[UnusablePath]:
@@ -327,42 +380,56 @@ def pipeline_path_faults(
     caller filtering the result drops the root row, which is the one fault that explains every
     other row it kept.
 
-    `on_disk=False` keeps the machine-independent half. How a key is written is a property of
-    the config and is answerable anywhere; whether a file is present is a property of this
-    machine and is only meaningful once a root says where to look."""
+    `on_disk` says whether this machine's files are part of the question, and it is required
+    rather than defaulted because both answers are live and neither is the safe one. How a key
+    is written is a property of the config and is answerable anywhere, so it is checked either
+    way; whether a file is present is a property of this machine and is only meaningful once a
+    root says where to look."""
 
     def in_scope(site: PathSite) -> bool:
         return (not resource or site.resource == resource) and (not alias or site.alias == alias)
 
-    # An absent root is the cause of every path fault beneath it, so it is reported alone. A job
-    # with ten scripts otherwise prints ten lines that each name a file, and the answer — that
-    # the checkout is not there — is in none of them. Never filtered by scope either: a caller
-    # asking about one job still cannot deploy it, and this is why.
-    if on_disk and pipeline.resolve_paths_from:
-        root = pipeline_root(pipeline)
-        root_fault = path_fault(root, PathKind.DIRECTORY)
-        if root_fault:
-            return [UnusablePath(pipeline_name, ROOT_SITE, root, root_fault, pipeline.resolve_paths_from)]
+    def row(site: PathSite, path: Path | None, fault: PathFault, configured: str) -> UnusablePath:
+        return UnusablePath(pipeline_name, site, path, fault, configured)
 
+    # Machine-independent, so these run whatever `on_disk` says and whatever the root turns out
+    # to be. An absent checkout hid them before, which made declaring a root on a box that never
+    # holds one report *less* than declaring none.
     problems = [
-        UnusablePath(pipeline_name, key.site, Path(key.value), fault, key.value)
-        for key in declared_keys(pipeline)
-        if in_scope(key.site) and (fault := key_fault(key.value))
+        row(site, None, PathFault.DECLARES_NOTHING, configured) for site, configured in declares_nothing(pipeline, alias) if in_scope(site)
     ]
+    problems += [
+        row(key.site, None, fault, key.value) for key in declared_keys(pipeline) if in_scope(key.site) and (fault := key_fault(key.value))
+    ]
+    if not on_disk:
+        return problems
+
+    # An absent root is the cause of every *file* fault beneath it, so nothing beneath it is
+    # reported. A job with ten scripts otherwise prints ten lines that each name a file, and the
+    # answer — that the checkout is not there — is in none of them. Never filtered by scope
+    # either: a caller asking about one job still cannot deploy it, and this is why.
+    for declared in declared_paths(pipeline):
+        if declared.site != ROOT_SITE:
+            continue
+        root = pipeline_root(pipeline)
+        root_fault = home_fault(declared.value) or path_fault(root, declared.expects)
+        if root_fault:
+            return [*problems, row(ROOT_SITE, root, root_fault, declared.value)]
+
     # A value whose spelling is already refused is not also reported as missing. Resolution
     # would place `./copy.py` somewhere real and `jobs//copy.py` somewhere else, and a second
     # row about the wrong question buries the one that has the remedy in it. Keyed on the value
     # as well as the site, so one bad script does not silence the check on its siblings.
     refused = {(problem.site, problem.configured) for problem in problems}
-    if not on_disk:
-        return problems
     for declared in declared_paths(pipeline):
-        if not in_scope(declared.site) or (declared.site, declared.value) in refused:
+        if declared.site == ROOT_SITE or not in_scope(declared.site) or (declared.site, declared.value) in refused:
+            continue
+        if fault := home_fault(declared.value):
+            problems.append(row(declared.site, None, fault, declared.value))
             continue
         resolved = resolve_from_root(pipeline, declared.value)
-        fault = path_fault(resolved, declared.expects)
-        if fault:
-            problems.append(UnusablePath(pipeline_name, declared.site, resolved, fault, declared.value))
+        if fault := path_fault(resolved, declared.expects):
+            problems.append(row(declared.site, resolved, fault, declared.value))
     return problems
 
 
@@ -378,10 +445,11 @@ def config_path_faults(config: DectlConfig) -> list[UnusablePath]:
     Checking the root directory alone would answer half the question. A root that exists and
     holds none of the source the pipeline names is present and useless, and the deploy is where
     that surfaces otherwise."""
-    problems = []
-    for name, pipeline in config.pipelines.items():
-        problems.extend(pipeline_path_faults(name, pipeline, on_disk=bool(pipeline.resolve_paths_from)))
-    return problems
+    return [
+        problem
+        for name, pipeline in config.pipelines.items()
+        for problem in pipeline_path_faults(name, pipeline, on_disk=bool(pipeline.resolve_paths_from))
+    ]
 
 
 def load_config() -> DectlConfig | None:

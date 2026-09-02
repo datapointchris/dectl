@@ -37,6 +37,7 @@ from dectl.output import info
 from dectl.output import success
 from dectl.paths import FAULT_WORDING
 from dectl.paths import PathKind
+from dectl.paths import deployable_files
 from dectl.paths import path_fault
 from dectl.paths import refuse_unusable_paths
 from dectl.payloads import read_payload
@@ -54,23 +55,20 @@ def zip_lambda(source: Path) -> Path:
     accepts it, so the function's code is replaced with nothing. A directory that exists and
     holds nothing reaches this on ordinary routes — an uninitialised submodule, or a source_dir
     naming a build directory before the build ran — so the count is what is checked, not the
-    directory.
+    directory. `PathKind.NON_EMPTY_DIRECTORY` is that same question asked of the config, which
+    is what stops `config validate` passing a directory this refuses.
 
-    The directory check repeats what the caller already ran through `pipeline_path_faults`, and
-    repeating it is what keeps the refusal a property of this function rather than of whoever
-    calls it. The caller's message names the config key; this one names only the path, because
-    at this altitude the config key is not known."""
-    fault = path_fault(source, PathKind.DIRECTORY)
+    The check repeats what the caller already ran through `pipeline_path_faults`, and repeating
+    it is what keeps the refusal a property of this function rather than of whoever calls it.
+    The caller's message names the config key; this one names only the path, because at this
+    altitude the config key is not known."""
+    fault = path_fault(source, PathKind.NON_EMPTY_DIRECTORY)
     if fault:
         error(f'lambda source_dir {FAULT_WORDING[fault]}: {source}')
         error('run "dectl config show" to see where each configured path resolves')
         raise typer.Exit(1)
 
-    files = [f for f in sorted(source.rglob('*')) if f.is_file() and '__pycache__' not in f.parts]
-    if not files:
-        error(f'lambda source_dir holds nothing to deploy: {source}')
-        raise typer.Exit(1)
-
+    files = deployable_files(source)
     zip_path = Path(tempfile.mkdtemp()) / 'lambda.zip'
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
         for file in files:
@@ -155,10 +153,14 @@ def make_lambda_function_app(
         # Named the way `config validate` names it — which pipeline, which alias, which config
         # key — rather than as a bare path. `zip_lambda` refuses the same directory a moment
         # later and can only say the path, because the config key does not reach it.
-        refuse_unusable_paths(pipeline_path_faults(pipeline_name, pipeline, resource='lambda', alias=alias))
+        #
+        # Both refusals run before the first line of output. `zipping <path>` printed above them
+        # announced work that then did not happen, and the glue verb was reordered for that rule
+        # in this same change.
+        refuse_unusable_paths(pipeline_path_faults(pipeline_name, pipeline, on_disk=True, resource='lambda', alias=alias))
         source = resolve_from_root(pipeline, fn.source_dir)
-        info(f'zipping {source}')
         zip_path = zip_lambda(source)
+        info(f'zipped {source}')
 
         info(f'updating code for {fn.name}')
         with zip_path.open('rb') as f:

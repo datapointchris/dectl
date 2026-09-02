@@ -1,6 +1,8 @@
+import io
 import json
 import zipfile
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 import typer
@@ -12,11 +14,13 @@ from dectl.commands.lambda_ import make_lambda_app
 from dectl.commands.lambda_ import zip_lambda
 from dectl.config import DectlConfig
 from dectl.config import PipelineConfig
+from dectl.config import pipeline_path_faults
 from dectl.config import resolve_from_root
 from dectl.invoke import DURABLE_SYNC_CAP_SECONDS
 from dectl.invoke import EVENT_ACK_TIMEOUT_SECONDS
 from dectl.invoke import INVOKE_TIMEOUT_MARGIN_SECONDS
 from dectl.invoke import timed_out_message
+from dectl.paths import PathSite
 
 runner = CliRunner()
 
@@ -466,6 +470,88 @@ def test_zip_holds_the_resolved_directorys_files_at_the_archive_root(tmp_path):
 
     with zipfile.ZipFile(zip_path) as archive:
         assert sorted(archive.namelist()) == ['handler.py', 'vendor/lib.py']
+
+
+class RecordingLambdaClient:
+    """Enough of the Lambda API for a deploy, recording what it was sent."""
+
+    def __init__(self) -> None:
+        self.code: bytes | None = None
+        self.published: list[str] = []
+        self.aliases: list[tuple[str, str]] = []
+
+    def update_function_code(self, FunctionName, ZipFile):
+        self.code = ZipFile
+
+    def get_waiter(self, name):
+        return SimpleNamespace(wait=lambda **kwargs: None)
+
+    def publish_version(self, FunctionName):
+        self.published.append(FunctionName)
+        return {'Version': '7'}
+
+    def update_alias(self, FunctionName, Name, FunctionVersion):
+        self.aliases.append((Name, FunctionVersion))
+
+
+def deploy_app(monkeypatch, tmp_path, client, source_dir: str = 'code'):
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '1'},
+            'pipelines': {
+                'proj': {
+                    'resolve_paths_from': str(tmp_path),
+                    'lambdas': {'notifier': {'name': 'salesdata-{env}-notifier', 'source_dir': source_dir, 'live_alias': 'live'}},
+                }
+            },
+        }
+    )
+    monkeypatch.setattr('dectl.session.make_session', lambda _config: FakeSession(client))
+    return make_lambda_app('proj', config.pipelines['proj'], config)
+
+
+def test_lambda_deploy_publishes_the_zip_and_moves_the_alias(monkeypatch, tmp_path):
+    # The write path, end to end. Replacing `resolve_from_root(...)` with `Path(fn.source_dir)`
+    # left the whole suite green, and that mutation restores the pre-branch behaviour of the
+    # feature's headline case: the deploy reading from wherever it was invoked.
+    (tmp_path / 'code').mkdir()
+    (tmp_path / 'code' / 'handler.py').write_text('def handler(event, context): pass')
+    client = RecordingLambdaClient()
+    app = deploy_app(monkeypatch, tmp_path, client)
+
+    result = runner.invoke(app, ['notifier', 'deploy', '--publish'], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    with zipfile.ZipFile(io.BytesIO(client.code)) as archive:
+        assert archive.namelist() == ['handler.py']
+    assert client.published == ['salesdata-dev-notifier']
+    assert client.aliases == [('live', '7')]
+
+
+def test_lambda_deploy_refuses_a_missing_source_and_writes_nothing(monkeypatch, tmp_path):
+    # A refusal dectl chose, not an exception reaching the runner: CliRunner reports 1 for both,
+    # so `exit_code == 1` beside `code is None` would be satisfied by any crash before the write.
+    client = RecordingLambdaClient()
+    app = deploy_app(monkeypatch, tmp_path, client, source_dir='modules/absent')
+
+    result = runner.invoke(app, ['notifier', 'deploy'])
+
+    assert isinstance(result.exception, SystemExit)
+    assert result.exit_code == 1
+    assert client.code is None
+
+
+def test_the_lambda_door_names_the_same_site_config_validate_does(tmp_path):
+    # Which pipeline, which alias, which config key — asserted on the row rather than on the
+    # sentence it renders to. A bare path cannot say which `notifier` it meant when several
+    # pipelines carry one, and that is what this door printed before.
+    pipeline = PipelineConfig.model_validate(
+        {'resolve_paths_from': str(tmp_path), 'lambdas': {'notifier': {'name': 'n', 'source_dir': 'modules/absent'}}}
+    )
+
+    faults = pipeline_path_faults('proj', pipeline, on_disk=True, resource='lambda', alias='notifier')
+
+    assert [(f.pipeline, f.site) for f in faults] == [('proj', PathSite('lambda', 'notifier', 'source_dir'))]
 
 
 def test_pycache_is_left_out_of_the_zip(tmp_path):

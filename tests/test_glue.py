@@ -436,7 +436,7 @@ def test_a_key_that_s3_would_store_literally_is_refused(tmp_path, written, expec
     # is the same dependence on where the deploy ran that `resolve_paths_from` exists to remove.
     pipeline = glue_pipeline(str(tmp_path), [written])
 
-    assert [f.fault for f in pipeline_path_faults('proj', pipeline)] == [expected]
+    assert [f.fault for f in pipeline_path_faults('proj', pipeline, on_disk=True)] == [expected]
 
 
 @pytest.mark.parametrize(
@@ -463,7 +463,7 @@ def test_a_script_prefix_is_refused_for_every_shape_a_script_is(tmp_path, writte
         }
     )
 
-    faults = pipeline_path_faults('proj', pipeline)
+    faults = pipeline_path_faults('proj', pipeline, on_disk=True)
 
     assert [(f.site.field, f.fault) for f in faults] == [('script_prefix', expected)]
 
@@ -474,9 +474,41 @@ def test_a_key_fault_reports_the_string_as_written(tmp_path):
     # entries identically.
     pipeline = glue_pipeline(str(tmp_path), ['./jobs/x.py', 'jobs//x.py', 'jobs/x.py/'])
 
-    shown = [f.shown for f in pipeline_path_faults('proj', pipeline)]
+    # Quoted, because the characters are the finding: bare, the trailing slash sits at the end
+    # of a sentence with nothing marking it, and an empty prefix shows as nothing at all.
+    shown = [f.shown for f in pipeline_path_faults('proj', pipeline, on_disk=True)]
 
-    assert shown == ['./jobs/x.py', 'jobs//x.py', 'jobs/x.py/']
+    assert shown == ["'./jobs/x.py'", "'jobs//x.py'", "'jobs/x.py/'"]
+
+
+@pytest.mark.parametrize('written', ['.', ''])
+def test_a_prefix_that_normalises_to_itself_is_still_refused(tmp_path, written):
+    # The round trip against PurePosixPath agreed with itself on these two: `str(PurePosixPath('.'))`
+    # is `'.'`, so a bare dot passed the comparison while script_key built `s3://b/./jobs/copy.py`.
+    (tmp_path / 'copy.py').write_text('x')
+    pipeline = PipelineConfig.model_validate(
+        {
+            'resolve_paths_from': str(tmp_path),
+            'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'b', 'script_prefix': written, 'scripts': ['copy.py'], 'role': 'r'}},
+        }
+    )
+
+    faults = pipeline_path_faults('proj', pipeline, on_disk=True)
+
+    assert [(f.site.field, f.fault) for f in faults] == [('script_prefix', PathFault.NOT_A_CLEAN_KEY)]
+
+
+def test_a_glue_job_declaring_no_scripts_is_refused_before_the_deploy_indexes_it(tmp_path):
+    # `scripts: []` passes the schema and yields no DeclaredPath, so every check driven by that
+    # enumeration had nothing to look at while build_job_update reached scripts[0]. Both doors
+    # name it now: validate exits 1 rather than 0, and the deploy refuses rather than raising.
+    pipeline = glue_pipeline(str(tmp_path), [])
+
+    faults = pipeline_path_faults('proj', pipeline, on_disk=True)
+
+    assert [(f.site.field, f.fault) for f in faults] == [('scripts', PathFault.DECLARES_NOTHING)]
+    with pytest.raises(typer.Exit):
+        resolve_scripts('proj', pipeline, 'j')
 
 
 def test_a_malformed_script_is_not_also_reported_as_missing(tmp_path):
@@ -486,7 +518,7 @@ def test_a_malformed_script_is_not_also_reported_as_missing(tmp_path):
     (tmp_path / 'jobs').mkdir()
     pipeline = glue_pipeline(str(tmp_path), ['./jobs/x.py', 'jobs/present.py'])
 
-    faults = pipeline_path_faults('proj', pipeline)
+    faults = pipeline_path_faults('proj', pipeline, on_disk=True)
 
     assert [(f.configured, f.fault) for f in faults] == [
         ('./jobs/x.py', PathFault.NOT_A_CLEAN_KEY),
@@ -501,7 +533,7 @@ def test_an_absent_root_is_reported_alone_at_the_deploy_door(tmp_path):
     # door reports, not on what they render to.
     pipeline = glue_pipeline(str(tmp_path / 'nowhere'), ['jobs/a.py', 'jobs/b.py'])
 
-    scoped = pipeline_path_faults('proj', pipeline, resource='glue', alias='j')
+    scoped = pipeline_path_faults('proj', pipeline, on_disk=True, resource='glue', alias='j')
 
     assert [(f.site, f.fault) for f in scoped] == [(ROOT_SITE, PathFault.ABSENT)]
     with pytest.raises(typer.Exit):
@@ -516,17 +548,9 @@ def test_both_doors_report_one_absent_root_the_same_way(tmp_path):
     config = DectlConfig.model_validate({'defaults': {'account_id': '1'}, 'pipelines': {'proj': pipeline.model_dump()}})
 
     from_validate = config_path_faults(config)
-    from_deploy = pipeline_path_faults('proj', pipeline, resource='glue', alias='j')
+    from_deploy = pipeline_path_faults('proj', pipeline, on_disk=True, resource='glue', alias='j')
 
     assert from_validate == from_deploy
-
-
-def test_a_malformed_script_still_loads_so_the_rest_of_the_cli_survives(tmp_path):
-    # A schema failure blanks every pipeline command, including the ones that would report the
-    # problem. The config loads and the deploy refuses instead.
-    pipeline = glue_pipeline(str(tmp_path), ['/srv/shared/handler.py'])
-
-    assert pipeline.glue_jobs['j'].scripts == ['/srv/shared/handler.py']
 
 
 def test_one_missing_script_resolves_none_of_them(tmp_path):
@@ -555,16 +579,19 @@ def test_upload_scripts_refuses_a_partial_set_handed_to_it_directly(tmp_path):
     assert s3.uploads == []
 
 
-def test_a_directory_named_as_a_script_is_reported_as_a_directory(tmp_path, capsys):
-    # Present with the wrong type and absent have opposite remedies, so they never share a
-    # wording: fix the config key, or check the tree out.
+def test_a_directory_named_as_a_script_is_reported_as_a_directory(tmp_path):
+    # Present with the wrong type and absent have opposite remedies — fix the config key, or
+    # check the tree out — so they are separate values rather than one wording apart. Asserted
+    # on the value: rich soft-wraps the sentence at the width whoever ran the suite happened to
+    # have, and a helper that normalises the wrapping is a width pin by another name.
     (tmp_path / 'copy.py').mkdir()
     pipeline = glue_pipeline(str(tmp_path), ['copy.py'])
 
+    faults = pipeline_path_faults('proj', pipeline, on_disk=True)
+
+    assert [f.fault for f in faults] == [PathFault.EXPECTED_FILE]
     with pytest.raises(typer.Exit):
         resolve_scripts('proj', pipeline, 'j')
-
-    assert 'is a directory, not a file' in capsys.readouterr().err
 
 
 def test_the_deploy_door_names_the_pipeline_and_the_config_key(tmp_path, capsys):
@@ -593,12 +620,25 @@ class FakeDeploySession:
 
 
 def deploy_config(root, max_capacity=None) -> DectlConfig:
-    job = {'name': 'my-job', 'script_bucket': 'b', 'scripts': ['copy.py'], 'role': 'new-role'}
+    # A real bucket name: FakeS3Client applies S3's own naming rule, and every deploy test here
+    # but one refuses before reaching the upload, so a rejected name would go unnoticed.
+    job = {'name': 'my-job', 'script_bucket': 'salesdata-scripts', 'scripts': ['copy.py'], 'role': 'new-role'}
     if max_capacity is not None:
         job['max_capacity'] = max_capacity
     return DectlConfig.model_validate(
         {'defaults': {'account_id': '1'}, 'pipelines': {'proj': {'resolve_paths_from': str(root), 'glue_jobs': {'copy': job}}}}
     )
+
+
+def assert_refused(result) -> None:
+    """The exit came from a refusal dectl chose, not from an exception reaching the runner.
+
+    CliRunner reports exit code 1 for both, so `exit_code == 1` beside `uploads == []` is
+    satisfied by any crash before the upload — inserting `raise IndexError` as the first line of
+    `build_job_update` left all three of these green, and that crash was a live bug rather than
+    a hypothetical. `typer.Exit` reaches the runner as SystemExit; anything else does not."""
+    assert isinstance(result.exception, SystemExit), f'exited via {result.exception!r}'
+    assert result.exit_code == 1
 
 
 def test_a_refused_definition_change_uploads_nothing(monkeypatch, tmp_path):
@@ -611,7 +651,7 @@ def test_a_refused_definition_change_uploads_nothing(monkeypatch, tmp_path):
 
     result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy', '--yes'])
 
-    assert result.exit_code == 1
+    assert_refused(result)
     assert session.s3.uploads == []
     assert session.glue.captured_update is None
 
@@ -626,7 +666,7 @@ def test_a_refused_confirmation_uploads_nothing(monkeypatch, tmp_path):
 
     result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy'])
 
-    assert result.exit_code == 1
+    assert_refused(result)
     assert session.s3.uploads == []
     assert session.glue.captured_update is None
 
@@ -640,5 +680,37 @@ def test_plan_refuses_a_missing_script_rather_than_reporting_a_clean_diff(monkey
 
     result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy', '--plan'])
 
-    assert result.exit_code == 1
+    assert_refused(result)
     assert session.s3.uploads == []
+
+
+def test_deploy_uploads_every_script_and_writes_the_definition(monkeypatch, tmp_path):
+    # The write path, end to end. Deleting either the upload call or the apply call from the
+    # deploy verb left the whole suite green, so the re-sequencing this branch is largely about
+    # was unpinned by anything asserting the writes happened at all.
+    (tmp_path / 'copy.py').write_text('x')
+    config = deploy_config(tmp_path)
+    session = FakeDeploySession({'Name': 'my-job', 'Role': 'old-role'})
+    monkeypatch.setattr('dectl.session.make_session', lambda _config: session)
+
+    result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy', '--yes'])
+
+    assert result.exit_code == 0
+    assert [(bucket, key) for _, bucket, key in session.s3.uploads] == [('salesdata-scripts', 'scripts/copy.py')]
+    assert session.glue.captured_update['Role'] == 'new-role'
+    assert session.glue.captured_update['Command']['ScriptLocation'] == 's3://salesdata-scripts/scripts/copy.py'
+
+
+def test_uploading_a_set_the_definition_does_not_name_is_refused(tmp_path):
+    # `upload_scripts` used to iterate `glue_job.scripts` itself, so the set uploaded covering
+    # the set the definition names held by construction. Taking `sources` from the caller made
+    # it breakable: every path here exists, so nothing else in the function refuses, and the
+    # deploy would write a ScriptLocation naming an object nothing uploaded.
+    (tmp_path / 'first.py').write_text('x')
+    job = GlueJobConfig(name='my-job', script_bucket='b', scripts=['first.py', 'second.py'], role='r')
+    s3 = FakeS3Client()
+
+    with pytest.raises(typer.Exit):
+        upload_scripts(FakeS3Session(s3), job, [('first.py', tmp_path / 'first.py')])
+
+    assert s3.uploads == []

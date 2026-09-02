@@ -106,26 +106,38 @@ file so `config init` stays valid — a test asserts `TEMPLATE_CONFIG` round-tri
 `paths.py`'s module docstring before changing either; these are the constraints a new
 path-bearing resource has to meet, which the docstrings do not state.
 
-- **A value naming a file is declared in `declared_paths`; one an S3 key is built from is
-  declared in `declared_keys`.** A glue script is both. Everything that checks, resolves or
-  excludes a value reads those two, so a field added to a model without a row is checked by
-  nothing and resolved by nothing — and both failures read as success.
+- **A resource declares its own path and key fields, on the model.** `ResourceModel.PATH_FIELDS`
+  maps a field to the `PathKind` it must be; `KEY_FIELDS` names the fields a glue S3 key is
+  built from. `declared_paths`, `declared_keys` and `env.aws_names_of` all read them, and each
+  used to carry its own copy — a resource listed in two of the three is checked and never
+  excluded, or excluded and never checked, and both read as success.
   `test_every_path_field_on_the_models_is_declared` is what holds it.
 - **Displaying one is a second edit, and only that.** `pipeline_to_dict` and `render_pipeline`
   name a key per resource (`script_paths`, `source_path`), so a new resource's path needs a row
-  in each. The checking, the resolution and the env-guard exclusion come free from the two
-  enumerations.
+  in each. The checking, the resolution and the env-guard exclusion come free from the
+  declaration.
+- **A new `PathFault` needs a `FAULT_WORDING` entry and a decision about `KEY_FAULTS`.** The two
+  fail in opposite directions: a missing wording raises where a reader needs the answer, and a
+  missing `KEY_FAULTS` entry silently reports the resolved path for a fault about the spelling.
+  `test_every_fault_has_a_sentence` pins the first.
 - **Every value naming a file or directory goes through `resolve_from_root(pipeline, value)`,
   never `Path(value)`** — missing it reintroduces the dependency on where dectl was invoked,
   silently. `pipeline_root` is the fallback half: no `resolve_paths_from` means `Path.cwd()`.
-- **A fault about how a value is *written* belongs to `config validate` and to the deploy,
-  never to a field validator.** `main.py` falls back to `cfg = None` on a load error, so a
-  schema failure blanks the whole pipeline tree — including the commands that would report it.
+- **A fault about how a value is *written*, or about what this machine holds, belongs to
+  `config validate` and to the deploy, never to a field validator.** `key_fault`'s docstring
+  carries why. `UNRESOLVABLE_HOME` is the member that used to be a validator and is not.
 - **A deploy door scopes `pipeline_path_faults` by argument, never by filtering its result.**
   Filtering drops the row naming the absent root, which is the cause of every row it kept.
+- **Nothing in `paths.py` or the walk exits the process.** A refusal raised beneath a command
+  that has already committed to emitting a document leaves `--json` writing zero bytes, so
+  `expand_home` is total and `home_fault` reports. `refuse_unusable_paths` is where the exit
+  lives, and every door calls it.
 
 `script_key` is the one place a glue S3 key is built. The upload, `ScriptLocation` and
 `--extra-py-files` all read it; any two disagreeing means Glue fetches an object nothing wrote.
+`join_uri` is the shape underneath it, shared with the per-alias help panel — which passes raw
+operands on purpose, because it is built before `--env` is parsed and a resolved name there
+would be the default environment's under every other.
 
 `deploy` runs everything that can refuse before it writes anything — `resolve_scripts`, then
 `plan_glue_job_update`, then the upload, then `apply_glue_job_update`. `build_job_update` exits

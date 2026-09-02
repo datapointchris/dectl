@@ -19,51 +19,21 @@ from typing import NamedTuple
 import typer
 
 from dectl.output import error
-from dectl.output import stderr_console
-
-
-def expands_at_load(value: str) -> None:
-    """Check `~` expansion, unless a `{env}` makes the real value unknowable here.
-
-    A token can sit anywhere, `~{env}/code` included, so no stand-in preserves both the shape
-    and the user name. A templated path is decided at the resolution door instead, where
-    `expand_home_or_exit` reports it."""
-    if '{env}' in value:
-        return
-    expand_home(value)
 
 
 def expand_home(value: str) -> Path:
-    """`~` expansion that reports an unresolvable home as a config error.
+    """`~` expansion, total: a `~user` naming nobody comes back as the literal string.
 
-    `Path.expanduser()` raises RuntimeError for a `~user` naming nobody — `~code/x`, a missing
-    slash, is the likeliest typo in a path key. Pydantic does not wrap RuntimeError into a
-    ValidationError, and `CONFIG_LOAD_ERRORS` catches only YAMLError and ValidationError, so an
-    uncaught one escapes main.py's import-time guard and takes down every command, including the
-    `config` commands that exist to repair the file. Raising ValueError puts it back inside the
-    schema failure every caller already handles."""
+    `Path.expanduser()` raises RuntimeError for a `~user` that resolves to no home — `~code/x`,
+    a missing slash, is the likeliest typo in a path key. Nothing in this module raises for it
+    and nothing exits: `home_fault` is the reporting half, and it is asked before the value is
+    used. A resolver that could exit is a config module owning a command's stream contract, and
+    the failure it produced was a `--json` verb writing zero bytes on a path its caller had
+    already decided would emit a document."""
     try:
         return Path(value).expanduser()
-    except RuntimeError as exc:
-        raise ValueError(f'{value!r} names a home directory that cannot be resolved on this machine') from exc
-
-
-def expand_home_or_exit(value: str) -> Path:
-    """`expand_home`, with the failure reported to the reader instead of raised.
-
-    The one door for a value whose `~` was not decidable at load. A `{env}` defers the check,
-    and no model carrying such a value is re-validated on the read path — `render_env_model`
-    runs per resource inside a verb, and `config validate`, `config show` and `list` never call
-    it — so a bare ValueError from here reaches the reader as a traceback from the command whose
-    job is to report the problem. Every configured path reaches disk through `pipeline_root` or
-    `resolve_from_root` and both come here, so the root, a glue script and a lambda `source_dir`
-    all fail the same way."""
-    try:
-        return expand_home(value)
-    except ValueError as exc:
-        error(f'a configured path cannot be resolved: {exc}')
-        stderr_console.print('run "dectl config edit" to fix it')
-        raise typer.Exit(1) from exc
+    except RuntimeError:
+        return Path(value)
 
 
 class PathKind(StrEnum):
@@ -77,6 +47,10 @@ class PathKind(StrEnum):
 
     FILE = 'file'
     DIRECTORY = 'directory'
+    # A directory that also has to hold something. A lambda `source_dir` is zipped whole, and an
+    # archive with no entries is 22 bytes, perfectly valid, and accepted by
+    # `update_function_code` — so an empty one replaces the function's code with nothing.
+    NON_EMPTY_DIRECTORY = 'non_empty_directory'
 
 
 class PathFault(StrEnum):
@@ -88,6 +62,9 @@ class PathFault(StrEnum):
     ABSENT = 'absent'
     EXPECTED_DIRECTORY = 'expected_directory'
     EXPECTED_FILE = 'expected_file'
+    EMPTY_DIRECTORY = 'empty_directory'
+    DECLARES_NOTHING = 'declares_nothing'
+    UNRESOLVABLE_HOME = 'unresolvable_home'
     NOT_A_CLEAN_KEY = 'not_a_clean_key'
     ESCAPES_ROOT = 'escapes_root'
 
@@ -96,13 +73,25 @@ class PathFault(StrEnum):
 # against the configured string, since resolution normalises away the very thing they name.
 KEY_FAULTS = frozenset({PathFault.NOT_A_CLEAN_KEY, PathFault.ESCAPES_ROOT})
 
+# Every member gets a sentence, and a missing one raises at the moment a reader needs the
+# answer. `test_every_fault_has_a_sentence` is what keeps the mapping total; `KEY_FAULTS` is
+# the other property beside this enum and fails in the opposite direction, so it is pinned too.
 FAULT_WORDING = {
     PathFault.ABSENT: 'not found',
     PathFault.EXPECTED_DIRECTORY: 'is a file, not a directory',
     PathFault.EXPECTED_FILE: 'is a directory, not a file',
+    PathFault.EMPTY_DIRECTORY: 'holds nothing to deploy',
+    PathFault.DECLARES_NOTHING: 'names nothing to deploy',
+    PathFault.UNRESOLVABLE_HOME: 'names a home directory this machine cannot resolve',
     PathFault.NOT_A_CLEAN_KEY: 'is not written as a plain relative path, and the S3 key is built from it',
     PathFault.ESCAPES_ROOT: 'climbs out of the directory paths resolve from, and the S3 key is built from it',
 }
+
+# The form a key-shaped value has to take, said once. An error naming what is wrong without
+# naming what is right leaves the reader to guess, and the two key faults are the ones where
+# `config show` cannot help — it prints the resolved path, which has the malformation
+# normalised out of it and looks correct.
+KEY_FORM = 'a glue key is written as plain relative segments: jobs/copy.py, never ./x, ../x, ~/x, /x, a//b or a trailing /'
 
 
 class PathSite(NamedTuple):
@@ -155,7 +144,11 @@ class UnusablePath(NamedTuple):
 
     pipeline: str
     site: PathSite
-    path: Path
+    # Where the value resolved to, or None when it resolves to nothing on this machine — a
+    # `script_prefix` is an S3 key prefix and a glue job declaring no scripts has no value at
+    # all. Typed `Path` it was filled with an S3 prefix, and for `script_prefix: ""` the
+    # published value was `"."`, which is a path the config never named.
+    path: Path | None
     fault: PathFault
     # The string as written. A key fault is about the spelling, and `path` has already had the
     # `.`, the doubled separator and the trailing slash collapsed out of it by resolution — so
@@ -163,13 +156,47 @@ class UnusablePath(NamedTuple):
     configured: str
 
     @property
-    def shown(self) -> str:
-        """The value to show the reader: what they wrote for a spelling fault, the resolved
-        path for a fault about what is on disk."""
-        return self.configured if self.fault in KEY_FAULTS else str(self.path)
+    def shown(self) -> str | None:
+        """The value to show the reader, or None when the fault is that there is no value.
+
+        What they wrote for a spelling fault, the resolved path for a fault about what is on
+        disk. A spelling fault is quoted, because the characters are the finding: bare, a
+        trailing slash sits at the end of a sentence where nothing marks it, and an empty
+        prefix shows as nothing at all."""
+        if self.fault in KEY_FAULTS:
+            return repr(self.configured)
+        if self.path is not None:
+            return str(self.path)
+        return None
 
     def __str__(self) -> str:
-        return f'{self.pipeline}: {self.site.label} {FAULT_WORDING[self.fault]}: {self.shown}'
+        shown = self.shown
+        line = f'{self.pipeline}: {self.site.label} {FAULT_WORDING[self.fault]}'
+        return f'{line}: {shown}' if shown is not None else line
+
+
+def home_fault(configured: str) -> PathFault | None:
+    """UNRESOLVABLE_HOME when this string's `~user` names nobody on this machine.
+
+    Asked at the same place `path_fault` is, so the diagnosis says which of the two happened.
+    Left to `path_fault` alone, an unexpandable `~code/x` reports as `not found: ~code/x`,
+    which sends the reader looking for a directory rather than at the missing slash."""
+    try:
+        Path(configured).expanduser()
+    except RuntimeError:
+        return PathFault.UNRESOLVABLE_HOME
+    return None
+
+
+DIRECTORY_KINDS = frozenset({PathKind.DIRECTORY, PathKind.NON_EMPTY_DIRECTORY})
+
+
+def deployable_files(source: Path) -> list[Path]:
+    """The files under `source` a deploy would send, bytecode caches excluded.
+
+    One counter, read by `path_fault` and by `zip_lambda`, so `config validate` and the deploy
+    cannot disagree about whether a directory holds anything to send."""
+    return [found for found in sorted(source.rglob('*')) if found.is_file() and '__pycache__' not in found.parts]
 
 
 def path_fault(path: Path, expects: PathKind) -> PathFault | None:
@@ -179,19 +206,23 @@ def path_fault(path: Path, expects: PathKind) -> PathFault | None:
     out, or fix the config key that names it — so they never share a name."""
     if not path.exists():
         return PathFault.ABSENT
-    if expects is PathKind.DIRECTORY and not path.is_dir():
+    if expects in DIRECTORY_KINDS and not path.is_dir():
         return PathFault.EXPECTED_DIRECTORY
     if expects is PathKind.FILE and not path.is_file():
         return PathFault.EXPECTED_FILE
+    if expects is PathKind.NON_EMPTY_DIRECTORY and not deployable_files(path):
+        return PathFault.EMPTY_DIRECTORY
     return None
 
 
 def key_fault(configured: str) -> PathFault | None:
     """Why this configured string cannot become an S3 key, or None when it can.
 
-    Tested against the string itself, never a `Path` round trip. `pathlib` collapses `.`, `//`
-    and a trailing slash, which are exactly the shapes S3 stores literally — so a normalised
-    probe agrees with the raw string on every input except the ones that matter.
+    Every segment has to be a plain name. Stated positively rather than as a round trip against
+    `PurePosixPath`, which normalises `.`, `//` and a trailing slash away — the very shapes S3
+    stores literally — and so agrees with the raw string on the inputs that matter. A bare `.`
+    is where that agreement was total: it is its own normalised form, so the comparison passed
+    it while `script_key` built `s3://bucket/./jobs/copy.py`.
 
     A leading `~` escapes the root the way an absolute path does. `PurePosixPath` calls it
     relative and holds no `..`, so both of the other arms miss it, and it resolves through
@@ -203,11 +234,28 @@ def key_fault(configured: str) -> PathFault | None:
     disappears with it. A config carrying a malformed key still loads, `config validate` names
     it and the deploy refuses it, so the diagnosis reaches the reader without the CLI that
     delivers it going away."""
-    if configured.startswith('~') or PurePosixPath(configured).is_absolute() or '..' in PurePosixPath(configured).parts:
+    if configured.startswith('~') or PurePosixPath(configured).is_absolute() or '..' in configured.split('/'):
         return PathFault.ESCAPES_ROOT
-    if configured != str(PurePosixPath(configured)) or configured.endswith('/'):
+    if not all(segment and segment != '.' for segment in configured.split('/')):
         return PathFault.NOT_A_CLEAN_KEY
     return None
+
+
+def recovery_lines(problems: list[UnusablePath]) -> list[str]:
+    """What to tell the reader to do next, one line per kind of fault present.
+
+    A spelling fault cannot be sent to `config show`: that command prints the *resolved* path,
+    which has the `./`, the doubled separator and the trailing slash normalised out of it, so it
+    renders a malformed key as a correct-looking one. Naming the form the key has to take is the
+    answer to that failure; `config show` is the answer to a file that is not where the config
+    says. A run carrying both gets both, because dropping either sends half the rows nowhere."""
+    kinds = {problem.fault in KEY_FAULTS for problem in problems}
+    lines = []
+    if True in kinds:
+        lines.append(KEY_FORM)
+    if False in kinds:
+        lines.append('run "dectl config show" to see where each configured path resolves')
+    return lines
 
 
 def refuse_unusable_paths(problems: list[UnusablePath]) -> None:
@@ -221,5 +269,6 @@ def refuse_unusable_paths(problems: list[UnusablePath]) -> None:
         return
     for problem in problems:
         error(str(problem))
-    error('run "dectl config show" to see where each configured path resolves')
+    for line in recovery_lines(problems):
+        error(line)
     raise typer.Exit(1)

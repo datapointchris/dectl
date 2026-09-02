@@ -90,6 +90,21 @@ def warn_if_environment_had_no_effect(value: Any) -> None:
     )
 
 
+def aws_names_of(model: BaseModel) -> dict[str, Any]:
+    """A model's fields with its local paths dropped, for the env-effect guard.
+
+    `warn_if_environment_had_no_effect` asks whether `--env` changed an AWS name, and a `{env}`
+    in a local path answers yes while naming nothing in AWS. `pipeline_view.aws_names_only` does
+    the same for a whole pipeline; this is the per-resource half, and it is the one the deploy
+    verbs go through — without it the guard fired on `list` and went quiet on the deploy that
+    acts on the wrong environment.
+
+    `PATH_FIELDS` is read off the class rather than imported, because `config` imports this
+    module and the declaration lives on `config.ResourceModel`."""
+    local = getattr(type(model), 'PATH_FIELDS', {})
+    return {field: value for field, value in model.model_dump().items() if field not in local}
+
+
 def render_env_model[ModelT: BaseModel](model: ModelT) -> ModelT:
     """Return a copy of a config model with {env} substituted in every string field.
 
@@ -99,7 +114,7 @@ def render_env_model[ModelT: BaseModel](model: ModelT) -> ModelT:
     reader as a pydantic traceback and a docs URL, which names the model rather than the key
     they typed."""
     data = model.model_dump()
-    warn_if_environment_had_no_effect(data)
+    warn_if_environment_had_no_effect(aws_names_of(model))
     try:
         return type(model).model_validate(render_value(data))
     except ValidationError as exc:

@@ -32,6 +32,15 @@ FAILED_RUN_STATES = TERMINAL_RUN_STATES - {'SUCCEEDED'}
 READ_ONLY_KEYS = ('Name', 'CreatedOn', 'LastModifiedOn', 'ProfileName', 'AllocatedCapacity')
 
 
+def join_uri(bucket: str, prefix: str, script: str) -> str:
+    """The S3 URI of one script, from the three strings it is built out of.
+
+    The one place the shape is written. `script_uri` passes substituted operands and the
+    per-alias help panel passes raw ones, so the two cannot spell the destination differently —
+    and a change to the shape reaches both."""
+    return f's3://{bucket}/{prefix}/{script}'
+
+
 def script_key(glue_job: GlueJobConfig, script: str) -> str:
     """The S3 key one script is uploaded to, and named by in the job definition.
 
@@ -42,7 +51,17 @@ def script_key(glue_job: GlueJobConfig, script: str) -> str:
 
 
 def script_uri(glue_job: GlueJobConfig, script: str) -> str:
-    return f's3://{substitute_env(glue_job.script_bucket)}/{script_key(glue_job, script)}'
+    return join_uri(substitute_env(glue_job.script_bucket), substitute_env(glue_job.script_prefix), substitute_env(script))
+
+
+def configured_uris(glue_job: GlueJobConfig) -> str:
+    """Where this job's scripts are destined, spelled exactly as the config spells them.
+
+    `{env}` is deliberately left standing. This feeds the per-alias help panel, which is a
+    `help=` argument evaluated while the command tree is built — before `--env` is parsed — so
+    substituting would print the default environment's name under `--env prod`, which is a
+    confident wrong answer where the template is an obviously unresolved one."""
+    return ' · '.join(join_uri(glue_job.script_bucket, glue_job.script_prefix, script) for script in glue_job.scripts)
 
 
 def resolve_scripts(pipeline_name: str, pipeline: PipelineConfig, alias: str) -> list[tuple[str, Path]]:
@@ -58,7 +77,7 @@ def resolve_scripts(pipeline_name: str, pipeline: PipelineConfig, alias: str) ->
     by argument rather than by filtering the result is what keeps the root fault: a checkout
     that is not there explains every missing script under it, and ten lines naming ten files
     name the cause in none of them."""
-    refuse_unusable_paths(pipeline_path_faults(pipeline_name, pipeline, resource='glue', alias=alias))
+    refuse_unusable_paths(pipeline_path_faults(pipeline_name, pipeline, on_disk=True, resource='glue', alias=alias))
     job = pipeline.glue_jobs[alias]
     return [(script, resolve_from_root(pipeline, script)) for script in job.scripts]
 
@@ -69,7 +88,18 @@ def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: lis
     Every path is checked before the first byte goes anywhere: a partial upload leaves the job's
     scripts split across two revisions, and the run that follows mixes them. The caller normally
     checked them too, and repeating it here is what keeps that promise a property of this
-    function rather than of whoever calls it."""
+    function rather than of whoever calls it.
+
+    The set uploaded has to be the set the definition names. Taking `sources` from the caller
+    moved that from a property held by construction — this function used to iterate
+    `glue_job.scripts` itself — to one the caller can break: a set omitting `scripts[0]` whose
+    every path exists uploads cleanly while `build_job_update` emits a `ScriptLocation` nothing
+    wrote, which is exactly what `script_key` exists to prevent."""
+    named = {script for script, _ in sources}
+    if named != set(glue_job.scripts):
+        error(f'{glue_job.name}: asked to upload {sorted(named)}, but the job definition names {sorted(glue_job.scripts)}')
+        raise typer.Exit(1)
+
     missing = [path for _, path in sources if not path.is_file()]
     if missing:
         for path in missing:
@@ -298,12 +328,19 @@ def make_glue_job_app(
     """Build the per-job sub-app: `dectl PIPELINE glue <alias> <verb>`.
 
     Verbs close over this job's config and resolve {env} at call time (never at import), so the
-    active --env is respected. The sub-app help doubles as an info panel for the job."""
+    active --env is respected. The sub-app help doubles as an info panel for the job.
+
+    The panel is a third renderer of the destination the other two agree on, so it goes through
+    `join_uri` like they do. It shows the config as written, `{env}` and all, and names the
+    command that resolves it — the panel is built before `--env` is parsed, so a resolved name
+    here would be the default environment's under any other."""
+    destinations = configured_uris(job_config) or 'no scripts configured'
     job_app = typer.Typer(
         no_args_is_help=True,
         help=(
             f'Glue job [bold]{alias}[/bold] → {job_config.name}\n\n'
-            f'Scripts: {", ".join(job_config.scripts)} · bucket: s3://{job_config.script_bucket}/{job_config.script_prefix}/'
+            f'{destinations}\n\n'
+            f'As configured. Run "dectl {pipeline_name} list" for the active environment.'
         ),
     )
 

@@ -333,11 +333,16 @@ working directory, which is the dependency the key removes, so it fails validati
 
 A `source_dir` may be absolute and sit outside that directory — it is zipped and uploaded
 as bytes, so nothing else depends on where it came from. A glue `scripts` entry may not:
-its S3 key is built from the string you write, and S3 stores that string as given.
-`../x.py`, `/srv/x.py`, `~/x.py`, `./x.py`, `jobs//x.py` and `x.py/` all name objects
-nothing will look for, so `config validate` and the deploy both refuse them. `script_prefix`
-is the other half of the same key and is held to the same spelling. The config still loads
-either way, which is what keeps the rest of the CLI available to tell you.
+its S3 key is built from the string you write, and S3 stores that string as given. So a
+script and its `script_prefix`, the two halves of that key, are each written as plain
+relative segments — `jobs/copy.py`. Anything else names an object nothing will look for,
+and `config validate` and the deploy both refuse it. The config still loads either way,
+which is what keeps the rest of the CLI available to tell you.
+
+A glue job that declares no scripts is refused for the same reason: a Glue job is defined
+by a `ScriptLocation`, and there is none to build. A lambda `source_dir` that exists and
+holds nothing is refused too — it zips to a valid empty archive, which replaces the
+function's code with nothing.
 
 Omit `resolve_paths_from` and nothing changes: paths resolve from the working directory,
 and a deploy has to run from the checkout.

@@ -11,19 +11,25 @@ import typer
 import yaml
 from pydantic import BaseModel
 from pydantic import ValidationError
+from pydantic import field_validator
 
 from dectl.config import CONFIG_LOAD_ERRORS
 from dectl.config import TEMPLATE_CONFIG
 from dectl.config import DectlConfig
 from dectl.config import PipelineConfig
+from dectl.config import StrictModel
 from dectl.config import config_error_headline
 from dectl.config import declared_paths
 from dectl.config import describe_config_error
 from dectl.config import load_config
+from dectl.config import pipeline_path_faults
 from dectl.config import pipeline_root
 from dectl.config import resolve_from_root
 from dectl.env import render_env_model
 from dectl.env import set_active_environment
+from dectl.paths import FAULT_WORDING
+from dectl.paths import KEY_FAULTS
+from dectl.paths import PathFault
 
 
 def test_template_config_is_valid():
@@ -402,25 +408,37 @@ def test_the_root_is_absent_by_default():
     assert pipeline_rooted_at(None).resolve_paths_from is None
 
 
-def test_a_root_naming_no_real_user_fails_as_a_schema_error():
-    # `~code/x` is a missing slash, the likeliest typo in a path key. Path.expanduser() raises
-    # RuntimeError for it, pydantic does not wrap that, and CONFIG_LOAD_ERRORS does not catch
-    # it — so uncaught it escapes main.py's import guard and takes down `config edit` too.
-    with pytest.raises(ValidationError):
-        pipeline_rooted_at('~code/salesdata')
+def test_every_fault_has_a_sentence():
+    # FAULT_WORDING is indexed with no default, so a member added without one raises at the
+    # moment a reader needs the answer. It and KEY_FAULTS are the two per-member properties
+    # beside this enum and they fail in opposite directions: a missing wording raises, while a
+    # missing KEY_FAULTS entry silently reports the resolved path for a spelling fault.
+    assert set(FAULT_WORDING) == set(PathFault)
+    assert set(PathFault) >= KEY_FAULTS
 
 
-def test_a_source_dir_naming_no_real_user_fails_as_a_schema_error():
-    with pytest.raises(ValidationError):
-        PipelineConfig.model_validate({'lambdas': {'fn': {'name': 'n', 'source_dir': '~code/x'}}})
+def rooted_pipeline_naming(tmp_path, source_dir: str) -> PipelineConfig:
+    """A pipeline whose root is present, so a fault beneath it is not hidden by an absent one."""
+    return PipelineConfig.model_validate({'resolve_paths_from': str(tmp_path), 'lambdas': {'fn': {'name': 'n', 'source_dir': source_dir}}})
+
+
+@pytest.mark.parametrize('field', ['resolve_paths_from', 'source_dir'])
+def test_a_home_this_machine_cannot_resolve_is_a_fault_not_a_load_failure(tmp_path, field):
+    pipeline = pipeline_rooted_at('~code/salesdata') if field == 'resolve_paths_from' else rooted_pipeline_naming(tmp_path, '~code/x')
+    # `~code/x` is a missing slash, the likeliest typo in a path key. Whether it resolves is a
+    # property of this machine, so it belongs where every other such property is checked — see
+    # `key_fault`. As a validator it could only reach the values carrying no `{env}`, since the
+    # active environment is not known at load; one door answers for both halves.
+    faults = pipeline_path_faults('p', pipeline, on_disk=True)
+
+    assert [f.fault for f in faults] == [PathFault.UNRESOLVABLE_HOME]
 
 
 def test_every_config_load_failure_is_one_the_callers_catch():
-    # The property behind both tests above. Every caller catches CONFIG_LOAD_ERRORS, so a load
-    # failure outside that tuple is one no command recovers from.
-    for bad in ('~code/salesdata', '../relative'):
-        with pytest.raises(CONFIG_LOAD_ERRORS):
-            pipeline_rooted_at(bad)
+    # Every caller catches CONFIG_LOAD_ERRORS, so a load failure outside that tuple is one no
+    # command recovers from.
+    with pytest.raises(CONFIG_LOAD_ERRORS):
+        pipeline_rooted_at('../relative')
 
 
 def test_the_env_token_is_substituted_into_the_root():
@@ -441,39 +459,55 @@ def test_a_root_beginning_with_a_token_is_still_rejected_as_relative():
         pipeline_rooted_at('{env}/salesdata')
 
 
-@pytest.mark.parametrize(
-    ('pipeline', 'resolve'),
-    [
-        (pipeline_rooted_at('~nosuchuser-{env}/code'), pipeline_root),
-        (pipeline_rooted_at('/srv/salesdata'), lambda p: resolve_from_root(p, '~nosuchuser-{env}/code')),
-    ],
-    ids=['root', 'declared path'],
-)
-def test_an_unresolvable_value_exits_rather_than_raising(pipeline, resolve):
+@pytest.mark.parametrize('field', ['resolve_paths_from', 'source_dir'])
+def test_a_templated_home_resolves_to_a_fault_rather_than_a_traceback(tmp_path, field):
+    templated = '~nosuchuser-{env}/code'
+    pipeline = pipeline_rooted_at(templated) if field == 'resolve_paths_from' else rooted_pipeline_naming(tmp_path, templated)
     # A `{env}` defers the `~` check past load, and nothing re-validates on the read path:
     # render_env_model runs per resource inside a verb, and validate, show and list never call
-    # it. A bare ValueError from either door tracebacks out of all three.
+    # it. Raising here reached the reader as a traceback; exiting here reached a --json caller
+    # as zero bytes on a document its command had already committed to emitting.
     #
-    # Both doors, because fixing the root alone is the shape this review kept finding — a guard
-    # covering the half the bug was reported in.
+    # Both doors, because fixing the root alone is the shape these reviews kept finding — a
+    # guard covering the half the bug was reported in.
     set_active_environment('prod', '--env')
     try:
-        with pytest.raises(typer.Exit) as exit_info:
-            resolve(pipeline)
-        assert exit_info.value.exit_code == 1
+        faults = pipeline_path_faults('p', pipeline, on_disk=True)
     finally:
         set_active_environment('dev', 'default')
+
+    assert [(f.site.field, f.fault) for f in faults] == [(field, PathFault.UNRESOLVABLE_HOME)]
+
+
+def test_resolution_never_raises_so_the_renderers_reach_a_faulty_value():
+    # The other half of the same property. `config show` and `list` resolve every declared path
+    # without running the fault walk first, so a total resolver is what keeps them printing.
+    pipeline = pipeline_rooted_at('~nosuchuser/code')
+
+    assert pipeline_root(pipeline) == Path('~nosuchuser/code')
+    assert resolve_from_root(pipeline, 'x.py') == Path('~nosuchuser/code/x.py')
 
 
 def test_a_substituted_value_that_fails_validation_exits_rather_than_raising():
     # render_env_model re-validates, so a config that loaded can still fail inside a verb. A
     # bare ValidationError reaches the reader as a pydantic traceback naming the model rather
-    # than the key they typed.
-    pipeline = PipelineConfig.model_validate({'lambdas': {'fn': {'name': 'n', 'source_dir': '~{env}/code'}}})
-    set_active_environment('nosuchuser', '--env')
+    # than the key they typed. No shipped model carries a validator that a substitution can
+    # trip, so the boundary is exercised against one written here — an untestable guard and a
+    # test that cannot fail are the same defect from two sides.
+    class Fussy(StrictModel):
+        name: str
+
+        @field_validator('name')
+        @classmethod
+        def never_prod(cls, value: str) -> str:
+            if 'prod' in value:
+                raise ValueError('refuses prod')
+            return value
+
+    set_active_environment('prod', '--env')
     try:
         with pytest.raises(typer.Exit) as exit_info:
-            render_env_model(pipeline.lambdas['fn'])
+            render_env_model(Fussy(name='sales-{env}'))
         assert exit_info.value.exit_code == 1
     finally:
         set_active_environment('dev', 'default')
