@@ -28,6 +28,7 @@ from dectl.output import console
 from dectl.output import error
 from dectl.output import format_duration
 from dectl.output import info
+from dectl.values import s3_uri
 
 # Glue table parameters that mark a catalog entry as Iceberg and point at its metadata file.
 TABLE_TYPE_KEY = 'table_type'
@@ -156,7 +157,7 @@ def read_metadata_object(s3_client, location: str, database: str, table: str) ->
     except ClientError as exc:
         code = exc.response.get('Error', {}).get('Code', 'unknown')
         error(f'cannot read the metadata file for {database}.{table} ({code})')
-        error(f'  s3://{bucket}/{key}')
+        error(f'  {s3_uri(bucket, key)}')
         error('  the catalog points here, so reading the table needs s3:GetObject on that key')
         raise typer.Exit(1) from exc
 
@@ -167,7 +168,7 @@ def read_metadata_object(s3_client, location: str, database: str, table: str) ->
         document = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         error(f'the metadata file for {database}.{table} is not readable JSON')
-        error(f'  s3://{bucket}/{key}')
+        error(f'  {s3_uri(bucket, key)}')
         raise typer.Exit(1) from exc
     return TableMetadata(document=document, location=location)
 

@@ -119,6 +119,15 @@ def join_key(prefix: str, name: str) -> str:
     return f'{prefix}/{name}'
 
 
+def bucket_uri(bucket: str) -> str:
+    """A bucket's own URI, with no key and no trailing slash.
+
+    A different shape from `s3_uri`, not a special case of it. `s3 ALIAS uri` is documented for
+    `"$(dectl … uri)/file.txt"`, so a trailing slash there produces a doubled separator in the
+    caller's command — which is the same malformation `key_fault` exists to refuse."""
+    return f's3://{bucket}'
+
+
 def s3_uri(bucket: str, key: str) -> str:
     """How an S3 location is spelled, from the bucket and the key.
 

@@ -1,3 +1,4 @@
+import pytest
 from typer.testing import CliRunner
 
 from dectl.commands.s3 import make_s3_app
@@ -73,3 +74,43 @@ def test_export_prefix_overrides_variable_name():
 
     assert result.exit_code == 0
     assert "export ds_raw='s3://my-raw-bucket'" in result.stdout
+
+
+@pytest.mark.parametrize('argv', [['export'], ['raw', 'uri'], ['raw', 'mount']])
+def test_every_verb_that_hands_a_bucket_name_out_refuses_one_s3_cannot_address(argv):
+    # `config validate` refused this name and no verb acting on it did. `s3 export` is
+    # documented for `eval "$(...)"`, so the name landed in the caller's shell; `mount` passed
+    # it to mount-s3, whose message names neither the config key nor the pipeline.
+    config = make_config({'raw': 'My_Bad_Bucket'})
+    app = make_s3_app('proj', config.pipelines['proj'], config)
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 1
+    assert 'is not a name S3 will accept' in result.stderr
+    # Nothing on stdout, so a caller evaluating it evaluates nothing rather than a broken
+    # assignment carrying a name that can never resolve.
+    assert result.stdout == ''
+
+
+def test_export_refuses_before_printing_any_of_the_assignments():
+    # One bad name among good ones takes the whole run, rather than leaving the caller's shell
+    # holding the buckets that came before it in iteration order.
+    config = make_config({'raw': 'fine-raw-bucket', 'bad': 'My_Bad_Bucket', 'curated': 'fine-curated'})
+    app = make_s3_app('proj', config.pipelines['proj'], config)
+
+    result = runner.invoke(app, ['export'])
+
+    assert result.exit_code == 1
+    assert result.stdout == ''
+
+
+def test_a_bucket_uri_carries_no_trailing_slash():
+    # `s3 ALIAS uri` is documented for `"$(dectl … uri)/file.txt"`, so a trailing slash here
+    # produces the doubled separator `key_fault` exists to refuse.
+    config = make_config({'raw': 'my-raw-bucket'})
+    app = make_s3_app('proj', config.pipelines['proj'], config)
+
+    result = runner.invoke(app, ['raw', 'uri'])
+
+    assert result.stdout.strip() == 's3://my-raw-bucket'
