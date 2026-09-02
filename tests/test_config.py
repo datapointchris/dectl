@@ -16,8 +16,11 @@ from pydantic import field_validator
 from dectl.config import CONFIG_LOAD_ERRORS
 from dectl.config import TEMPLATE_CONFIG
 from dectl.config import DectlConfig
+from dectl.config import Defaults
 from dectl.config import GlueJobConfig
 from dectl.config import IcebergTableConfig
+from dectl.config import JenkinsConfig
+from dectl.config import JenkinsJobConfig
 from dectl.config import LambdaConfig
 from dectl.config import MonitorConfig
 from dectl.config import PipelineConfig
@@ -25,9 +28,11 @@ from dectl.config import ResourceModel
 from dectl.config import StepFunctionConfig
 from dectl.config import StrictModel
 from dectl.config import config_error_headline
+from dectl.config import declared_keys
 from dectl.config import declared_names
 from dectl.config import declared_paths
 from dectl.config import declared_values
+from dectl.config import declares_nothing
 from dectl.config import describe_config_error
 from dectl.config import load_config
 from dectl.config import pipeline_root
@@ -36,6 +41,7 @@ from dectl.config import resolve_from_root
 from dectl.env import render_env_model
 from dectl.env import set_active_environment
 from dectl.env import substitute_env
+from dectl.pipeline_view import aws_names_only
 from dectl.values import FAULT_WORDING
 from dectl.values import SPELLING_FAULTS
 from dectl.values import ConfigFault
@@ -317,6 +323,14 @@ def test_config_path_falls_back_to_dot_config_when_xdg_is_unset():
 # belongs in none. A name-based heuristic cannot do that job: it read six words plus a literal
 # `scripts`, so `asl`, `handler`, `template`, `manifest` and `entrypoint` were all invisible.
 UNCHECKED_FIELDS = {
+    (Defaults, 'account_id'): 'the AWS account; every call is made against it and AWS reports a mismatch',
+    (Defaults, 'region'): 'an AWS region; botocore rejects one that does not exist',
+    (Defaults, 'environment'): 'the default {env} substitution, which names nothing on its own',
+    (Defaults, 'aws_profile'): 'a local AWS profile; make_session is where a missing one is reported',
+    (JenkinsConfig, 'url'): 'a Jenkins base URL; the request is what fails on a wrong one',
+    (JenkinsConfig, 'user'): 'a Jenkins username; Jenkins authenticates it',
+    (JenkinsConfig, 'token'): 'a Jenkins API token; Jenkins authenticates it',
+    (JenkinsJobConfig, 'job_path'): 'a path within Jenkins, not on this machine or in S3',
     (GlueJobConfig, 'name'): 'a Glue job name; GetJob is what says whether it exists',
     (GlueJobConfig, 'role'): 'an IAM role ARN; UpdateJob validates it',
     (GlueJobConfig, 'arguments'): 'Glue job arguments, passed through; Glue validates them',
@@ -340,17 +354,32 @@ def string_fields(model: type[BaseModel]) -> set[str]:
     return {name for name, field in model.model_fields.items() if field.annotation in STRING_ANNOTATIONS}
 
 
-def resource_models() -> set[type[ResourceModel]]:
-    """Every `ResourceModel` a pipeline can hold, walked the way `resource_members` walks one.
+def config_models(root: type[BaseModel] = DectlConfig) -> set[type[StrictModel]]:
+    """Every model the config tree holds, from the top of it down.
+
+    Seeded from `DectlConfig` rather than from `PipelineConfig`, and recursive. Seeding from the
+    pipeline put `Defaults`, `JenkinsConfig` and `JenkinsJobConfig` outside the walk entirely,
+    so a string field on any of them was unclassified and unreported — and `aws_profile` is the
+    field that decides which AWS account a deploy reaches.
 
     Both a bare annotation and a `dict[str, Model]` one, because the code reaches both. Walking
     only `get_args` left a declaration on `monitor` — a bare `MonitorConfig` field — inert with
     the whole suite green, which is the guard reporting complete on a member it cannot see."""
-    found: set[type[ResourceModel]] = {PipelineConfig}
-    for field in PipelineConfig.model_fields.values():
-        candidates = [field.annotation, *get_args(field.annotation)]
-        found |= {arg for arg in candidates if isinstance(arg, type) and issubclass(arg, ResourceModel)}
+    found: set[type[StrictModel]] = set()
+    pending = [root]
+    while pending:
+        model = pending.pop()
+        for field in model.model_fields.values():
+            for arg in [field.annotation, *get_args(field.annotation)]:
+                if isinstance(arg, type) and issubclass(arg, StrictModel) and arg not in found:
+                    found.add(arg)
+                    pending.append(arg)
     return found
+
+
+def resource_models() -> set[type[ResourceModel]]:
+    """The subset of the config tree that declares — every `ResourceModel` a pipeline holds."""
+    return {model for model in config_models() if issubclass(model, ResourceModel)}
 
 
 def test_the_model_walk_reaches_every_resource_kind():
@@ -396,39 +425,90 @@ def test_every_declared_path_field_reaches_declared_paths():
     assert declared_on_models - enumerated == set()
 
 
-@pytest.mark.parametrize(
-    ('owner', 'raw', 'resource', 'alias'),
-    [
-        # Held in a dict, keyed by alias — the shape the design was written around.
-        (LambdaConfig, {'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}}}, 'lambda', 'fn'),
-        # Held as a bare field, with no alias. Three consumers walked their own way to a set
-        # that excluded this, and each reported no fault rather than going red.
-        (MonitorConfig, {'monitor': {'lambdas': ['a']}}, 'monitor', ''),
-        # The pipeline declares too, and is not in `resource_members` at all.
-        (PipelineConfig, {'resolve_paths_from': '/srv/x'}, 'pipeline', ''),
-    ],
-)
-def test_every_declaration_consumer_sees_every_member_shape(monkeypatch, owner, raw, resource, alias):
+# Every mechanism that reads a declaration, and the sites each one emits. Named individually
+# rather than sampled: a consumer absent from this table is one nothing holds to the property,
+# and two entries where one calls the other assert a single mechanism twice.
+SITES_OF = {
+    'PATH_FIELDS': {
+        'declared_values': lambda p: {(s.resource, s.alias, s.field) for s, _, _ in declared_values(p, 'PATH_FIELDS')},
+        'declared_paths': lambda p: {(d.site.resource, d.site.alias, d.site.field) for d in declared_paths(p)},
+    },
+    'KEY_FIELDS': {
+        'declared_values': lambda p: {(s.resource, s.alias, s.field) for s, _, _ in declared_values(p, 'KEY_FIELDS')},
+        'declared_keys': lambda p: {(k.site.resource, k.site.alias, k.site.field) for k in declared_keys(p)},
+    },
+    'BUCKET_FIELDS': {
+        'declared_values': lambda p: {(s.resource, s.alias, s.field) for s, _, _ in declared_values(p, 'BUCKET_FIELDS')},
+        'declared_names': lambda p: {(n.site.resource, n.site.alias, n.site.field) for n in declared_names(p)},
+    },
+}
+
+# One config per member shape, and the field each shape's owner is given a declaration on.
+SHAPES = [
+    ('dict-held', LambdaConfig, {'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}}}, '', 'source_dir'),
+    ('bare-field', MonitorConfig, {'monitor': {'lambdas': ['a']}}, '', 'lambdas'),
+    ('on-the-pipeline', PipelineConfig, {'resolve_paths_from': '/srv/x'}, '', 'resolve_paths_from'),
+]
+SHAPES = [(name, owner, raw, 'fn' if owner is LambdaConfig else '', field) for name, owner, raw, _, field in SHAPES]
+MEMBER_SHAPES = [shape for shape in SHAPES if shape[1] is not PipelineConfig]
+
+
+@pytest.mark.parametrize(('declaration', 'consumers'), SITES_OF.items(), ids=list(SITES_OF))
+@pytest.mark.parametrize(('shape', 'owner', 'raw', 'alias', 'field'), SHAPES, ids=[s[0] for s in SHAPES])
+def test_every_declaration_consumer_sees_every_member_shape(monkeypatch, declaration, consumers, shape, owner, raw, alias, field):
     # `declaring_members` is the one walk, and this is what keeps it one. A consumer that
     # traverses for itself reaches a narrower set, and the failure is silent in every direction:
     # a value nothing enumerates is a value nothing checks, and no check means no fault.
-    field = next(iter(owner.PATH_FIELDS), None) or 'lambdas'
-    monkeypatch.setattr(owner, 'PATH_FIELDS', {field: PathKind.DIRECTORY})
+    declared = {field: PathKind.DIRECTORY} if declaration == 'PATH_FIELDS' else frozenset({field})
+    monkeypatch.setattr(owner, declaration, declared)
+    # `buckets` sits on the pipeline and is `s3` to a reader, so its rows carry that word
+    # rather than the owner's own.
+    expected = (owner.site_resource(field), alias, field)
     pipeline = PipelineConfig.model_validate(raw)
 
-    reached = {
-        'declared_paths': {(p.site.resource, p.site.alias, p.site.field) for p in declared_paths(pipeline)},
-        'declared_values': {(s.resource, s.alias, s.field) for s, _, _ in declared_values(pipeline, 'PATH_FIELDS')},
-    }
+    for name, sites in consumers.items():
+        assert expected in sites(pipeline), f'{name} never saw {expected} for a {shape} member'
 
-    for consumer, sites in reached.items():
-        assert (resource, alias, field) in sites, f'{consumer} never saw {resource}/{alias} {field}'
+
+@pytest.mark.parametrize(('shape', 'owner', 'raw', 'alias', 'field'), MEMBER_SHAPES, ids=[s[0] for s in MEMBER_SHAPES])
+def test_declares_nothing_sees_every_member_shape(monkeypatch, shape, owner, raw, alias, field):
+    # Its own entry, because it reports the values the others skip: a declared field holding
+    # nothing yields no row anywhere else, so nothing else can stand in for it.
+    monkeypatch.setattr(owner, 'PATH_FIELDS', {field: PathKind.DIRECTORY})
+    blanked = {**raw}
+    blanked['monitor' if owner is MonitorConfig else 'lambdas'] = (
+        {'lambdas': []} if owner is MonitorConfig else {'fn': {'name': 'n', 'source_dir': ''}}
+    )
+    pipeline = PipelineConfig.model_validate(blanked)
+
+    sites = {(s.resource, s.alias, s.field) for s in declares_nothing(pipeline)}
+
+    assert (owner.site_resource(field), alias, field) in sites, f'declares_nothing missed a {shape} member'
+
+
+@pytest.mark.parametrize(('shape', 'owner', 'raw', 'alias', 'field'), SHAPES, ids=[s[0] for s in SHAPES])
+def test_the_env_guard_dump_drops_a_local_only_field_of_every_member_shape(monkeypatch, shape, owner, raw, alias, field):
+    # `aws_names_only` is the sixth consumer and it does not share the walk: it dumps the
+    # pipeline as a container and filters what comes back, rather than enumerating values filed
+    # inside members. That is a different operation, so it is asserted on its own terms — a
+    # field declared local-only is absent from the dump — rather than made to look uniform.
+    monkeypatch.setattr(owner, 'PATH_FIELDS', {field: PathKind.DIRECTORY})
+    config = DectlConfig.model_validate({'defaults': {'account_id': '1'}, 'pipelines': {'p': raw}})
+    dumped = aws_names_only(config.pipelines['p'])
+
+    if owner is PipelineConfig:
+        assert field not in dumped
+    elif owner is MonitorConfig:
+        assert field not in dumped['monitor']
+    else:
+        assert field not in dumped['lambdas']['fn']
 
 
 def test_the_scope_guard_accepts_every_resource_its_own_rows_carry():
-    # The guard refused `s3` — the word `declared_names` stamps on every `buckets` row — because
-    # it walked the members, and `buckets` holds no model to be a member. A door scoped by a
-    # name its own output uses got a traceback rather than a refusal.
+    # The guard reads its vocabulary off the rows rather than off the members, so it cannot
+    # refuse a word its own output uses. A `buckets` row is labelled `s3` and its owner is the
+    # pipeline, so a guard walking members refuses `s3` and an `s3`-scoped door gets a traceback
+    # rather than a refusal.
     pipeline = PipelineConfig.model_validate(
         {
             'buckets': {'raw': 'Bad_Name'},
@@ -438,6 +518,9 @@ def test_the_scope_guard_accepts_every_resource_its_own_rows_carry():
     )
     emitted = {p.site.resource for p in pipeline_value_faults('p', pipeline, on_disk=False)}
     emitted |= {n.site.resource for n in declared_names(pipeline)}
+
+    # Named outright, because an empty set satisfies the loop below and the loop is the test.
+    assert emitted == {'s3', 'glue'}
 
     for resource in emitted:
         pipeline_value_faults('p', pipeline, on_disk=False, resource=resource)

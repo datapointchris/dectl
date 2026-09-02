@@ -7,7 +7,9 @@ import pytest
 from dectl.config import ROOT_SITE
 from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
+from dectl.config import IcebergTableConfig
 from dectl.config import LambdaConfig
+from dectl.config import StepFunctionConfig
 from dectl.config import declared_paths
 from dectl.config import pipeline_root
 from dectl.env import active_environment
@@ -17,6 +19,7 @@ from dectl.pipeline_view import pipeline_to_dict
 from dectl.pipeline_view import render_pipeline
 from dectl.pipeline_view import resolved_paths
 from dectl.pipeline_view import resource_types
+from dectl.values import PathKind
 
 
 def make_pipeline() -> DectlConfig:
@@ -341,6 +344,52 @@ def test_every_resolved_path_reaches_both_renderers():
         assert section is not None, f'{resource} has resolved paths and no section in --json'
         assert alias in section, f'{resource}/{alias} has resolved paths and no row in --json'
         assert section[alias]['paths'] == fields
+
+
+@pytest.mark.parametrize(
+    ('kind', 'owner', 'field'),
+    [
+        ('glue', GlueJobConfig, 'scripts'),
+        ('lambda', LambdaConfig, 'source_dir'),
+        ('sfn', StepFunctionConfig, 'name'),
+        ('iceberg', IcebergTableConfig, 'table'),
+    ],
+)
+def test_every_resolved_path_reaches_the_human_renderer(capsys, monkeypatch, kind, owner, field):
+    # The other renderer, asserted separately because it is a separate hand-written site:
+    # `render_pipeline` calls `print_paths` once per resource kind, so a kind whose call is
+    # missing resolves and prints nothing while `--json` still carries it.
+    #
+    # A declaration is put on each kind rather than relying on the ones that exist. `sfn` and
+    # `iceberg` declare no path field today, so a test reading only what they already resolve
+    # loops over nothing and passes with their `print_paths` call deleted — which is the state
+    # this test was written to end.
+    monkeypatch.setattr(owner, 'PATH_FIELDS', {field: PathKind.FILE})
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '1'},
+            'pipelines': {
+                'salesdata': {
+                    'resolve_paths_from': '/srv/salesdata',
+                    'glue_jobs': {'copy': {'name': 'j', 'script_bucket': 'b', 'scripts': ['c.py'], 'role': 'r'}},
+                    'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}},
+                    'step_functions': {'flow': {'name': 'm'}},
+                    'iceberg_tables': {'events': {'database': 'd', 'table': 't'}},
+                }
+            },
+        }
+    )
+    pipeline = config.pipelines['salesdata']
+    resolved = resolved_paths(pipeline)
+    assert any(resource == kind for resource, _ in resolved), f'{kind} declares a path and resolves none'
+
+    render_pipeline('salesdata', pipeline)
+    printed = capsys.readouterr().out
+
+    for (resource, alias), fields in resolved.items():
+        for name, paths in fields.items():
+            for path in paths:
+                assert path in printed, f'{resource}/{alias} {name} resolves to {path} and is printed nowhere'
 
 
 def test_a_bare_field_member_replaces_its_collection_in_the_env_guard_dump():
