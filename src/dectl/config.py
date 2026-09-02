@@ -115,10 +115,9 @@ class ResourceModel(StrictModel):
     `KEY_FIELDS` names each field a glue S3 key is built from. A field can be in both — a glue
     script is uploaded from disk and named by a key built from what was written.
 
-    Declared here, beside the fields, because three mechanisms read them and each one used to
-    carry its own copy: `declared_paths`, `declared_keys` and `render_env_model`'s env-effect
-    guard. A resource whose paths are listed in two of the three is checked and never excluded,
-    or excluded and never checked, and both read as success."""
+    Three mechanisms read them: `declared_paths`, `declared_keys` and `env.aws_names_of`. A
+    resource declared to two of the three is checked and never excluded from the env-effect
+    guard, or excluded and never checked, and both read as success."""
 
     RESOURCE: ClassVar[str] = ''
     PATH_FIELDS: ClassVar[Mapping[str, PathKind]] = {}
@@ -393,8 +392,8 @@ def pipeline_path_faults(
         return UnusablePath(pipeline_name, site, path, fault, configured)
 
     # Machine-independent, so these run whatever `on_disk` says and whatever the root turns out
-    # to be. An absent checkout hid them before, which made declaring a root on a box that never
-    # holds one report *less* than declaring none.
+    # to be. Gated on the root, declaring one on a box that never holds the checkout would
+    # report less than declaring none.
     problems = [
         row(site, None, PathFault.DECLARES_NOTHING, configured) for site, configured in declares_nothing(pipeline, alias) if in_scope(site)
     ]

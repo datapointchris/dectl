@@ -37,9 +37,9 @@ def aws_names_only(pipeline: PipelineConfig) -> dict[str, Any]:
     environment. `env.aws_names_of` answers the same question one level down, for the resource a
     verb resolves, and both read each model's `PATH_FIELDS`.
 
-    The pipeline's own root is dropped through `declared_paths` like everything else. Naming it
-    in `model_dump(exclude=...)` kept the output right while the declaration did nothing, which
-    is a mechanism that reads as load-bearing and is not."""
+    The pipeline's own root goes through that declaration like every other field. Naming it in
+    `model_dump(exclude=...)` instead keeps the output right while the declaration does nothing,
+    which is a mechanism that reads as load-bearing and is not."""
     dumped = aws_names_of(pipeline)
     for collection, alias, member in resource_members(pipeline):
         dumped[collection][alias] = aws_names_of(member)

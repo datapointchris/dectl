@@ -154,9 +154,8 @@ def make_lambda_function_app(
         # key — rather than as a bare path. `zip_lambda` refuses the same directory a moment
         # later and can only say the path, because the config key does not reach it.
         #
-        # Both refusals run before the first line of output. `zipping <path>` printed above them
-        # announced work that then did not happen, and the glue verb was reordered for that rule
-        # in this same change.
+        # Both refusals run before the first line of output, so nothing announces work that
+        # then does not happen.
         refuse_unusable_paths(pipeline_path_faults(pipeline_name, pipeline, on_disk=True, resource='lambda', alias=alias))
         source = resolve_from_root(pipeline, fn.source_dir)
         zip_path = zip_lambda(source)

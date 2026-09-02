@@ -25,11 +25,7 @@ def expand_home(value: str) -> Path:
     """`~` expansion, total: a `~user` naming nobody comes back as the literal string.
 
     `Path.expanduser()` raises RuntimeError for a `~user` that resolves to no home — `~code/x`,
-    a missing slash, is the likeliest typo in a path key. Nothing in this module raises for it
-    and nothing exits: `home_fault` is the reporting half, and it is asked before the value is
-    used. A resolver that could exit is a config module owning a command's stream contract, and
-    the failure it produced was a `--json` verb writing zero bytes on a path its caller had
-    already decided would emit a document."""
+    a missing slash, is the likeliest typo in a path key. `home_fault` is the reporting half."""
     try:
         return Path(value).expanduser()
     except RuntimeError:
@@ -37,13 +33,7 @@ def expand_home(value: str) -> Path:
 
 
 class PathKind(StrEnum):
-    """What a declared path has to be on disk.
-
-    An enum rather than an `is_dir` boolean because every construction site passed it
-    positionally beside a second boolean, where swapping the pair type-checks and both
-    directions fail silently — a glue script checked as a directory reports the wrong fault on
-    every deploy, and a lambda source checked as a key refuses the absolute path the config
-    explicitly allows."""
+    """What a declared path has to be on disk."""
 
     FILE = 'file'
     DIRECTORY = 'directory'
@@ -95,12 +85,10 @@ KEY_FORM = 'a glue key is written as plain relative segments: jobs/copy.py, neve
 
 
 class PathSite(NamedTuple):
-    """Where in a config one path-shaped value lives.
+    """Where in a config one path-shaped value lives, and how it is named to a reader.
 
-    The three components are separate fields and `label` is derived from them, in one place.
-    Folding them into a sentence and recovering them with a split makes a string built for a
-    human to read load-bearing for a lookup. Carried by both `DeclaredPath` and `UnusablePath`
-    so the derivation is not written twice, one class apart."""
+    Carried by `DeclaredPath` and `UnusablePath` alike, so `label` has one definition. An alias
+    holding a space is what separates these three fields from a `label` a consumer splits."""
 
     resource: str
     # Empty for `resolve_paths_from`, which belongs to the pipeline rather than to a resource.
@@ -131,9 +119,8 @@ class DeclaredPath(NamedTuple):
 class DeclaredKey(NamedTuple):
     """One configured string an S3 key is built from, with `{env}` already substituted.
 
-    Separate from `DeclaredPath` because the two questions have different subjects. A
-    `script_prefix` shapes a key and names nothing on disk, so it cannot be a path at all — and
-    while the two were one record it had nowhere to be checked."""
+    A `script_prefix` shapes a key and names nothing on disk, so it is one of these and not a
+    `DeclaredPath`. A glue script is both."""
 
     site: PathSite
     value: str
@@ -144,10 +131,9 @@ class UnusablePath(NamedTuple):
 
     pipeline: str
     site: PathSite
-    # Where the value resolved to, or None when it resolves to nothing on this machine — a
-    # `script_prefix` is an S3 key prefix and a glue job declaring no scripts has no value at
-    # all. Typed `Path` it was filled with an S3 prefix, and for `script_prefix: ""` the
-    # published value was `"."`, which is a path the config never named.
+    # Where the value resolved to, or None when it resolves to nothing on this machine: a
+    # `script_prefix` is an S3 key prefix, and a glue job declaring no scripts has no value at
+    # all. `Path('')` is `.`, so a non-optional field publishes a path the config never named.
     path: Path | None
     fault: PathFault
     # The string as written. A key fault is about the spelling, and `path` has already had the
@@ -159,10 +145,9 @@ class UnusablePath(NamedTuple):
     def shown(self) -> str | None:
         """The value to show the reader, or None when the fault is that there is no value.
 
-        What they wrote for a spelling fault, the resolved path for a fault about what is on
-        disk. A spelling fault is quoted, because the characters are the finding: bare, a
-        trailing slash sits at the end of a sentence where nothing marks it, and an empty
-        prefix shows as nothing at all."""
+        What they wrote for a spelling fault, the resolved path otherwise. A spelling fault is
+        quoted because the characters are the finding: bare, a trailing slash sits at the end of
+        a sentence where nothing marks it, and an empty prefix shows as nothing at all."""
         if self.fault in KEY_FAULTS:
             return repr(self.configured)
         if self.path is not None:
@@ -218,11 +203,10 @@ def path_fault(path: Path, expects: PathKind) -> PathFault | None:
 def key_fault(configured: str) -> PathFault | None:
     """Why this configured string cannot become an S3 key, or None when it can.
 
-    Every segment has to be a plain name. Stated positively rather than as a round trip against
-    `PurePosixPath`, which normalises `.`, `//` and a trailing slash away — the very shapes S3
-    stores literally — and so agrees with the raw string on the inputs that matter. A bare `.`
-    is where that agreement was total: it is its own normalised form, so the comparison passed
-    it while `script_key` built `s3://bucket/./jobs/copy.py`.
+    Every segment has to be a plain name, tested as such. A round trip against `PurePosixPath`
+    is the trap: it normalises `.`, `//` and a trailing slash away — the very shapes S3 stores
+    literally — so it agrees with the raw string on every input that matters, and a bare `.` is
+    its own normalised form.
 
     A leading `~` escapes the root the way an absolute path does. `PurePosixPath` calls it
     relative and holds no `..`, so both of the other arms miss it, and it resolves through
@@ -261,10 +245,9 @@ def recovery_lines(problems: list[UnusablePath]) -> list[str]:
 def refuse_unusable_paths(problems: list[UnusablePath]) -> None:
     """Print every unusable path and exit, or return when there are none.
 
-    The one reporter for the deploy doors, so a glue deploy, a lambda deploy and `config
-    validate` say the same sentence about the same fault. A door composing its own message
-    instead diverges the moment the fault set grows, and the reader cannot tell whether two
-    different sentences describe one problem."""
+    The one reporter, and the one place in the path domain that exits — so a glue deploy, a
+    lambda deploy and `config validate` say the same sentence about the same fault, and nothing
+    beneath a command that has committed to emitting a document can cut it short."""
     if not problems:
         return
     for problem in problems:

@@ -140,9 +140,8 @@ def config_validate(
         config was clean, unreadable, or absent — so a caller that has dropped the exit status is
         told nothing was wrong with a config that was never read.
 
-        `NoReturn`, because every path through it raises. Annotated `-> None` it read as
-        fall-through, and one of its two call sites carried a `raise typer.Exit(1)` afterwards
-        that could never run while the other did not."""
+        `NoReturn`, because every path through it raises: `-> None` reads as fall-through and
+        invites a call site to guard against a return that cannot happen."""
         error(message)
         if as_json:
             emit_json({'outcome': outcome, 'unusable_paths': []})

@@ -90,11 +90,10 @@ def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: lis
     checked them too, and repeating it here is what keeps that promise a property of this
     function rather than of whoever calls it.
 
-    The set uploaded has to be the set the definition names. Taking `sources` from the caller
-    moved that from a property held by construction — this function used to iterate
-    `glue_job.scripts` itself — to one the caller can break: a set omitting `scripts[0]` whose
-    every path exists uploads cleanly while `build_job_update` emits a `ScriptLocation` nothing
-    wrote, which is exactly what `script_key` exists to prevent."""
+    The set uploaded has to be the set the definition names, and taking `sources` from the
+    caller makes that breakable: a set omitting `scripts[0]` whose every path exists uploads
+    cleanly while `build_job_update` emits a `ScriptLocation` nothing wrote, which is what
+    `script_key` exists to prevent."""
     named = {script for script, _ in sources}
     if named != set(glue_job.scripts):
         error(f'{glue_job.name}: asked to upload {sorted(named)}, but the job definition names {sorted(glue_job.scripts)}')

@@ -108,9 +108,9 @@ path-bearing resource has to meet, which the docstrings do not state.
 
 - **A resource declares its own path and key fields, on the model.** `ResourceModel.PATH_FIELDS`
   maps a field to the `PathKind` it must be; `KEY_FIELDS` names the fields a glue S3 key is
-  built from. `declared_paths`, `declared_keys` and `env.aws_names_of` all read them, and each
-  used to carry its own copy — a resource listed in two of the three is checked and never
-  excluded, or excluded and never checked, and both read as success.
+  built from. `declared_paths`, `declared_keys` and `env.aws_names_of` all read them, so a
+  resource declared to two of the three is checked and never excluded from the env-effect guard,
+  or excluded and never checked — and both read as success.
   `test_every_path_field_on_the_models_is_declared` is what holds it.
 - **Displaying one is a second edit, and only that.** `pipeline_to_dict` and `render_pipeline`
   name a key per resource (`script_paths`, `source_path`), so a new resource's path needs a row
@@ -125,7 +125,8 @@ path-bearing resource has to meet, which the docstrings do not state.
   silently. `pipeline_root` is the fallback half: no `resolve_paths_from` means `Path.cwd()`.
 - **A fault about how a value is *written*, or about what this machine holds, belongs to
   `config validate` and to the deploy, never to a field validator.** `key_fault`'s docstring
-  carries why. `UNRESOLVABLE_HOME` is the member that used to be a validator and is not.
+  carries why. `UNRESOLVABLE_HOME` is the member that most looks like a validator's job and
+  is not: as one it could only reach the values carrying no `{env}`.
 - **A deploy door scopes `pipeline_path_faults` by argument, never by filtering its result.**
   Filtering drops the row naming the absent root, which is the cause of every row it kept.
 - **Nothing in `paths.py` or the walk exits the process.** A refusal raised beneath a command
@@ -229,10 +230,10 @@ and an eval'd `s3 export` stay clean.
   diff and confirms. `--plan` shows it and exits without uploading; `--yes` skips the prompt for
   the pre-Terraform loop. `job_definition_changes` also reports keys dectl *drops*, since a
   detached connection is invisible in a diff that only walks the new definition.
-- **`connections` in config is authoritative, not additive** — it used to union with whatever the
-  job already had, which meant a stale entry could never be removed and a connection renamed in
-  Terraform got silently reattached under its old name on every deploy. `None` (key absent) means
-  dectl does not manage connections; `[]` detaches all.
+- **`connections` in config is authoritative, not additive** — unioning with whatever the job
+  already has makes a stale entry immortal and silently reattaches a connection renamed in
+  Terraform under its old name on every deploy. `None` (key absent) means dectl does not manage
+  connections; `[]` detaches all.
 - **Lambda `$LATEST` vs. published alias** — `deploy` without `--publish` only moves `$LATEST`;
   alias-following triggers keep running the old published version until you `--publish` (which
   moves the configured `live_alias`). `run` always targets `$LATEST`.
@@ -263,10 +264,10 @@ and an eval'd `s3 export` stay clean.
   `LogGroupCursor` (moving `startTime`, boundary dedup by `eventId`), never a named stream.
   Lambda writes each execution environment to a new stream; Glue creates its *error* stream only
   when something first writes to stderr. `tail_glue_run` isolates a run with
-  `logStreamNamePrefix=<run id>` on the two shared Glue groups. It used to wait for the streams
-  to exist via `describe_log_streams` — sequentially, output then error — which cost up to two
-  minutes of silence before the first line whenever a job never wrote to stderr, and pinned the
-  stream list so a traceback landing in a later-created error stream was never shown at all.
+  `logStreamNamePrefix=<run id>` on the two shared Glue groups. Waiting for the streams to exist
+  via `describe_log_streams` is the trap: done sequentially, output then error, it costs up to
+  two minutes of silence before the first line whenever a job never writes to stderr, and it
+  pins the stream list so a traceback landing in a later-created error stream never shows at all.
 - **`glue run --follow` stops on its own and exits non-zero on failure** — `GlueRunWatcher.finished`
   is handed to the tailer as a predicate (it only holds a logs client and cannot ask Glue
   anything), and the watcher keeps the last state so the caller can set the exit code without a
