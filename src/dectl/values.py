@@ -157,7 +157,8 @@ ROOT_FORM = (
 )
 BUCKET_FORM = (
     'an S3 bucket name is 3-63 characters of lowercase letters, digits, dots and hyphens, '
-    'starts and ends with a letter or digit, holds no doubled dot, and is not an IP address'
+    'starts and ends with a letter or digit, holds no doubled dot, and is not an IP address; '
+    'it does not begin xn--, sthree- or amzn-s3-demo-, or end -s3alias, --ol-s3 or --x-s3'
 )
 
 

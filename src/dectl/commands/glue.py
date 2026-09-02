@@ -12,6 +12,7 @@ from dectl.config import GlueJobConfig
 from dectl.config import PipelineConfig
 from dectl.config import pipeline_value_faults
 from dectl.config import resolve_from_root
+from dectl.config import script_key
 from dectl.env import render_env_model
 from dectl.env import substitute_env
 from dectl.logs import tail_glue_run
@@ -42,15 +43,6 @@ def join_uri(bucket: str, prefix: str, script: str) -> str:
     The per-alias help panel reaches this with raw operands, because it is built before `--env`
     is parsed; every other caller goes through `script_uri` with substituted ones."""
     return s3_uri(bucket, join_key(prefix, script))
-
-
-def script_key(glue_job: GlueJobConfig, script: str) -> str:
-    """The S3 key one script is uploaded to, and named by in the job definition.
-
-    The one place this is built. The upload, `ScriptLocation` and `--extra-py-files` all read it,
-    and any two of them disagreeing means Glue fetches an object nothing wrote. Both halves are
-    substituted, because a `{env}` surviving into a key names an object that cannot exist."""
-    return join_key(substitute_env(glue_job.script_prefix), substitute_env(script))
 
 
 def script_uri(glue_job: GlueJobConfig, script: str) -> str:
@@ -101,7 +93,8 @@ def resolve_scripts(pipeline_name: str, pipeline: PipelineConfig, alias: str) ->
     job = pipeline.glue_jobs[alias]
     # One substitution, at the boundary: the name and the path are the same rendering of
     # one script, so nothing downstream can hold two spellings of it.
-    return [ResolvedScript(name, resolve_from_root(pipeline, name)) for name in (substitute_env(s) for s in job.scripts)]
+    names = [substitute_env(script) for script in job.scripts]
+    return [ResolvedScript(name, resolve_from_root(pipeline, name)) for name in names]
 
 
 def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: list[ResolvedScript]) -> None:

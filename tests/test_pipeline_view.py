@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from dectl.commands.glue import script_uri
 from dectl.config import ROOT_SITE
 from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
@@ -226,7 +227,7 @@ def test_render_prints_the_resolved_path_of_every_declared_path(capsys):
 
 def test_a_source_dir_token_does_not_silence_the_no_effect_warning(monkeypatch, capsys):
     # The guard asks whether --env changed an AWS name. Every local path field has to be out of
-    # the dump it reads, not just `repo`, or one of them satisfies the check and silences it.
+    # the dump it reads, not just the root, or one of them satisfies the check and silences it.
     monkeypatch.setattr(active_environment, 'name', 'prod')
     monkeypatch.setattr(active_environment, 'source', '--env')
     monkeypatch.setattr(active_environment, 'warned_about_missing_placeholder', False)
@@ -407,3 +408,35 @@ def test_a_bare_field_member_replaces_its_collection_in_the_env_guard_dump():
 
     assert '' not in dumped
     assert dumped == {'lambdas': ['a'], 'step_functions': ['b']}
+
+
+def test_the_deploy_and_both_renderers_name_one_destination():
+    # Four sites name where a script lands, and they read one builder. Dropping the prefix's
+    # substitution inside it left the suite green while the deploy wrote `s3://b/p-{env}/c.py`
+    # and `config show --json` reported `s3://b/p-dev/c.py` — one file under two names, which
+    # is the failure the whole key surface exists to prevent.
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '1'},
+            'pipelines': {
+                'salesdata': {
+                    'glue_jobs': {
+                        'copy': {
+                            'name': 'j',
+                            'script_bucket': 'b-{env}',
+                            'script_prefix': 'p-{env}',
+                            'scripts': ['c-{env}.py'],
+                            'role': 'r',
+                        }
+                    }
+                }
+            },
+        }
+    )
+    job = config.pipelines['salesdata'].glue_jobs['copy']
+
+    published = pipeline_to_dict('salesdata', config.pipelines['salesdata'])['glue']['copy']
+
+    assert script_uri(job, 'c-{env}.py') == 's3://b-dev/p-dev/c-dev.py'
+    assert published['script_uris'] == ['s3://b-dev/p-dev/c-dev.py']
+    assert '{env}' not in published['script_uris'][0]

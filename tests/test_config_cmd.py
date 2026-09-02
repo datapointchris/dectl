@@ -471,7 +471,7 @@ def test_a_malformed_key_leaves_the_rest_of_the_cli_working(monkeypatch, tmp_pat
     assert json.loads(result.stdout)[0]['pipeline'] == 'salesdata'
 
 
-def test_validate_leaves_a_pipeline_without_a_repo_alone(monkeypatch, tmp_path):
+def test_validate_leaves_a_pipeline_without_a_declared_root_alone(monkeypatch, tmp_path):
     # Its paths resolve against wherever dectl is run from, so their absence here says nothing.
     # Checking them anyway would fail validate on a config that is correct.
     raw = (

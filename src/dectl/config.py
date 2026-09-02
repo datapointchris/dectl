@@ -23,6 +23,7 @@ from dectl.values import ValueSite
 from dectl.values import bucket_fault
 from dectl.values import expand_home
 from dectl.values import home_fault
+from dectl.values import join_key
 from dectl.values import key_fault
 from dectl.values import leaves_root
 from dectl.values import normalised
@@ -380,6 +381,16 @@ def declared_paths(pipeline: PipelineConfig) -> list[DeclaredPath]:
             if value:
                 paths.append(DeclaredPath(site, substitute_env(value), kind))
     return paths
+
+
+def script_key(glue_job: GlueJobConfig, script: str) -> str:
+    """The S3 key one script is uploaded to, and named by in the job definition.
+
+    The one place this is built. The upload, `ScriptLocation`, `--extra-py-files` and both
+    renderers read it, and any two of them disagreeing means Glue fetches an object nothing
+    wrote — or `config show` reports a destination the deploy does not write. Both halves are
+    substituted, because a `{env}` surviving into a key names an object that cannot exist."""
+    return join_key(substitute_env(glue_job.script_prefix), substitute_env(script))
 
 
 def declared_keys(pipeline: PipelineConfig) -> list[DeclaredKey]:

@@ -12,6 +12,7 @@ from rich.syntax import Syntax
 from dectl.config import CONFIG_LOAD_ERRORS
 from dectl.config import CONFIG_PATH
 from dectl.config import TEMPLATE_CONFIG
+from dectl.config import Defaults
 from dectl.config import config_error_outcome
 from dectl.config import config_value_faults
 from dectl.config import init_config
@@ -72,6 +73,11 @@ def config_show(
         return
 
     console.print(f'[bold]config:[/bold] {CONFIG_PATH}')
+    # Derived from the model rather than listed, so a field added to `Defaults` prints without
+    # this being edited. `aws_profile` is the one that decides which AWS account every deploy
+    # below reaches, and a reader could not see it resolved anywhere.
+    for field in Defaults.model_fields:
+        console.print(f'  {field}: {getattr(cfg.defaults, field) or "(unset)"}')
     console.print()
     for name, pipeline in cfg.pipelines.items():
         render_pipeline(name, pipeline)

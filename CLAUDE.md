@@ -114,12 +114,15 @@ which the docstrings do not state.
   — and every one of those reads as success. `test_every_string_field_is_classified` makes a new
   field a decision rather than a default: it is in one of the three, or named in
   `UNCHECKED_FIELDS` with the reason.
-- **Every consumer of a declaration reads `declaring_members`, which is the one walk.** It
+- **Every enumeration of a declaration reads `declaring_members`, which is the one walk.** It
   yields the pipeline itself and then each resource, so the three member shapes — held in a
-  dict, held as a bare field, declared on the pipeline — reach every consumer or none. A
-  consumer that traverses for itself reaches a narrower set, and the failure is silent in both
+  dict, held as a bare field, declared on the pipeline — reach every enumeration or none. One
+  that traverses for itself reaches a narrower set, and the failure is silent in both
   directions: a value nothing enumerates is a value nothing checks, and nothing checked reports
-  no fault. `test_every_declaration_consumer_sees_every_member_shape` is what holds it.
+  no fault. `test_every_declaration_consumer_sees_every_member_shape` names each and drives it.
+  `aws_names_only` is the exception and stays one: it dumps the pipeline as a container and
+  filters what comes back, rather than enumerating values filed inside members. Its own test
+  asserts what it emits.
 - **Adding a path field to a resource that already has a section is the whole edit.** Checking,
   resolution, the env-guard exclusion, the `paths` block in `--json` and the printed row all
   come from the declaration, so nothing needs adding to `pipeline_to_dict` or `render_pipeline`.

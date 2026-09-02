@@ -502,6 +502,8 @@ BUCKET_NAMES = [
     ('sthree-example', False),
     ('example--ol-s3', False),
     ('example-s3alias', False),
+    ('amzn-s3-demo-example', False),
+    ('example--x-s3', False),
 ]
 # Every row but the templated one, which never reaches the walk as written: `declared_names`
 # substitutes first, so the walk sees the name that actually goes to S3.
