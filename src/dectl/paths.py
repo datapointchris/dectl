@@ -44,10 +44,16 @@ class PathKind(StrEnum):
 
 
 class PathFault(StrEnum):
-    """Why a declared path cannot be used.
+    """Why a path-bearing config field cannot be used.
 
     A name callers branch on. The sentence a reader sees is in FAULT_WORDING, so rewording the
-    message does not break `validate --json`, whose `fault` key is this value."""
+    message does not break `validate --json`, whose `fault` key is this value.
+
+    The boundary is the field, not the value: `DECLARES_NOTHING` says a path-bearing field
+    named no path at all, and the key faults say a string an S3 key is built from is spelled in
+    a way S3 stores differently. A config string that is neither — a bucket name — is not one of
+    these, and stretching the enum to cover it would put two unrelated questions in one record
+    again."""
 
     ABSENT = 'absent'
     EXPECTED_DIRECTORY = 'expected_directory'

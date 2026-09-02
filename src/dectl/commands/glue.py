@@ -101,8 +101,11 @@ def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: lis
 
     missing = [path for _, path in sources if not path.is_file()]
     if missing:
+        # Not the shared diagnosis, and deliberately worded so it does not read as one: the
+        # caller already reported every unusable path by its config key, so reaching here means
+        # a file that was present when the deploy started is not present now.
         for path in missing:
-            error(f'script not found: {path}')
+            error(f'script disappeared after the deploy checked it: {path}')
         raise typer.Exit(1)
 
     s3 = session.client('s3')
