@@ -25,20 +25,22 @@ from dectl.config import ResourceModel
 from dectl.config import StepFunctionConfig
 from dectl.config import StrictModel
 from dectl.config import config_error_headline
+from dectl.config import declared_names
 from dectl.config import declared_paths
+from dectl.config import declared_values
 from dectl.config import describe_config_error
 from dectl.config import load_config
-from dectl.config import pipeline_path_faults
 from dectl.config import pipeline_root
+from dectl.config import pipeline_value_faults
 from dectl.config import resolve_from_root
 from dectl.env import render_env_model
 from dectl.env import set_active_environment
-from dectl.paths import FAULT_WORDING
-from dectl.paths import SPELLING_FAULTS
-from dectl.paths import ConfigFault
-from dectl.paths import PathKind
-from dectl.paths import deployable_files
-from dectl.paths import path_fault
+from dectl.values import FAULT_WORDING
+from dectl.values import SPELLING_FAULTS
+from dectl.values import ConfigFault
+from dectl.values import PathKind
+from dectl.values import deployable_files
+from dectl.values import path_fault
 
 
 def test_template_config_is_valid():
@@ -393,6 +395,53 @@ def test_every_declared_path_field_reaches_declared_paths():
     assert declared_on_models - enumerated == set()
 
 
+@pytest.mark.parametrize(
+    ('owner', 'raw', 'resource', 'alias'),
+    [
+        # Held in a dict, keyed by alias — the shape the design was written around.
+        (LambdaConfig, {'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}}}, 'lambda', 'fn'),
+        # Held as a bare field, with no alias. Three consumers walked their own way to a set
+        # that excluded this, and each reported no fault rather than going red.
+        (MonitorConfig, {'monitor': {'lambdas': ['a']}}, 'monitor', ''),
+        # The pipeline declares too, and is not in `resource_members` at all.
+        (PipelineConfig, {'resolve_paths_from': '/srv/x'}, 'pipeline', ''),
+    ],
+)
+def test_every_declaration_consumer_sees_every_member_shape(monkeypatch, owner, raw, resource, alias):
+    # `declaring_members` is the one walk, and this is what keeps it one. A consumer that
+    # traverses for itself reaches a narrower set, and the failure is silent in every direction:
+    # a value nothing enumerates is a value nothing checks, and no check means no fault.
+    field = next(iter(owner.PATH_FIELDS), None) or 'lambdas'
+    monkeypatch.setattr(owner, 'PATH_FIELDS', {field: PathKind.DIRECTORY})
+    pipeline = PipelineConfig.model_validate(raw)
+
+    reached = {
+        'declared_paths': {(p.site.resource, p.site.alias, p.site.field) for p in declared_paths(pipeline)},
+        'declared_values': {(s.resource, s.alias, s.field) for s, _, _ in declared_values(pipeline, 'PATH_FIELDS')},
+    }
+
+    for consumer, sites in reached.items():
+        assert (resource, alias, field) in sites, f'{consumer} never saw {resource}/{alias} {field}'
+
+
+def test_the_scope_guard_accepts_every_resource_its_own_rows_carry():
+    # The guard refused `s3` — the word `declared_names` stamps on every `buckets` row — because
+    # it walked the members, and `buckets` holds no model to be a member. A door scoped by a
+    # name its own output uses got a traceback rather than a refusal.
+    pipeline = PipelineConfig.model_validate(
+        {
+            'buckets': {'raw': 'Bad_Name'},
+            'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'b', 'scripts': ['x.py'], 'role': 'r'}},
+            'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}},
+        }
+    )
+    emitted = {p.site.resource for p in pipeline_value_faults('p', pipeline, on_disk=False)}
+    emitted |= {n.site.resource for n in declared_names(pipeline)}
+
+    for resource in emitted:
+        pipeline_value_faults('p', pipeline, on_disk=False, resource=resource)
+
+
 def pipeline_rooted_at(root) -> PipelineConfig:
     raw = {'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}}}
     if root is not None:
@@ -475,7 +524,7 @@ def test_every_shape_a_source_dir_can_take_is_judged(tmp_path, source_dir, fault
         {'resolve_paths_from': str(tmp_path), 'lambdas': {'fn': {'name': 'n', 'source_dir': source_dir}}}
     )
 
-    assert [f.fault for f in pipeline_path_faults('p', pipeline, on_disk=True)] == faults
+    assert [f.fault for f in pipeline_value_faults('p', pipeline, on_disk=True)] == faults
 
 
 def test_a_source_under_an_excluded_directory_name_still_holds_its_files(tmp_path):
@@ -512,7 +561,7 @@ def test_an_absolute_source_dir_still_sits_where_it_likes(tmp_path):
     )
     (tmp_path / 'root').mkdir()
 
-    assert pipeline_path_faults('p', pipeline, on_disk=True) == []
+    assert pipeline_value_faults('p', pipeline, on_disk=True) == []
 
 
 def test_every_fault_has_a_sentence():
@@ -536,7 +585,7 @@ def test_a_home_this_machine_cannot_resolve_is_a_fault_not_a_load_failure(tmp_pa
     # property of this machine, so it belongs where every other such property is checked — see
     # `key_fault`. As a validator it could only reach the values carrying no `{env}`, since the
     # active environment is not known at load; one door answers for both halves.
-    faults = pipeline_path_faults('p', pipeline, on_disk=True)
+    faults = pipeline_value_faults('p', pipeline, on_disk=True)
 
     assert [f.fault for f in faults] == [ConfigFault.UNRESOLVABLE_HOME]
 
@@ -579,7 +628,7 @@ def test_a_templated_home_resolves_to_a_fault_rather_than_a_traceback(tmp_path, 
     # sibling silent.
     set_active_environment('prod', '--env')
     try:
-        faults = pipeline_path_faults('p', pipeline, on_disk=True)
+        faults = pipeline_value_faults('p', pipeline, on_disk=True)
     finally:
         set_active_environment('dev', 'default')
 

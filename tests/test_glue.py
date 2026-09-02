@@ -20,12 +20,12 @@ from dectl.config import ROOT_SITE
 from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
 from dectl.config import PipelineConfig
-from dectl.config import config_path_faults
-from dectl.config import pipeline_path_faults
+from dectl.config import config_value_faults
+from dectl.config import pipeline_value_faults
 from dectl.env import active_environment
-from dectl.paths import ConfigFault
-from dectl.paths import PathSite
-from dectl.paths import bucket_fault
+from dectl.values import ConfigFault
+from dectl.values import ValueSite
+from dectl.values import bucket_fault
 
 runner = CliRunner()
 
@@ -451,7 +451,7 @@ def test_a_key_that_s3_would_store_literally_is_refused(tmp_path, written, expec
     # anchor gets ESCAPES_ROOT, whose remedy allows the `~/x` this one refuses.
     pipeline = glue_pipeline(str(tmp_path), [written])
 
-    assert [f.fault for f in pipeline_path_faults('proj', pipeline, on_disk=True)] == [expected]
+    assert [f.fault for f in pipeline_value_faults('proj', pipeline, on_disk=True)] == [expected]
 
 
 @pytest.mark.parametrize(
@@ -480,7 +480,7 @@ def test_a_script_prefix_is_refused_for_every_shape_a_script_is(tmp_path, writte
         }
     )
 
-    faults = pipeline_path_faults('proj', pipeline, on_disk=True)
+    faults = pipeline_value_faults('proj', pipeline, on_disk=True)
 
     assert [(f.site.field, f.fault) for f in faults] == [('script_prefix', expected)]
 
@@ -517,7 +517,7 @@ def test_a_bucket_name_s3_would_refuse_is_refused(tmp_path, written, accepted):
         }
     )
 
-    faults = pipeline_path_faults('proj', pipeline, on_disk=True)
+    faults = pipeline_value_faults('proj', pipeline, on_disk=True)
 
     expected = [] if accepted else [('script_bucket', ConfigFault.NOT_A_BUCKET_NAME)]
     assert [(f.site.field, f.fault) for f in faults] == expected
@@ -552,7 +552,7 @@ def test_the_bucket_checked_is_the_one_the_env_resolves_to(tmp_path, monkeypatch
         }
     )
 
-    faults = pipeline_path_faults('proj', pipeline, on_disk=True)
+    faults = pipeline_value_faults('proj', pipeline, on_disk=True)
 
     assert (faults == []) == accepted
     assert [f.configured for f in faults] == ([] if accepted else ['Sales-dev'])
@@ -564,7 +564,7 @@ def test_every_configured_bucket_is_checked_not_only_the_glue_one(tmp_path):
     # was found in and leaving the sibling is the shape four review rounds kept finding.
     pipeline = PipelineConfig.model_validate({'resolve_paths_from': str(tmp_path), 'buckets': {'raw': 'My_Bucket'}})
 
-    faults = pipeline_path_faults('proj', pipeline, on_disk=True)
+    faults = pipeline_value_faults('proj', pipeline, on_disk=True)
 
     assert [(f.site.resource, f.site.alias, f.site.field, f.fault) for f in faults] == [
         ('s3', 'raw', 'buckets', ConfigFault.NOT_A_BUCKET_NAME)
@@ -579,7 +579,7 @@ def test_a_key_fault_reports_the_string_as_written(tmp_path):
 
     # Quoted, because the characters are the finding: bare, the trailing slash sits at the end
     # of a sentence with nothing marking it, and an empty prefix shows as nothing at all.
-    shown = [f.shown for f in pipeline_path_faults('proj', pipeline, on_disk=True)]
+    shown = [f.shown for f in pipeline_value_faults('proj', pipeline, on_disk=True)]
 
     assert shown == ["'./jobs/x.py'", "'jobs//x.py'", "'jobs/x.py/'"]
 
@@ -598,7 +598,7 @@ def test_a_prefix_that_normalises_to_itself_is_still_refused(tmp_path, written):
         }
     )
 
-    faults = pipeline_path_faults('proj', pipeline, on_disk=True)
+    faults = pipeline_value_faults('proj', pipeline, on_disk=True)
 
     assert [(f.site.field, f.fault) for f in faults] == [('script_prefix', ConfigFault.NOT_A_CLEAN_KEY)]
 
@@ -609,7 +609,7 @@ def test_a_glue_job_declaring_no_scripts_is_refused_before_the_deploy_indexes_it
     # name it now: validate exits 1 rather than 0, and the deploy refuses rather than raising.
     pipeline = glue_pipeline(str(tmp_path), [])
 
-    faults = pipeline_path_faults('proj', pipeline, on_disk=True)
+    faults = pipeline_value_faults('proj', pipeline, on_disk=True)
 
     assert [(f.site.field, f.fault) for f in faults] == [('scripts', ConfigFault.DECLARES_NOTHING)]
     with pytest.raises(typer.Exit):
@@ -623,7 +623,7 @@ def test_a_malformed_script_is_not_also_reported_as_missing(tmp_path):
     (tmp_path / 'jobs').mkdir()
     pipeline = glue_pipeline(str(tmp_path), ['./jobs/x.py', 'jobs/present.py'])
 
-    faults = pipeline_path_faults('proj', pipeline, on_disk=True)
+    faults = pipeline_value_faults('proj', pipeline, on_disk=True)
 
     assert [(f.configured, f.fault) for f in faults] == [
         ('./jobs/x.py', ConfigFault.NOT_A_CLEAN_KEY),
@@ -638,7 +638,7 @@ def test_an_absent_root_is_reported_alone_at_the_deploy_door(tmp_path):
     # door reports, not on what they render to.
     pipeline = glue_pipeline(str(tmp_path / 'nowhere'), ['jobs/a.py', 'jobs/b.py'])
 
-    scoped = pipeline_path_faults('proj', pipeline, on_disk=True, resource='glue', alias='j')
+    scoped = pipeline_value_faults('proj', pipeline, on_disk=True, resource='glue', alias='j')
 
     assert [(f.site, f.fault) for f in scoped] == [(ROOT_SITE, ConfigFault.ABSENT)]
     with pytest.raises(typer.Exit):
@@ -653,18 +653,18 @@ def test_a_scope_naming_nothing_raises_rather_than_reporting_a_clean_config(tmp_
     pipeline = glue_pipeline(str(tmp_path / 'nowhere'), ['jobs/a.py'])
 
     with pytest.raises(ValueError):
-        pipeline_path_faults('proj', pipeline, on_disk=True, resource=resource, alias=alias)
+        pipeline_value_faults('proj', pipeline, on_disk=True, resource=resource, alias=alias)
 
 
 def test_both_doors_report_one_absent_root_the_same_way(tmp_path):
-    # The property `pipeline_path_faults`'s docstring claims. `config validate` walks the whole
+    # The property `pipeline_value_faults`'s docstring claims. `config validate` walks the whole
     # config and a deploy scopes to one job; scoping is an argument, so neither door can filter
     # the row that carries the cause out of its own answer.
     pipeline = glue_pipeline(str(tmp_path / 'nowhere'), ['jobs/a.py'])
     config = DectlConfig.model_validate({'defaults': {'account_id': '1'}, 'pipelines': {'proj': pipeline.model_dump()}})
 
-    from_validate = config_path_faults(config)
-    from_deploy = pipeline_path_faults('proj', pipeline, on_disk=True, resource='glue', alias='j')
+    from_validate = config_value_faults(config)
+    from_deploy = pipeline_value_faults('proj', pipeline, on_disk=True, resource='glue', alias='j')
 
     assert from_validate == from_deploy
 
@@ -703,7 +703,7 @@ def test_a_directory_named_as_a_script_is_reported_as_a_directory(tmp_path):
     (tmp_path / 'copy.py').mkdir()
     pipeline = glue_pipeline(str(tmp_path), ['copy.py'])
 
-    faults = pipeline_path_faults('proj', pipeline, on_disk=True)
+    faults = pipeline_value_faults('proj', pipeline, on_disk=True)
 
     assert [f.fault for f in faults] == [ConfigFault.EXPECTED_FILE]
     with pytest.raises(typer.Exit):
@@ -720,8 +720,8 @@ def test_the_deploy_door_names_the_pipeline_and_the_config_key(tmp_path, capsys)
 
     # Asserted on the row rather than on the sentence: `'glue/j script'` is a prefix of
     # `'glue/j script_prefix'`, so a substring match cannot say which key the door named.
-    faults = pipeline_path_faults('salesdata', pipeline, on_disk=True, resource='glue', alias='j')
-    assert [(f.pipeline, f.site) for f in faults] == [('salesdata', PathSite('glue', 'j', 'scripts'))]
+    faults = pipeline_value_faults('salesdata', pipeline, on_disk=True, resource='glue', alias='j')
+    assert [(f.pipeline, f.site) for f in faults] == [('salesdata', ValueSite('glue', 'j', 'scripts'))]
     assert 'dectl config show' in capsys.readouterr().err
 
 

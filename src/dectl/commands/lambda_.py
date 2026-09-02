@@ -12,7 +12,7 @@ from botocore.exceptions import ReadTimeoutError
 from dectl.config import DectlConfig
 from dectl.config import LambdaConfig
 from dectl.config import PipelineConfig
-from dectl.config import pipeline_path_faults
+from dectl.config import pipeline_value_faults
 from dectl.config import resolve_from_root
 from dectl.durable import EXECUTION_STATUSES
 from dectl.durable import SUFFIX_SEARCH_LIMIT
@@ -35,12 +35,12 @@ from dectl.output import emit_json
 from dectl.output import error
 from dectl.output import info
 from dectl.output import success
-from dectl.paths import FAULT_WORDING
-from dectl.paths import PathKind
-from dectl.paths import deployable_files
-from dectl.paths import path_fault
-from dectl.paths import refuse_unusable_values
 from dectl.payloads import read_payload
+from dectl.values import FAULT_WORDING
+from dectl.values import PathKind
+from dectl.values import deployable_files
+from dectl.values import path_fault
+from dectl.values import refuse_unusable_values
 
 # Widen the CloudWatch window around an execution's recorded start and end. The records are
 # written by the function while the timestamps come from the control plane, so the two are close
@@ -58,7 +58,7 @@ def zip_lambda(source: Path) -> Path:
     directory. `PathKind.NON_EMPTY_DIRECTORY` is that same question asked of the config, which
     is what stops `config validate` passing a directory this refuses.
 
-    The check repeats what the caller already ran through `pipeline_path_faults`, and repeating
+    The check repeats what the caller already ran through `pipeline_value_faults`, and repeating
     it is what keeps the refusal a property of this function rather than of whoever calls it.
     The caller's message names the config key; this one names only the path, because at this
     altitude the config key is not known."""
@@ -154,7 +154,7 @@ def make_lambda_function_app(
         # is reported by botocore as a traceback. The machine most likely to be missing the
         # checkout is the one most likely to be missing the profile, and the config fault is the
         # one this door can explain.
-        refuse_unusable_values(pipeline_path_faults(pipeline_name, pipeline, on_disk=True, resource=LambdaConfig.RESOURCE, alias=alias))
+        refuse_unusable_values(pipeline_value_faults(pipeline_name, pipeline, on_disk=True, resource=LambdaConfig.RESOURCE, alias=alias))
 
         # The raw config value, as the walk and the glue deploy both read it.
         # `resolve_from_root` substitutes, so handing it an already-rendered field substitutes

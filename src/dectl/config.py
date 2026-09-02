@@ -14,20 +14,20 @@ from dectl.env import ENV_PLACEHOLDER
 from dectl.env import substitute_env
 from dectl.output import error
 from dectl.output import stderr_console
-from dectl.paths import ConfigFault
-from dectl.paths import DeclaredKey
-from dectl.paths import DeclaredName
-from dectl.paths import DeclaredPath
-from dectl.paths import DeclaresValues
-from dectl.paths import PathKind
-from dectl.paths import PathSite
-from dectl.paths import UnusableValue
-from dectl.paths import bucket_fault
-from dectl.paths import escapes_root
-from dectl.paths import expand_home
-from dectl.paths import home_fault
-from dectl.paths import key_fault
-from dectl.paths import path_fault
+from dectl.values import ConfigFault
+from dectl.values import DeclaredKey
+from dectl.values import DeclaredName
+from dectl.values import DeclaredPath
+from dectl.values import DeclaresValues
+from dectl.values import PathKind
+from dectl.values import UnusableValue
+from dectl.values import ValueSite
+from dectl.values import bucket_fault
+from dectl.values import escapes_root
+from dectl.values import expand_home
+from dectl.values import home_fault
+from dectl.values import key_fault
+from dectl.values import path_fault
 
 # `$XDG_CONFIG_HOME/dectl/config.yaml`, falling back to `~/.config` when the variable is unset.
 # `config_home()` reads the environment at import, so a process that exports the variable after
@@ -118,7 +118,7 @@ class StrictModel(BaseModel):
 class ResourceModel(StrictModel, DeclaresValues):
     """One resource a pipeline holds, and which of its fields dectl resolves locally.
 
-    `RESOURCE` and the three field declarations come from `DeclaresValues`, in `paths.py`, so
+    `RESOURCE` and the three field declarations come from `DeclaresValues`, in `values.py`, so
     `env` can read them without importing this module.
 
     Every mechanism reading them walks `declaring_members`, which yields the pipeline and its
@@ -275,7 +275,7 @@ class DectlConfig(StrictModel):
 # The resource is `pipeline` because the key belongs to the pipeline block rather than to any
 # resource in it, and the alias is empty for the same reason — so `label` is the config key on
 # its own, which is what a reader typed and what they can grep the file for.
-ROOT_SITE = PathSite('pipeline', '', 'resolve_paths_from')
+ROOT_SITE = ValueSite('pipeline', '', 'resolve_paths_from')
 
 
 def pipeline_root(pipeline: PipelineConfig) -> Path:
@@ -285,7 +285,7 @@ def pipeline_root(pipeline: PipelineConfig) -> Path:
     `source_dir` without half of the result staying literal.
 
     Total, and it never exits. An unresolvable `~user` comes back as the literal string and is
-    reported by `pipeline_path_faults` as `unresolvable_home`, because a refusal raised from
+    reported by `pipeline_value_faults` as `unresolvable_home`, because a refusal raised from
     here runs beneath a command that has already committed to emitting a document, and that
     leaves `validate --json` with an exit writing zero bytes."""
     if not pipeline.resolve_paths_from:
@@ -301,7 +301,7 @@ def resolve_from_root(pipeline: PipelineConfig, configured_path: str) -> Path:
 
     An entry that is already absolute is returned unchanged, which is what `Path.__truediv__`
     does with an absolute right-hand side. A `source_dir` may therefore sit outside the root. A
-    glue `scripts` entry may not — `key_fault` refuses that, and `pipeline_path_faults` runs it
+    glue `scripts` entry may not — `key_fault` refuses that, and `pipeline_value_faults` runs it
     from `config validate` and from the deploy, because the S3 key is built from the configured
     string rather than from the resolved path."""
     return pipeline_root(pipeline) / expand_home(substitute_env(configured_path))
@@ -357,24 +357,24 @@ def declaring_members(pipeline: PipelineConfig) -> list[tuple[str, str, Resource
     return [('', '', pipeline), *resource_members(pipeline)]
 
 
-def declared_values(pipeline: PipelineConfig, declaration: str) -> list[tuple[PathSite, str, ResourceModel, str]]:
-    """Each (site, collection, owner, field) the named declaration reaches, in walk order.
+def declared_values(pipeline: PipelineConfig, declaration: str) -> list[tuple[ValueSite, ResourceModel, str]]:
+    """Each (site, owner, field) the named declaration reaches, in walk order.
 
     `declaration` is the attribute holding the field names — `PATH_FIELDS`, `KEY_FIELDS` or
     `BUCKET_FIELDS`. The field's own values are left to the caller, because a path wants one
     row per entry and a bucket wants the alias its mapping keys it by."""
     sites = []
-    for collection, alias, member in declaring_members(pipeline):
+    for _, alias, member in declaring_members(pipeline):
         owner = type(member)
         for field in sorted(getattr(owner, declaration)):
-            sites.append((PathSite(owner.site_resource(field), alias, field), collection, member, field))
+            sites.append((ValueSite(owner.site_resource(field), alias, field), member, field))
     return sites
 
 
 def declared_paths(pipeline: PipelineConfig) -> list[DeclaredPath]:
     """Every filesystem path this pipeline's config names, its own root included.
 
-    The single enumeration of what is checked and resolved. `pipeline_path_faults` checks what
+    The single enumeration of what is checked and resolved. `pipeline_value_faults` checks what
     it returns, `resolved_paths` resolves it for both renderers, and `aws_names_only` excludes
     it from the env-effect guard. Built from each model's `PATH_FIELDS`, so a path-bearing field
     is declared once beside the field itself rather than restated as a literal here.
@@ -386,14 +386,14 @@ def declared_paths(pipeline: PipelineConfig) -> list[DeclaredPath]:
     `declares_nothing` is what reports it, and it reads the same walk, so the two cannot
     disagree about which fields exist."""
     paths = []
-    for site, collection, member, field in declared_values(pipeline, 'PATH_FIELDS'):
+    for site, member, field in declared_values(pipeline, 'PATH_FIELDS'):
         configured = getattr(member, field)
         if configured is None:
             continue
         kind = type(member).PATH_FIELDS[field]
         for value in as_values(configured):
             if value:
-                paths.append(DeclaredPath(site, collection, substitute_env(value), kind))
+                paths.append(DeclaredPath(site, substitute_env(value), kind))
     return paths
 
 
@@ -405,7 +405,7 @@ def declared_keys(pipeline: PipelineConfig) -> list[DeclaredKey]:
     silent. A prefix names nothing on disk, so it is a key and not a path; a script is both,
     and appears here and in `declared_paths`."""
     keys = []
-    for site, _, member, field in declared_values(pipeline, 'KEY_FIELDS'):
+    for site, member, field in declared_values(pipeline, 'KEY_FIELDS'):
         for value in as_values(getattr(member, field)):
             keys.append(DeclaredKey(site, substitute_env(value)))
     return keys
@@ -424,14 +424,14 @@ def declared_names(pipeline: PipelineConfig) -> list[DeclaredName]:
     resource comes from `FIELD_RESOURCE` rather than from a literal here, so the scope guard
     reads the same word these rows carry."""
     names = []
-    for site, _, member, field in declared_values(pipeline, 'BUCKET_FIELDS'):
+    for site, member, field in declared_values(pipeline, 'BUCKET_FIELDS'):
         for alias, value in as_aliased_values(getattr(member, field)):
             named = site._replace(alias=alias) if alias else site
             names.append(DeclaredName(named, substitute_env(value)))
     return names
 
 
-def declares_nothing(pipeline: PipelineConfig) -> list[PathSite]:
+def declares_nothing(pipeline: PipelineConfig) -> list[ValueSite]:
     """Every site whose declared path field holds nothing to check.
 
     A field declared in `PATH_FIELDS` and holding no value yields no `DeclaredPath`, so every
@@ -452,7 +452,7 @@ def declares_nothing(pipeline: PipelineConfig) -> list[PathSite]:
     `resolve_paths_from` says the key was left out, and leaving it out is the documented way to
     keep the earlier behaviour. Only a key the writer put there and left blank is a fault."""
     empty = []
-    for site, _, member, field in declared_values(pipeline, 'PATH_FIELDS'):
+    for site, member, field in declared_values(pipeline, 'PATH_FIELDS'):
         configured = getattr(member, field)
         if configured is None:
             continue
@@ -462,7 +462,7 @@ def declares_nothing(pipeline: PipelineConfig) -> list[PathSite]:
     return empty
 
 
-def pipeline_path_faults(
+def pipeline_value_faults(
     pipeline_name: str,
     pipeline: PipelineConfig,
     *,
@@ -502,13 +502,13 @@ def pipeline_path_faults(
     if alias and alias not in known_aliases:
         raise ValueError(f'no alias named {alias!r} in pipeline {pipeline_name!r}; declared: {sorted(known_aliases)}')
 
-    def in_scope(site: PathSite) -> bool:
+    def in_scope(site: ValueSite) -> bool:
         return (not resource or site.resource == resource) and (not alias or site.alias == alias)
 
-    def row(site: PathSite, path: Path | None, fault: ConfigFault, configured: str) -> UnusableValue:
+    def row(site: ValueSite, path: Path | None, fault: ConfigFault, configured: str) -> UnusableValue:
         return UnusableValue(pipeline_name, site, path, fault, configured)
 
-    def refused_values(found: list[UnusableValue]) -> set[tuple[PathSite, str]]:
+    def refused_values(found: list[UnusableValue]) -> set[tuple[ValueSite, str]]:
         """Which (site, value) pairs already carry a fault, so nothing reports one twice.
 
         Read at each point a new fault class is about to be added, because what counts as
@@ -591,7 +591,7 @@ def pipeline_path_faults(
     return problems
 
 
-def config_path_faults(config: DectlConfig) -> list[UnusableValue]:
+def config_value_faults(config: DectlConfig) -> list[UnusableValue]:
     """Every declared path, key and bucket name in the config that cannot be used.
 
     A pipeline naming no root is still checked for how its keys are written, which is
@@ -605,7 +605,7 @@ def config_path_faults(config: DectlConfig) -> list[UnusableValue]:
     that surfaces otherwise."""
     problems = []
     for name, pipeline in config.pipelines.items():
-        problems.extend(pipeline_path_faults(name, pipeline, on_disk=bool(pipeline.resolve_paths_from)))
+        problems.extend(pipeline_value_faults(name, pipeline, on_disk=bool(pipeline.resolve_paths_from)))
     return problems
 
 

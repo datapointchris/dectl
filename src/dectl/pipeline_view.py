@@ -60,7 +60,7 @@ def resolved_paths(pipeline: PipelineConfig) -> dict[tuple[str, str], dict[str, 
     remembering to add one.
 
     The outer key is the pair rather than a `resource/alias` string, so nothing rebuilds what a
-    `PathSite` holds and an alias carrying a slash cannot collide with a different resource."""
+    `ValueSite` holds and an alias carrying a slash cannot collide with a different resource."""
     grouped: dict[tuple[str, str], dict[str, list[str]]] = {}
     for declared in declared_paths(pipeline):
         if declared.site == ROOT_SITE:

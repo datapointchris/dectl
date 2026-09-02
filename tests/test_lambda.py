@@ -14,13 +14,13 @@ from dectl.commands.lambda_ import make_lambda_app
 from dectl.commands.lambda_ import zip_lambda
 from dectl.config import DectlConfig
 from dectl.config import PipelineConfig
-from dectl.config import pipeline_path_faults
+from dectl.config import pipeline_value_faults
 from dectl.config import resolve_from_root
 from dectl.invoke import DURABLE_SYNC_CAP_SECONDS
 from dectl.invoke import EVENT_ACK_TIMEOUT_SECONDS
 from dectl.invoke import INVOKE_TIMEOUT_MARGIN_SECONDS
 from dectl.invoke import timed_out_message
-from dectl.paths import PathSite
+from dectl.values import ValueSite
 
 runner = CliRunner()
 
@@ -583,9 +583,9 @@ def test_the_lambda_door_names_the_same_site_config_validate_does(tmp_path):
         {'resolve_paths_from': str(tmp_path), 'lambdas': {'notifier': {'name': 'n', 'source_dir': 'modules/absent'}}}
     )
 
-    faults = pipeline_path_faults('proj', pipeline, on_disk=True, resource='lambda', alias='notifier')
+    faults = pipeline_value_faults('proj', pipeline, on_disk=True, resource='lambda', alias='notifier')
 
-    assert [(f.pipeline, f.site) for f in faults] == [('proj', PathSite('lambda', 'notifier', 'source_dir'))]
+    assert [(f.pipeline, f.site) for f in faults] == [('proj', ValueSite('lambda', 'notifier', 'source_dir'))]
 
 
 def test_pycache_is_left_out_of_the_zip(tmp_path):

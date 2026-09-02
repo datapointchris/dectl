@@ -10,7 +10,7 @@ from rich.table import Table
 from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
 from dectl.config import PipelineConfig
-from dectl.config import pipeline_path_faults
+from dectl.config import pipeline_value_faults
 from dectl.config import resolve_from_root
 from dectl.env import render_env_model
 from dectl.env import substitute_env
@@ -20,8 +20,8 @@ from dectl.output import emit_json
 from dectl.output import error
 from dectl.output import info
 from dectl.output import success
-from dectl.paths import refuse_unusable_values
 from dectl.prompt import confirm_or_exit
+from dectl.values import refuse_unusable_values
 
 RUN_STATE_COLORS = {'SUCCEEDED': 'green', 'FAILED': 'red', 'STOPPED': 'red', 'TIMEOUT': 'red', 'RUNNING': 'cyan'}
 
@@ -87,12 +87,12 @@ def resolve_scripts(pipeline_name: str, pipeline: PipelineConfig, alias: str) ->
     a clean definition on a config whose real deploy exits, which is the one question `--plan` is
     run to answer.
 
-    The faults come from `pipeline_path_faults`, scoped by argument, so this door and `config
+    The faults come from `pipeline_value_faults`, scoped by argument, so this door and `config
     validate` report one failure the same way rather than each describing it its own. Scoping
     by argument rather than by filtering the result is what keeps the root fault: a checkout
     that is not there explains every missing script under it, and ten lines naming ten files
     name the cause in none of them."""
-    refuse_unusable_values(pipeline_path_faults(pipeline_name, pipeline, on_disk=True, resource=GlueJobConfig.RESOURCE, alias=alias))
+    refuse_unusable_values(pipeline_value_faults(pipeline_name, pipeline, on_disk=True, resource=GlueJobConfig.RESOURCE, alias=alias))
     job = pipeline.glue_jobs[alias]
     return [ResolvedScript(substitute_env(script), resolve_from_root(pipeline, script)) for script in job.scripts]
 

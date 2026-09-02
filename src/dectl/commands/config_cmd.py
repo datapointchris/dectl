@@ -13,7 +13,7 @@ from dectl.config import CONFIG_LOAD_ERRORS
 from dectl.config import CONFIG_PATH
 from dectl.config import TEMPLATE_CONFIG
 from dectl.config import config_error_outcome
-from dectl.config import config_path_faults
+from dectl.config import config_value_faults
 from dectl.config import init_config
 from dectl.config import load_config
 from dectl.config import report_config_error
@@ -22,9 +22,9 @@ from dectl.output import emit_json
 from dectl.output import error
 from dectl.output import info
 from dectl.output import success
-from dectl.paths import refuse_unusable_values
 from dectl.pipeline_view import pipeline_to_dict
 from dectl.pipeline_view import render_pipeline
+from dectl.values import refuse_unusable_values
 
 config_app = typer.Typer(
     no_args_is_help=True,
@@ -174,7 +174,7 @@ def config_validate(
     if config is None:
         refuse('no_config', f'config at {CONFIG_PATH} was removed while it was being read')
 
-    problems = config_path_faults(config)
+    problems = config_value_faults(config)
     if as_json:
         emit_json(
             {

@@ -101,8 +101,8 @@ file so `config init` stays valid — a test asserts `TEMPLATE_CONFIG` round-tri
 
 ### Paths
 
-`src/dectl/paths.py` answers whether a value the config names outside the program can be what
-it has to be; `config.py` walks the models and builds the records it defines. Read `paths.py`'s
+`src/dectl/values.py` answers whether a value the config names outside the program can be what
+it has to be; `config.py` walks the models and builds the records it defines. Read `values.py`'s
 module docstring before changing either. Below are the constraints a new resource has to meet,
 which the docstrings do not state.
 
@@ -133,7 +133,7 @@ which the docstrings do not state.
   `config validate` and to the deploy, never to a field validator.** `key_fault`'s docstring
   carries why. `UNRESOLVABLE_HOME` is the member that most looks like a validator's job and
   is not: as one it could only reach the values carrying no `{env}`.
-- **A deploy door scopes `pipeline_path_faults` by argument, never by filtering its result.**
+- **A deploy door scopes `pipeline_value_faults` by argument, never by filtering its result.**
   Filtering drops the row naming the absent root, which is the cause of every row it kept.
 - **Nothing in the path domain or the walk exits the process.** A refusal raised beneath a
   command that has already committed to emitting a document leaves `--json` writing zero bytes.
@@ -216,7 +216,7 @@ and an eval'd `s3 export` stay clean.
 | `invoke.py` | The Lambda Invoke domain: how long to wait for one, the client to send it through, and which failures may safely be sent again. Kept out of `session.py` for the reason `durable.py` is kept out of `logs.py` — it is the Lambda API, not the boto3 session. |
 | `output.py` | The two `rich` consoles and the `error`/`success`/`info`/`warn` helpers, plus `emit_json` (bare-print JSON for `--json`) and `format_duration`. Use these, not bare `print`, for anything human-facing. `error` and `warn` write to `stderr_console`; `success` and `info` write to stdout. |
 | `pipeline_view.py` | Shared pipeline rendering — `render_pipeline` (human) and `pipeline_to_dict` (the stable `--json` shape). Used by both `main.py` (`list`) and `config_cmd.py` (`show`); lives outside both to avoid the `main` ↔ `config_cmd` import cycle. |
-| `paths.py` | Whether a value the config names outside the program can be what it has to be: a usable `Path`, a string S3 will store as written, a name S3 accepts for a bucket. Three questions, three records, one `ConfigFault` vocabulary reporting all of them. Knows nothing of pipelines — `config.py` walks the models and builds the records this defines, the same split as `durable.py` beside `commands/lambda_.py`. |
+| `values.py` | Whether a value the config names outside the program can be what it has to be: a usable `Path`, a string S3 will store as written, a name S3 accepts for a bucket. Three questions, three records, one `ConfigFault` vocabulary reporting all of them. Knows nothing of pipelines — `config.py` walks the models and builds the records this defines, the same split as `durable.py` beside `commands/lambda_.py`. |
 | `payloads.py` | `read_payload` — resolves a `--payload-file` path or `-` (stdin) to a JSON string for `lambda`/`sfn` `run`. |
 | `logs.py` | CloudWatch log tailing (Glue, Lambda, and the multi-group `monitor` stream) plus Step Functions execution-history rendering, including structured-JSON pretty-printing. `LogGroupCursor` is the shared primitive all three tailers poll through. |
 | `durable.py` | The Lambda durable-functions domain: qualifier resolution, execution lookup by name/ARN, and execution-history rendering. Kept out of `logs.py` because it is the Lambda API, not CloudWatch. |
