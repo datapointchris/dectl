@@ -8,7 +8,6 @@ import pytest
 import typer
 from botocore.exceptions import ClientError
 from botocore.exceptions import ReadTimeoutError
-from typer.testing import CliRunner
 
 from dectl.commands.lambda_ import make_lambda_app
 from dectl.commands.lambda_ import zip_lambda
@@ -24,8 +23,9 @@ from dectl.invoke import EVENT_ACK_TIMEOUT_SECONDS
 from dectl.invoke import INVOKE_TIMEOUT_MARGIN_SECONDS
 from dectl.invoke import timed_out_message
 from dectl.values import ValueSite
+from tests.conftest import RefusalRunner
 
-runner = CliRunner()
+runner = RefusalRunner()
 
 # Executions are keyed by the resolved version, never the alias — an alias name never appears in
 # a durable execution ARN.

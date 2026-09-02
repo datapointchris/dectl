@@ -1,12 +1,12 @@
 import pytest
-from typer.testing import CliRunner
 
 from dectl.commands.s3 import make_s3_app
 from dectl.commands.s3 import shell_variable_name
 from dectl.config import DectlConfig
 from dectl.env import active_environment
+from tests.conftest import RefusalRunner
 
-runner = CliRunner()
+runner = RefusalRunner()
 
 
 def make_config(buckets: dict[str, str]) -> DectlConfig:

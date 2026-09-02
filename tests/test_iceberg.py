@@ -5,7 +5,6 @@ import json
 import pytest
 import typer
 from botocore.exceptions import ClientError
-from typer.testing import CliRunner
 
 from dectl.commands.iceberg import make_iceberg_app
 from dectl.config import DectlConfig
@@ -29,8 +28,10 @@ from dectl.iceberg import resolve_snapshot
 from dectl.iceberg import snapshot_to_dict
 from dectl.iceberg import summary_int
 from dectl.output import console
+from tests.conftest import RefusalRunner
+from tests.conftest import at_width
 
-runner = CliRunner()
+runner = RefusalRunner()
 
 # Realistic 19-digit Iceberg snapshot ids, whose tails are the handles the verbs accept.
 SNAP_ONE = 3821550127947081234
@@ -43,15 +44,6 @@ HOUR_MS = 3600000
 
 METADATA_KEY = 'warehouse/events/metadata/00004-abc.metadata.json'
 METADATA_URI = f's3://example-lake/{METADATA_KEY}'
-
-
-@pytest.fixture(autouse=True)
-def wide_console(monkeypatch):
-    """Render tables at a width that fits every column.
-
-    rich squeezes columns to the terminal, and at the default 80 an assertion on a value in a
-    late column fails for a reason that has nothing to do with the code under test."""
-    monkeypatch.setenv('COLUMNS', '220')
 
 
 def snapshot(
@@ -774,12 +766,26 @@ def test_the_diff_counter_table_title_does_not_carry_two_snapshot_ids():
 
 def test_the_snapshots_table_does_not_truncate_the_id():
     # The tail is the handle every other verb accepts, and an ellipsis would hide exactly it.
+    #
+    # Rendered narrow on purpose. A console wide enough to hold a 19-digit id renders `fold` and
+    # `ellipsis` identically, so this assertion would hold with the overflow it exists to refuse.
+    # 60 columns is narrower than the id plus the six columns beside it, which forces the choice.
     metadata = load(four_commit_table())
 
-    with console.capture() as capture:
+    with at_width(console, 60), console.capture() as capture:
         render_snapshots_table('events', metadata, [metadata.by_id(SNAP_TWO)])
+    rendered = capture.get()
 
-    assert str(SNAP_TWO) in capture.get()
+    # The first cell of every body row, joined. Stripping every non-digit from the whole table
+    # instead runs the id into the timestamp beside it, and the assertion then passes on an id
+    # that really was cut — `514032026122400998211772294471` holds the wanted substring nowhere
+    # and a shorter id would find one.
+    folded = ''.join(line.split('│')[1].strip() for line in rendered.splitlines() if line.startswith('│'))
+
+    # Equality rather than containment, and it is what rules the ellipsis out: a truncated cell
+    # reads `51403…` and cannot equal the id. The narrower columns beside this one do truncate at
+    # this width, so asserting no ellipsis anywhere in the table would be a claim about them.
+    assert folded == str(SNAP_TWO)
 
 
 # --- the command surface ----------------------------------------------------------------------

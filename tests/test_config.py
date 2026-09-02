@@ -48,6 +48,7 @@ from dectl.values import FAULT_WORDING
 from dectl.values import ROOT_FORM
 from dectl.values import SPELLING_FAULTS
 from dectl.values import ConfigFault
+from dectl.values import DeclaresValues
 from dectl.values import PathKind
 from dectl.values import deployable_files
 from dectl.values import path_fault
@@ -335,6 +336,7 @@ UNCHECKED_FIELDS = {
     (JenkinsConfig, 'user'): 'a Jenkins username; Jenkins authenticates it',
     (JenkinsConfig, 'token'): 'a Jenkins API token; Jenkins authenticates it',
     (JenkinsJobConfig, 'job_path'): 'a path within Jenkins, not on this machine or in S3',
+    (JenkinsJobConfig, 'parameters'): 'build parameters posted to Jenkins verbatim; Jenkins rejects a name its job does not take',
     (GlueJobConfig, 'name'): 'a Glue job name; GetJob is what says whether it exists',
     (GlueJobConfig, 'role'): 'an IAM role ARN; UpdateJob validates it',
     (GlueJobConfig, 'arguments'): 'Glue job arguments, passed through; Glue validates them',
@@ -418,13 +420,35 @@ def test_every_string_field_is_classified():
     # and everything that checks, resolves or excludes a value reads one of them. A field in
     # none of them and not named above is checked by nothing, and that reads as success — the
     # config validates and the env-effect guard goes quiet.
+    #
+    # Every model the config holds, not every model that declares. `config_models` was widened
+    # to reach `Defaults`, `JenkinsConfig` and `JenkinsJobConfig` for exactly this assertion,
+    # and reading `resource_models` here filtered all three back out one function later — so a
+    # string field added to any of them stayed unclassified and unreported, `aws_profile`
+    # included. A model that declares nothing contributes its whole string surface, which is
+    # the right answer: none of it is checked.
     unclassified = set()
-    for model in resource_models():
-        declared = set(model.PATH_FIELDS) | model.KEY_FIELDS | model.BUCKET_FIELDS
+    for model in config_models():
+        declared = set()
+        if issubclass(model, DeclaresValues):
+            declared = set(model.PATH_FIELDS) | model.KEY_FIELDS | model.BUCKET_FIELDS
         for field in string_fields(model) - declared:
             unclassified.add((model, field))
 
     assert unclassified - set(UNCHECKED_FIELDS) == set()
+
+
+def test_every_exempted_field_is_one_the_classification_walk_can_reach():
+    """An exemption the walk cannot produce is documentation wearing a guard's clothes.
+
+    The guard above subtracts this table from what it found, so a row naming a field the walk
+    never reaches subtracts nothing and asserts nothing. That is not a harmless spare row: eight
+    of these named models the walk had been filtered down past, and their presence is precisely
+    what made the narrow population look deliberate rather than broken. Deleting all eight left
+    the suite green, which is the tell."""
+    reachable = {(model, field) for model in config_models() for field in string_fields(model)}
+
+    assert set(UNCHECKED_FIELDS) - reachable == set()
 
 
 def test_every_declared_path_field_reaches_declared_paths():

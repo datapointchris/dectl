@@ -1,12 +1,11 @@
-from typer.testing import CliRunner
-
 from dectl.commands.stepfunctions import make_sfn_app
 from dectl.commands.stepfunctions import state_machine_arn
 from dectl.config import DectlConfig
 from dectl.env import active_environment
 from dectl.env import render_env_model
+from tests.conftest import RefusalRunner
 
-runner = CliRunner()
+runner = RefusalRunner()
 
 
 def make_config(step_functions: dict) -> DectlConfig:

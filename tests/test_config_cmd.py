@@ -2,12 +2,12 @@ import json
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
 
 from dectl.commands.config_cmd import config_app
 from dectl.config import TEMPLATE_CONFIG
+from tests.conftest import RefusalRunner
 
-runner = CliRunner()
+runner = RefusalRunner()
 
 
 def test_show_json_emits_pipeline_shape(monkeypatch, tmp_path):

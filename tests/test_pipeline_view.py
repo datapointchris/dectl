@@ -319,11 +319,8 @@ def test_a_root_token_does_not_silence_the_no_effect_warning(monkeypatch, capsys
     assert active_environment.warned_about_missing_placeholder
 
 
-def test_every_resolved_path_reaches_both_renderers():
-    # `resolved_paths` is driven by the declaration and both renderers look rows up in it by
-    # resource and alias. Their sections carry per-kind AWS fields, so they are written out
-    # rather than generated, and a resource kind without one is resolved and then displayed by
-    # neither. That is a missing row and nothing else goes red for it, so it goes red here.
+def paths_pipeline() -> PipelineConfig:
+    """One pipeline holding every kind that carries a `paths` key, for the renderer guards."""
     config = DectlConfig.model_validate(
         {
             'defaults': {'account_id': '1'},
@@ -339,14 +336,7 @@ def test_every_resolved_path_reaches_both_renderers():
             },
         }
     )
-    pipeline = config.pipelines['salesdata']
-    published = pipeline_to_dict('salesdata', pipeline)
-
-    for (resource, alias), fields in resolved_paths(pipeline).items():
-        section = published.get(resource)
-        assert section is not None, f'{resource} has resolved paths and no section in --json'
-        assert alias in section, f'{resource}/{alias} has resolved paths and no row in --json'
-        assert section[alias]['paths'] == fields
+    return config.pipelines['salesdata']
 
 
 @pytest.mark.parametrize(
@@ -358,38 +348,32 @@ def test_every_resolved_path_reaches_both_renderers():
         ('iceberg', IcebergTableConfig, 'table'),
     ],
 )
-def test_every_resolved_path_reaches_the_human_renderer(capsys, monkeypatch, kind, owner, field):
-    # The other renderer, asserted separately because it is a separate hand-written site:
-    # `render_pipeline` calls `print_paths` once per resource kind, so a kind whose call is
-    # missing resolves and prints nothing while `--json` still carries it.
-    #
-    # A declaration is put on each kind rather than relying on the ones that exist. `sfn` and
-    # `iceberg` declare no path field today, so a test reading only what they already resolve
-    # loops over nothing and passes with their `print_paths` call deleted — which is the state
-    # this test was written to end.
+def test_every_resolved_path_reaches_both_renderers(capsys, monkeypatch, kind, owner, field):
+    """A kind that resolves a path and displays it in neither door goes red here.
+
+    Two hand-written sites, asserted together so their populations cannot differ. `--json`
+    writes a `paths` key per section and `render_pipeline` calls `print_paths` once per kind;
+    either one missing leaves a path resolved and shown by the other door alone.
+
+    A declaration is injected on each kind rather than relying on the ones that exist. `sfn` and
+    `iceberg` declare no path field today, so a test reading only what they already resolve
+    loops over nothing — which is how the `--json` half passed with both its `paths` keys
+    pointed at the wrong resource. The assertion that the loop found something is what makes
+    the injection load-bearing rather than decorative."""
     monkeypatch.setattr(owner, 'PATH_FIELDS', {field: PathKind.FILE})
-    config = DectlConfig.model_validate(
-        {
-            'defaults': {'account_id': '1'},
-            'pipelines': {
-                'salesdata': {
-                    'resolve_paths_from': '/srv/salesdata',
-                    'glue_jobs': {'copy': {'name': 'j', 'script_bucket': 'b', 'scripts': ['c.py'], 'role': 'r'}},
-                    'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}},
-                    'step_functions': {'flow': {'name': 'm'}},
-                    'iceberg_tables': {'events': {'database': 'd', 'table': 't'}},
-                }
-            },
-        }
-    )
-    pipeline = config.pipelines['salesdata']
+    pipeline = paths_pipeline()
     resolved = resolved_paths(pipeline)
     assert any(resource == kind for resource, _ in resolved), f'{kind} declares a path and resolves none'
 
+    published = pipeline_to_dict('salesdata', pipeline)
     render_pipeline('salesdata', pipeline)
     printed = capsys.readouterr().out
 
     for (resource, alias), fields in resolved.items():
+        section = published.get(resource)
+        assert section is not None, f'{resource} has resolved paths and no section in --json'
+        assert alias in section, f'{resource}/{alias} has resolved paths and no row in --json'
+        assert section[alias]['paths'] == fields
         for name, paths in fields.items():
             for path in paths:
                 assert path in printed, f'{resource}/{alias} {name} resolves to {path} and is printed nowhere'

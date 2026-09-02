@@ -1,15 +1,15 @@
 import pytest
 import typer
 from pydantic import ValidationError
-from typer.testing import CliRunner
 
 import dectl.main
 from dectl.commands.config_cmd import config_app
 from dectl.config import DectlConfig
 from dectl.main import REFERENCE_GLOBAL
 from dectl.main import app
+from tests.conftest import RefusalRunner
 
-runner = CliRunner()
+runner = RefusalRunner()
 
 
 def test_reference_prints_the_grammar():

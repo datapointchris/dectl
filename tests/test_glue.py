@@ -2,7 +2,6 @@ from pathlib import Path
 
 import pytest
 import typer
-from typer.testing import CliRunner
 
 from dectl import prompt
 from dectl.commands.glue import GlueRunWatcher
@@ -28,8 +27,9 @@ from dectl.pipeline_view import script_uris
 from dectl.values import ConfigFault
 from dectl.values import ValueSite
 from dectl.values import bucket_fault
+from tests.conftest import RefusalRunner
 
-runner = CliRunner()
+runner = RefusalRunner()
 
 
 def test_job_exposes_deploy_run_logs_runs_verbs():
@@ -807,17 +807,6 @@ def deploy_config(root, max_capacity=None) -> DectlConfig:
     )
 
 
-def assert_refused(result) -> None:
-    """The exit came from a refusal dectl chose, not from an exception reaching the runner.
-
-    CliRunner reports exit code 1 for both, so `exit_code == 1` beside `uploads == []` is
-    satisfied by any crash before the upload — inserting `raise IndexError` as the first line of
-    `build_job_update` left all three of these green, and that crash was a live bug rather than
-    a hypothetical. `typer.Exit` reaches the runner as SystemExit; anything else does not."""
-    assert isinstance(result.exception, SystemExit), f'exited via {result.exception!r}'
-    assert result.exit_code == 1
-
-
 def test_a_refused_definition_change_uploads_nothing(monkeypatch, tmp_path):
     # build_job_update exits on a max_capacity Glue would reject. Uploading first leaves
     # ScriptLocation pointing at code the user is then told not to deploy.
@@ -828,7 +817,7 @@ def test_a_refused_definition_change_uploads_nothing(monkeypatch, tmp_path):
 
     result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy', '--yes'])
 
-    assert_refused(result)
+    assert result.exit_code == 1
     assert session.s3.uploads == []
     assert session.glue.captured_update is None
 
@@ -843,7 +832,7 @@ def test_a_refused_confirmation_uploads_nothing(monkeypatch, tmp_path):
 
     result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy'])
 
-    assert_refused(result)
+    assert result.exit_code == 1
     assert session.s3.uploads == []
     assert session.glue.captured_update is None
 
@@ -857,7 +846,7 @@ def test_plan_refuses_a_missing_script_rather_than_reporting_a_clean_diff(monkey
 
     result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy', '--plan'])
 
-    assert_refused(result)
+    assert result.exit_code == 1
     assert session.s3.uploads == []
 
 

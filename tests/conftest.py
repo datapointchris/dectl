@@ -1,7 +1,45 @@
+import contextlib
 import operator
+import os
 
 import pytest
 from botocore.exceptions import ClientError
+from typer.testing import CliRunner
+
+# Every rendered assertion in this suite is otherwise an assertion about the window the suite was
+# run in. A rich console wraps to the terminal it finds, so `'is not a name S3 will accept' in
+# result.stderr` passes at 80 columns and fails at 40 on output correct at both, and a table
+# folds a UUID across rows or truncates it with an ellipsis depending on the same number.
+# Measured at 40 columns: thirteen tests across six files, none of them about width.
+#
+# Set before `dectl.output` builds its two consoles, which is why it is a module-level statement
+# rather than a fixture. Wide enough that every table under test renders its columns unfolded,
+# which is what makes an assertion about a rendered value an assertion about the value.
+#
+# A test whose subject *is* the width sets its own, through `at_width`. Pinning wide would make
+# those pass on a table that folds and on one that truncates alike.
+os.environ['COLUMNS'] = '160'
+
+
+class RefusalRunner(CliRunner):
+    """A `CliRunner` that reports a refusal and re-raises a crash.
+
+    Click reports exit code 1 for both an unhandled exception and a `typer.Exit(1)`, so
+    `exit_code == 1` beside `stdout == ''` is satisfied by any crash before the first print —
+    the assertion reads as "the tool refused" and means "the tool did not get that far". That is
+    not hypothetical: inserting `raise IndexError` as the first line of `build_job_update` left
+    three refusal tests green, and the crash it stood in for was a live bug.
+
+    Turning the catch off makes the distinction structural rather than something each test has
+    to opt into. `typer.Exit` reaches the runner as `SystemExit`, which click handles whatever
+    this is set to, so every genuine refusal still arrives as a result with an exit code. Every
+    other exception propagates and fails its test by name.
+
+    A test that means to drive a crash passes `catch_exceptions=True` at the call and says why."""
+
+    def invoke(self, *args, **kwargs):
+        kwargs.setdefault('catch_exceptions', False)
+        return super().invoke(*args, **kwargs)
 
 
 class FakeCloudWatchLogs:
@@ -69,6 +107,22 @@ class FakeCloudWatchLogs:
                 {'Error': {'Code': 'ResourceNotFoundException', 'Message': 'The specified log group does not exist'}},
                 'FilterLogEvents',
             )
+
+
+@contextlib.contextmanager
+def at_width(console, columns: int):
+    """Render into `console` at a fixed width, for a test whose subject is the width.
+
+    The suite pins a wide console so a rendered value is not a fact about the runner's window.
+    That is the right default and the wrong one for a guard on folding: a column wide enough to
+    hold its value renders identically whether it folds, truncates or does neither, so such a
+    test passes on the behaviour it was written to refuse. Those set the width they mean."""
+    original = console.width
+    console.width = columns
+    try:
+        yield
+    finally:
+        console.width = original
 
 
 def log_event(event_id: str, timestamp: int, message: str, stream: str = 'stream-a') -> dict:
