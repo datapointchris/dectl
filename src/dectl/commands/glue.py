@@ -94,7 +94,10 @@ def resolve_scripts(pipeline_name: str, pipeline: PipelineConfig, alias: str) ->
     by argument rather than by filtering the result is what keeps the root fault: a checkout
     that is not there explains every missing script under it, and ten lines naming ten files
     name the cause in none of them."""
-    refuse_unusable_values(pipeline_value_faults(pipeline_name, pipeline, on_disk=True, resource=GlueJobConfig.RESOURCE, alias=alias))
+    refuse_unusable_values(
+        pipeline_value_faults(pipeline_name, pipeline, on_disk=True, resource=GlueJobConfig.RESOURCE, alias=alias),
+        exit_code=1,
+    )
     job = pipeline.glue_jobs[alias]
     # One substitution, at the boundary: the name and the path are the same rendering of
     # one script, so nothing downstream can hold two spellings of it.

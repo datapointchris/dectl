@@ -27,6 +27,11 @@ import typer
 
 from dectl.output import error
 
+# The token a config writes where the active environment goes. It lives here rather than in
+# `env` because it is a fact about how a config value is spelled, which is this module's
+# subject, and because the checks below read it — `env` imports from here, not the reverse.
+ENV_PLACEHOLDER = '{env}'
+
 
 def expand_home(value: str) -> Path:
     """`~` expansion, total: a `~user` naming nobody comes back as the literal string.
@@ -65,6 +70,7 @@ class ConfigFault(StrEnum):
     NOT_A_CLEAN_KEY = 'not_a_clean_key'
     ESCAPES_ROOT = 'escapes_root'
     KEY_ESCAPES_ROOT = 'key_escapes_root'
+    NOT_A_ROOTED_PATH = 'not_a_rooted_path'
     NOT_A_BUCKET_NAME = 'not_a_bucket_name'
 
 
@@ -75,7 +81,14 @@ class ConfigFault(StrEnum):
 # `ESCAPES_ROOT` is deliberately absent. A path that climbs out of the anchor resolves to a real
 # directory, and where it lands is the answer — so its row carries the resolved path and its
 # reader is sent to `config show`, which is the command that prints it.
-SPELLING_FAULTS = frozenset({ConfigFault.NOT_A_CLEAN_KEY, ConfigFault.KEY_ESCAPES_ROOT, ConfigFault.NOT_A_BUCKET_NAME})
+SPELLING_FAULTS = frozenset(
+    {
+        ConfigFault.NOT_A_CLEAN_KEY,
+        ConfigFault.KEY_ESCAPES_ROOT,
+        ConfigFault.NOT_A_BUCKET_NAME,
+        ConfigFault.NOT_A_ROOTED_PATH,
+    }
+)
 
 # Every member gets a sentence, and a missing one raises at the moment a reader needs the
 # answer. `test_every_fault_has_a_sentence` is what keeps the mapping total; `SPELLING_FAULTS`
@@ -91,6 +104,7 @@ FAULT_WORDING = {
     ConfigFault.NOT_A_CLEAN_KEY: 'is not written as a plain relative path, and the S3 key is built from it',
     ConfigFault.ESCAPES_ROOT: 'climbs out of the directory paths resolve from',
     ConfigFault.KEY_ESCAPES_ROOT: 'climbs out of the directory paths resolve from, and the S3 key is built from it',
+    ConfigFault.NOT_A_ROOTED_PATH: 'is not absolute or ~-rooted, so it resolves against the working directory',
     ConfigFault.NOT_A_BUCKET_NAME: 'is not a name S3 will accept for a bucket',
 }
 
@@ -126,6 +140,10 @@ KEY_FORM = 'an S3 key is written as plain relative segments: jobs/copy.py, never
 ANCHOR_FORM = (
     'a path anchored to resolve_paths_from stays inside it: name a directory below the root, '
     'or write an absolute or ~-rooted path, which resolves on its own and is not anchored'
+)
+ROOT_FORM = (
+    'a directory paths resolve from is absolute or ~-rooted: /srv/salesdata or ~/code/salesdata, '
+    'never a relative path, which resolves against wherever dectl was run'
 )
 BUCKET_FORM = (
     'an S3 bucket name is 3-63 characters of lowercase letters, digits, dots and hyphens, '
@@ -323,6 +341,24 @@ def path_fault(path: Path, expects: PathKind) -> ConfigFault | None:
     return None
 
 
+def root_fault(configured: str) -> ConfigFault | None:
+    """Why this configured string cannot be a directory other paths resolve from.
+
+    A relative root resolves against wherever dectl was run, which is the dependency the key
+    exists to remove — and silently, because it looks correct from the one directory it was
+    written in. An empty one is the same thing spelled shorter.
+
+    Reported rather than raised, for the reason every other spelling check is. A schema failure
+    sends `main.py` to `cfg = None` and takes every pipeline command with it, including the ones
+    that would name the problem — so the likeliest first spelling of a brand-new key would blank
+    the CLI that explains it. `{env}` is replaced with a plain name rather than substituted,
+    because the active environment is not known at load; a leading token reads as relative,
+    which is what it is."""
+    if not configured or not (configured.startswith('~') or PurePosixPath(configured.replace(ENV_PLACEHOLDER, 'x')).is_absolute()):
+        return ConfigFault.NOT_A_ROOTED_PATH
+    return None
+
+
 def key_fault(configured: str) -> ConfigFault | None:
     """Why this configured string cannot become an S3 key, or None when it can.
 
@@ -367,6 +403,8 @@ def recovery_lines(problems: list[UnusableValue]) -> list[str]:
         lines.append(KEY_FORM)
     if ConfigFault.ESCAPES_ROOT in faults:
         lines.append(ANCHOR_FORM)
+    if ConfigFault.NOT_A_ROOTED_PATH in faults:
+        lines.append(ROOT_FORM)
     if ConfigFault.NOT_A_BUCKET_NAME in faults:
         lines.append(BUCKET_FORM)
     if faults & SPELLING_FAULTS:
@@ -420,14 +458,20 @@ def bucket_fault(configured: str) -> ConfigFault | None:
     return None
 
 
-def refuse_unusable_values(problems: list[UnusableValue]) -> None:
+def refuse_unusable_values(problems: list[UnusableValue], *, exit_code: int) -> None:
     """Print every unusable value and exit, or return when there are none.
 
-    The one reporter, and the one place in the path domain that exits — so a glue deploy, a
+    The one reporter, and the one place in the value domain that exits — so a glue deploy, a
     lambda deploy and `config validate` say the same sentence about the same fault, and nothing
-    beneath a command that has committed to emitting a document can cut it short."""
+    beneath a command that has committed to emitting a document can cut it short.
+
+    `exit_code` is required because the callers mean different things by failing. A deploy tried
+    to do something and could not, which is an ordinary 1. `config validate` is a verb whose
+    whole job is to look, so what it found is the answer rather than a failure, and the
+    convention it follows puts a fault a person has to fix at 3. Defaulting either way would
+    silently give one caller the other's meaning."""
     if not problems:
         return
     for line in render_unusable_values(problems):
         error(line)
-    raise typer.Exit(1)
+    raise typer.Exit(exit_code)

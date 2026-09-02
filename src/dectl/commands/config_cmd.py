@@ -31,12 +31,16 @@ config_app = typer.Typer(
     help=f'Manage dectl configuration at {CONFIG_PATH}.',
 )
 
-# What `config validate` exits when it could not read the config at all — absent, unparsable, or
-# not matching the schema. Separate from the 1 it exits for a config it read and found values in
-# that cannot be used: that answer is what the command was run for, and this one needs a person.
-# A scheduled run that folds them together reports a box with no dectl config as a box whose
-# config is fine. 2 is not available, because Typer exits 2 on a usage error.
-UNREADABLE_CONFIG_EXIT = 3
+# What `config validate` exits for anything it found. The convention it follows reserves 1 for
+# drift a tool's own `apply` clears without a person, and dectl ships no `apply` — every fault it
+# reports is a config a person has to edit, whether the file was unreadable or merely names a
+# directory that is not there. A scheduler holding that convention would read 1 as self-clearing
+# and let a broken deploy config sit. 2 is not available, because Typer spends it on usage.
+#
+# `--json`'s `outcome` carries the finer split, which is where a caller that wants it should look:
+# `no_config`, `invalid_yaml`, `invalid_schema` and `unusable_values` are four answers, and an
+# exit code that tried to carry them would be inventing a vocabulary this one already has.
+NEEDS_A_PERSON_EXIT = 3
 
 
 @config_app.command('init')
@@ -140,14 +144,13 @@ def config_validate(
     clean config from one that could not be read at all, which an empty list alone folds
     together — the detail of a load failure stays on stderr, where it has a renderer.
 
-    The exit code carries the same split. 0 is a clean config and 1 is a config that was read
-    and names values that cannot be used, which is the answer this command was run to get.
-    Anything that stopped it reading the config at all is 3, so a scheduled run cannot report a
-    box with no dectl config as a box whose config is fine.
+    0 is a clean config and 3 is everything else, because every fault this reports needs a
+    person to edit the file — the convention reserves 1 for drift a tool's own `apply` clears,
+    and dectl has no `apply`. Which kind of fault it was is `outcome`, not the exit code.
     """
 
     def refuse(outcome: str, message: str) -> NoReturn:
-        """Report on stderr, keep stdout parseable, exit 3.
+        """Report on stderr, keep stdout parseable, exit non-zero.
 
         The document carries the outcome beside the list. A bare `[]` reads the same whether the
         config was clean, unreadable, or absent — so a caller that has dropped the exit status is
@@ -159,7 +162,7 @@ def config_validate(
         error(message)
         if as_json:
             emit_json({'outcome': outcome, 'unusable_values': []})
-        raise typer.Exit(UNREADABLE_CONFIG_EXIT)
+        raise typer.Exit(NEEDS_A_PERSON_EXIT)
 
     if not CONFIG_PATH.exists():
         refuse('no_config', f'no config found at {CONFIG_PATH} — run "dectl config init" to create one')
@@ -170,7 +173,7 @@ def config_validate(
         report_config_error(exc)
         if as_json:
             emit_json({'outcome': config_error_outcome(exc), 'unusable_values': []})
-        raise typer.Exit(UNREADABLE_CONFIG_EXIT) from exc
+        raise typer.Exit(NEEDS_A_PERSON_EXIT) from exc
     if config is None:
         refuse('no_config', f'config at {CONFIG_PATH} was removed while it was being read')
 
@@ -193,10 +196,10 @@ def config_validate(
                 ],
             }
         )
-        raise typer.Exit(1 if problems else 0)
+        raise typer.Exit(NEEDS_A_PERSON_EXIT if problems else 0)
 
     if problems:
         error(f'config at {CONFIG_PATH} matches the schema, but names values that cannot be used:')
-        refuse_unusable_values(problems)
+        refuse_unusable_values(problems, exit_code=NEEDS_A_PERSON_EXIT)
 
     success(f'config at {CONFIG_PATH} is valid')

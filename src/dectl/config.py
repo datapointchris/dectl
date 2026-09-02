@@ -8,9 +8,7 @@ from pyclisteno.paths import config_home
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import ValidationError
-from pydantic import field_validator
 
-from dectl.env import ENV_PLACEHOLDER
 from dectl.env import substitute_env
 from dectl.output import error
 from dectl.output import stderr_console
@@ -28,6 +26,7 @@ from dectl.values import expand_home
 from dectl.values import home_fault
 from dectl.values import key_fault
 from dectl.values import path_fault
+from dectl.values import root_fault
 
 # `$XDG_CONFIG_HOME/dectl/config.yaml`, falling back to `~/.config` when the variable is unset.
 # `config_home()` reads the environment at import, so a process that exports the variable after
@@ -244,27 +243,6 @@ class PipelineConfig(ResourceModel):
     monitor: MonitorConfig = MonitorConfig()
     jenkins: JenkinsJobConfig | None = None
 
-    @field_validator('resolve_paths_from')
-    @classmethod
-    def root_is_rooted(cls, value: str | None) -> str | None:
-        """Reject a relative root, which would reintroduce the dependency the key removes.
-
-        `~` counts as rooted because expansion makes it absolute. Existence is deliberately not
-        checked here: a config is loaded on every invocation, including on a machine that holds
-        none of the checkouts, and a read of an AWS resource needs no local file. `config
-        validate` is where the directory is required to actually be there, and so is whether a
-        `~user` in it resolves — both are properties of a machine rather than of the value.
-
-        The `{env}` token is replaced with a plain name before the test rather than substituted,
-        because the active environment is not known at load — `--env` is parsed after this runs.
-        A leading token then reads as relative, which is what it is: `{env}/salesdata` names a
-        directory under wherever dectl was invoked whatever the environment resolves to."""
-        if value is None:
-            return value
-        if not (value.startswith('~') or PurePosixPath(value.replace(ENV_PLACEHOLDER, 'x')).is_absolute()):
-            raise ValueError(f'must be an absolute or ~-rooted path; {value!r} resolves against the working directory')
-        return value
-
 
 class DectlConfig(StrictModel):
     defaults: Defaults
@@ -452,14 +430,19 @@ def declares_nothing(pipeline: PipelineConfig) -> list[ValueSite]:
 
     `None` is not empty, it is unwritten: an optional declared field such as
     `resolve_paths_from` says the key was left out, and leaving it out is the documented way to
-    keep the earlier behaviour. Only a key the writer put there and left blank is a fault."""
+    keep the earlier behaviour. Only a key the writer put there and left blank is a fault.
+
+    A field is reported only when *no* value in it is usable. A blank entry beside a real one is
+    a different fault with a different remedy — delete the line, rather than name something to
+    deploy — and it already has one, because an empty string is not a clean S3 key. Reporting
+    the field as naming nothing while it names a script that exists says something untrue, and
+    sends the reader to a command that shows them the surviving script."""
     empty = []
     for site, member, field in declared_values(pipeline, 'PATH_FIELDS'):
         configured = getattr(member, field)
         if configured is None:
             continue
-        values = as_values(configured)
-        if not values or not all(values):
+        if not any(as_values(configured)):
             empty.append(site)
     return empty
 
@@ -522,8 +505,19 @@ def pipeline_value_faults(
     # Machine-independent, so these run whatever `on_disk` says and whatever the root turns out
     # to be. Gated on the root, declaring one on a box that never holds the checkout would
     # report less than declaring none.
+    problems: list[UnusableValue] = []
+
+    # First, because a root that is not rooted resolves against the working directory and every
+    # path under it lands somewhere this cannot predict. Reported rather than raised at load: a
+    # schema failure sends `main.py` to `cfg = None` and takes every pipeline command with it,
+    # so the likeliest first spelling of a new key would blank the CLI that explains it.
+    if pipeline.resolve_paths_from is not None:
+        fault = root_fault(pipeline.resolve_paths_from)
+        if fault:
+            return [row(ROOT_SITE, None, fault, pipeline.resolve_paths_from)]
+
     nothing = declares_nothing(pipeline)
-    problems = [row(site, None, ConfigFault.DECLARES_NOTHING, '') for site in nothing if in_scope(site)]
+    problems += [row(site, None, ConfigFault.DECLARES_NOTHING, '') for site in nothing if in_scope(site)]
 
     # An empty value that is also a key operand is reported once, as the absence it is. Saying
     # both that it declares nothing and that it is not a clean key answers a question nobody
@@ -572,9 +566,9 @@ def pipeline_value_faults(
         if declared.site != ROOT_SITE:
             continue
         root = pipeline_root(pipeline)
-        root_fault = home_fault(declared.value) or path_fault(root, declared.expects)
-        if root_fault:
-            return [*problems, row(ROOT_SITE, root, root_fault, declared.value)]
+        on_disk_fault = home_fault(declared.value) or path_fault(root, declared.expects)
+        if on_disk_fault:
+            return [*problems, row(ROOT_SITE, root, on_disk_fault, declared.value)]
 
     # A value whose spelling is already refused is not also reported as missing. Resolution
     # would place `./copy.py` somewhere real and `jobs//copy.py` somewhere else, and a second

@@ -482,11 +482,26 @@ def test_pipeline_root_is_the_working_directory_when_no_root_is_set():
     assert pipeline_root(pipeline_rooted_at(None)) == Path.cwd()
 
 
-def test_a_relative_root_is_rejected():
-    # A relative root would resolve against the working directory, which is the dependency the
-    # key exists to remove — so it fails validation rather than half-working.
-    with pytest.raises(ValidationError):
-        pipeline_rooted_at('../salesdata')
+@pytest.mark.parametrize('root', ['../salesdata', 'code/salesdata', '{env}/salesdata', ''])
+def test_a_root_that_is_not_rooted_is_reported_rather_than_raised(root):
+    # A relative root resolves against the working directory, which is the dependency the key
+    # exists to remove. It is reported for the reason every other spelling fault is: a schema
+    # failure sends `main.py` to `cfg = None` and takes every pipeline command with it, so the
+    # likeliest first spelling of a new key would blank the CLI that explains it.
+    #
+    # A leading `{env}` is relative whatever the environment resolves to, and `--env` is parsed
+    # after the config loads, so the token is replaced with a plain name rather than substituted.
+    pipeline = pipeline_rooted_at(root)
+
+    faults = pipeline_value_faults('p', pipeline, on_disk=False)
+
+    assert [(f.site.field, f.fault) for f in faults] == [('resolve_paths_from', ConfigFault.NOT_A_ROOTED_PATH)]
+
+
+def test_a_root_that_is_not_rooted_leaves_the_rest_of_the_cli_working(monkeypatch, tmp_path):
+    # The whole reason it is not a validator. The config loads, so `config validate` is there to
+    # name the problem and `list` still shows the pipelines.
+    assert pipeline_rooted_at('code/salesdata').resolve_paths_from == 'code/salesdata'
 
 
 def test_the_root_is_absent_by_default():
@@ -580,6 +595,9 @@ SPELLING = frozenset(
         ConfigFault.NOT_A_CLEAN_KEY,
         ConfigFault.KEY_ESCAPES_ROOT,
         ConfigFault.NOT_A_BUCKET_NAME,
+        # A root that is not rooted resolves against the working directory, so there is no
+        # meaningful path to report — the remedy is the form the value has to take.
+        ConfigFault.NOT_A_ROOTED_PATH,
     }
 )
 ON_DISK = frozenset(
@@ -628,9 +646,10 @@ def test_a_home_this_machine_cannot_resolve_is_a_fault_not_a_load_failure(tmp_pa
 
 def test_every_config_load_failure_is_one_the_callers_catch():
     # Every caller catches CONFIG_LOAD_ERRORS, so a load failure outside that tuple is one no
-    # command recovers from.
+    # command recovers from. An unknown key is a load failure; how a value is *written* is not,
+    # because taking the pipeline tree down removes the commands that would report it.
     with pytest.raises(CONFIG_LOAD_ERRORS):
-        pipeline_rooted_at('../relative')
+        PipelineConfig.model_validate({'resolve_paths_frm': '/srv/x'})
 
 
 def test_the_env_token_is_substituted_into_the_root():
@@ -644,13 +663,6 @@ def test_the_env_token_is_substituted_into_the_root():
         assert resolve_from_root(pipeline, substitute_env('modules/{env}/code')) == Path('/srv/prod/salesdata/modules/prod/code')
     finally:
         set_active_environment('dev', 'default')
-
-
-def test_a_root_beginning_with_a_token_is_still_rejected_as_relative():
-    # The token is stripped rather than substituted for the rootedness test, because --env is
-    # parsed after the config loads.
-    with pytest.raises(ValidationError):
-        pipeline_rooted_at('{env}/salesdata')
 
 
 @pytest.mark.parametrize('field', ['resolve_paths_from', 'source_dir'])

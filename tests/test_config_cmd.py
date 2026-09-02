@@ -199,7 +199,7 @@ def test_validate_json_emits_the_unusable_paths_as_objects(monkeypatch, tmp_path
 
     result = runner.invoke(config_app, ['validate', '--json'])
 
-    assert result.exit_code == 1
+    assert result.exit_code == 3
     assert json.loads(result.stdout) == {
         'outcome': 'unusable_values',
         'unusable_values': [
@@ -264,10 +264,12 @@ def test_validate_json_tells_the_two_load_failures_apart(monkeypatch, tmp_path, 
     assert json.loads(result.stdout)['outcome'] == outcome
 
 
-def test_validate_separates_a_config_it_read_from_one_it_could_not(monkeypatch, tmp_path):
-    # 1 is the answer the command was run for: the config was read and names values that cannot
-    # be used. 3 is a config that was never read, which needs a person rather than an edit to a
-    # path. A scheduled run folding them together reports a box with no dectl config as fine.
+def test_validate_exits_the_same_way_for_every_fault_a_person_has_to_fix(monkeypatch, tmp_path):
+    # Both need a person. The convention reserves 1 for drift a tool's own `apply` clears, and
+    # dectl ships no `apply` — a config it could not read and one naming a directory that is not
+    # there are both edits to the file. A scheduler holding that convention would read 1 as
+    # self-clearing. Which kind it was is `outcome`, and `test_validate_json_tells_the_two_load
+    # _failures_apart` is what pins that.
     root = tmp_path / 'salesdata'
     point_at(monkeypatch, tmp_path, config_naming(str(root)))
     unusable = runner.invoke(config_app, ['validate'])
@@ -275,7 +277,7 @@ def test_validate_separates_a_config_it_read_from_one_it_could_not(monkeypatch, 
     (tmp_path / 'config.yaml').unlink()
     absent = runner.invoke(config_app, ['validate'])
 
-    assert unusable.exit_code == 1
+    assert unusable.exit_code == 3
     assert absent.exit_code == 3
 
 
@@ -329,7 +331,7 @@ def test_validate_rejects_a_root_that_is_not_on_this_machine(monkeypatch, tmp_pa
 
     result = runner.invoke(config_app, ['validate', '--json'])
 
-    assert result.exit_code == 1
+    assert result.exit_code == 3
     assert faults_from(result) == [('pipeline', 'resolve_paths_from', 'absent')]
 
 
@@ -343,7 +345,7 @@ def test_validate_rejects_a_present_root_that_is_missing_the_source(monkeypatch,
 
     result = runner.invoke(config_app, ['validate', '--json'])
 
-    assert result.exit_code == 1
+    assert result.exit_code == 3
     assert faults_from(result) == [('lambda', 'source_dir', 'absent')]
 
 
@@ -358,7 +360,7 @@ def test_validate_reports_a_file_named_as_a_source_dir_as_a_file(monkeypatch, tm
 
     result = runner.invoke(config_app, ['validate', '--json'])
 
-    assert result.exit_code == 1
+    assert result.exit_code == 3
     assert faults_from(result) == [('lambda', 'source_dir', 'expected_directory')]
 
 
@@ -388,7 +390,7 @@ def test_validate_checks_glue_scripts_and_not_only_lambda_sources(monkeypatch, t
 
     result = runner.invoke(config_app, ['validate', '--json'])
 
-    assert result.exit_code == 1
+    assert result.exit_code == 3
     assert faults_from(result) == [('glue', 'scripts', 'absent')]
     assert json.loads(result.stdout)['unusable_values'][0]['path'] == str(root / 'jobs' / 'copy.py')
 
@@ -441,7 +443,7 @@ def test_validate_checks_key_shape_even_without_a_declared_root(monkeypatch, tmp
 
     result = runner.invoke(config_app, ['validate', '--json'])
 
-    assert result.exit_code == 1
+    assert result.exit_code == 3
     assert [p['fault'] for p in json.loads(result.stdout)['unusable_values']] == ['key_escapes_root']
 
 

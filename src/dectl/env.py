@@ -7,10 +7,10 @@ from pydantic import ValidationError
 from dectl.output import error
 from dectl.output import stderr_console
 from dectl.output import warn
+from dectl.values import ENV_PLACEHOLDER
 from dectl.values import DeclaresValues
 
 DEFAULT_ENV = 'dev'
-ENV_PLACEHOLDER = '{env}'
 
 
 class ActiveEnvironment:

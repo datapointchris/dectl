@@ -155,7 +155,10 @@ def make_lambda_function_app(
         # is reported by botocore as a traceback. The machine most likely to be missing the
         # checkout is the one most likely to be missing the profile, and the config fault is the
         # one this door can explain.
-        refuse_unusable_values(pipeline_value_faults(pipeline_name, pipeline, on_disk=True, resource=LambdaConfig.RESOURCE, alias=alias))
+        refuse_unusable_values(
+            pipeline_value_faults(pipeline_name, pipeline, on_disk=True, resource=LambdaConfig.RESOURCE, alias=alias),
+            exit_code=1,
+        )
 
         # Substituted once, here. `resolve_from_root` takes a value the caller has already
         # rendered, so the deploy resolves exactly the directory the walk checked.
