@@ -2,6 +2,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import ClassVar
+from typing import get_args
 
 import yaml
 from pyclisteno.paths import config_home
@@ -321,6 +322,22 @@ def as_aliased_values(configured: str | list[str] | dict[str, str]) -> list[tupl
     return [('', value) for value in as_values(configured)]
 
 
+def declared_resource_names() -> set[str]:
+    """Every resource word a row can carry, read off the models rather than off one config.
+
+    A fact about what dectl declares, not about what a file holds — so `glue` is a scope a
+    caller may name whether or not the pipeline in front of it holds a job. Derived from the
+    same `RESOURCE` and `FIELD_RESOURCE` the rows are labelled from, so a new kind joins this
+    vocabulary by existing rather than by being listed here."""
+    names = {PipelineConfig.RESOURCE, *PipelineConfig.FIELD_RESOURCE.values()}
+    for field in PipelineConfig.model_fields.values():
+        for annotation in [field.annotation, *get_args(field.annotation)]:
+            if isinstance(annotation, type) and issubclass(annotation, DeclaresValues):
+                names.add(annotation.RESOURCE)
+                names.update(annotation.FIELD_RESOURCE.values())
+    return names
+
+
 def resource_members(pipeline: PipelineConfig) -> list[tuple[str, str, ResourceModel]]:
     """Each (collection, alias, resource) the pipeline holds, walked off the model.
 
@@ -437,10 +454,16 @@ def declares_nothing(pipeline: PipelineConfig) -> list[ValueSite]:
     passes the schema and the deploy reaches the index.
 
     An empty *string* is the same absence and is worse resolved than reported. `Path('')` is
-    `.`, which `/` drops, so an empty `source_dir` resolves to the anchor itself and the deploy
-    zips the whole checkout — `.git`, a sibling function's source, any state file beside them —
-    as that function's code. A glue script is caught by `key_fault` on its way to an S3 key;
-    `source_dir` is the declared path with no key behind it, so nothing else covers it.
+    `.`, which `/` drops, so an empty `source_dir` resolves to the anchor and the deploy ships
+    whatever sits there as that function's code. A glue script is caught by `key_fault` on its
+    way to an S3 key; `source_dir` is the declared path with no key behind it, so nothing else
+    covers it.
+
+    What is refused is the absence, not the reach. `source_dir: "."` resolves to the same
+    directory and is accepted, because a writer who typed a dot said which directory they meant
+    and a writer who left the key blank named none — the same line `None` sits on below. So the
+    reach is not the reason: a repo whose root is one function's code is an ordinary config, and
+    `deployable_files` drops `.git` and `__pycache__` from either spelling.
 
     Both are reported at the site rather than at the join, so `config validate` and the deploy
     say the same sentence and neither has to resolve a value to know it is absent.
@@ -505,16 +528,19 @@ def pipeline_value_faults(
     # `GlueJobConfig.RESOURCE` is `glue`, its collection is `glue_jobs` — so `resource` is
     # checked against the declared set rather than trusted, and an alias against the pipeline's.
     #
-    # Both sets are read off the rows themselves rather than recomputed from `resource_members`.
-    # A `buckets` row is labelled `s3` and its owner is the pipeline, so a guard walking members
-    # refused the one word its own output uses, and an `s3` door got a traceback rather than a
-    # refusal. Whatever a row can carry is a scope a caller may name.
+    # The resource vocabulary comes from the models and the alias set from this pipeline's rows,
+    # because the two questions differ. `glue` is a word a caller may name whether or not this
+    # pipeline holds a job — reading it off the emitted rows makes a valid scope raise on a
+    # pipeline declaring none of that kind. An alias is only ever this pipeline's.
+    #
+    # Both include `FIELD_RESOURCE`: a `buckets` row is labelled `s3` and its owner is the
+    # pipeline, so a set walking members alone refuses the one word its own output uses.
     sites = [*(path.site for path in declared_paths(pipeline)), *(key.site for key in declared_keys(pipeline))]
     sites.extend(name.site for name in declared_names(pipeline))
     sites.extend(declares_nothing(pipeline))
-    known_resources = {site.resource for site in sites} | {PipelineConfig.RESOURCE}
+    known_resources = declared_resource_names()
     if resource and resource not in known_resources:
-        raise ValueError(f'no resource named {resource!r} in pipeline {pipeline_name!r}; declared: {sorted(known_resources)}')
+        raise ValueError(f'no resource named {resource!r}; the declared resources are {sorted(known_resources)}')
     known_aliases = {site.alias for site in sites if site.alias}
     if alias and alias not in known_aliases:
         raise ValueError(f'no alias named {alias!r} in pipeline {pipeline_name!r}; declared: {sorted(known_aliases)}')

@@ -112,11 +112,15 @@ def aws_names_of(model: BaseModel) -> dict[str, Any]:
 def render_env_model[ModelT: BaseModel](model: ModelT) -> ModelT:
     """Return a copy of a config model with {env} substituted in every string field.
 
-    The re-validation is the point at which a field validator sees the substituted value rather
-    than the one in the file, so a config that loaded can still fail here. That failure is a
-    config problem and is reported as one: a bare ValidationError escaping a verb reaches the
-    reader as a pydantic traceback and a docs URL, which names the model rather than the key
-    they typed."""
+    The re-validation is what turns substituted data back into a model, so a config that loaded
+    can still fail here. No shipped model can produce that failure today, and it is caught
+    rather than left to escape because the alternative is a pydantic traceback and a docs URL
+    naming the model rather than the key the reader typed.
+
+    The construct that would make it reachable is a field validator, which `key_fault` and
+    `root_fault` each explain is deliberately absent — a spelling check written as one blanks
+    the pipeline tree at load. So this arm is a backstop for a failure the design excludes, not
+    a handler for one it expects, and a test builds a model carrying a validator to drive it."""
     data = model.model_dump()
     warn_if_environment_had_no_effect(aws_names_of(model))
     try:

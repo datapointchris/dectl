@@ -187,9 +187,15 @@ def test_json_carries_the_resolved_path_of_every_declared_path():
 
     data = pipeline_to_dict('salesdata', pipeline)
 
+    # The sections that are not alias maps, named rather than skipped by shape. Skipping
+    # anything that does not look like one makes a section published under the wrong shape
+    # vanish from this walk, which is the guard reporting complete on a member it never saw.
+    not_alias_keyed = {'pipeline', 'resolve_paths_from', 'monitor', 'jenkins'}
+    assert not_alias_keyed <= set(data)
+
     published = set()
     for resource, aliases in data.items():
-        if resource == 'resolve_paths_from' or not isinstance(aliases, dict):
+        if resource in not_alias_keyed:
             continue
         for alias, body in aliases.items():
             published.update((resource, alias, field) for field in body.get('paths', {}))

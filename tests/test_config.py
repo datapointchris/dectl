@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from pydantic import field_validator
 
 from dectl.config import CONFIG_LOAD_ERRORS
+from dectl.config import ROOT_SITE
 from dectl.config import TEMPLATE_CONFIG
 from dectl.config import DectlConfig
 from dectl.config import Defaults
@@ -33,6 +34,7 @@ from dectl.config import config_error_headline
 from dectl.config import declared_keys
 from dectl.config import declared_names
 from dectl.config import declared_paths
+from dectl.config import declared_resource_names
 from dectl.config import declared_values
 from dectl.config import declares_nothing
 from dectl.config import describe_config_error
@@ -44,6 +46,7 @@ from dectl.env import render_env_model
 from dectl.env import set_active_environment
 from dectl.env import substitute_env
 from dectl.pipeline_view import aws_names_only
+from dectl.pipeline_view import pipeline_to_dict
 from dectl.values import ANCHOR_FORM
 from dectl.values import EDIT_CONFIG
 from dectl.values import FAULT_WORDING
@@ -498,13 +501,15 @@ SITES_OF = {
     },
 }
 
-# One config per member shape, and the field each shape's owner is given a declaration on.
+# One config per member shape, and the field each shape's owner is given a declaration on. The
+# alias is the one a row for that member carries: only a dict-held member has one, because the
+# other two are reached without a key. A fourth shape is added by copying a row, so every column
+# here is the value it will have.
 SHAPES = [
-    ('dict-held', LambdaConfig, {'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}}}, '', 'source_dir'),
+    ('dict-held', LambdaConfig, {'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}}}, 'fn', 'source_dir'),
     ('bare-field', MonitorConfig, {'monitor': {'lambdas': ['a']}}, '', 'lambdas'),
     ('on-the-pipeline', PipelineConfig, {'resolve_paths_from': '/srv/x'}, '', 'resolve_paths_from'),
 ]
-SHAPES = [(name, owner, raw, 'fn' if owner is LambdaConfig else '', field) for name, owner, raw, _, field in SHAPES]
 MEMBER_SHAPES = [shape for shape in SHAPES if shape[1] is not PipelineConfig]
 
 
@@ -636,10 +641,21 @@ def test_a_root_that_is_not_rooted_is_reported_rather_than_raised(root):
     assert [(f.site.field, f.fault) for f in faults] == [('resolve_paths_from', ConfigFault.NOT_A_ROOTED_PATH)]
 
 
-def test_a_root_that_is_not_rooted_leaves_the_rest_of_the_cli_working(monkeypatch, tmp_path):
-    # The whole reason it is not a validator. The config loads, so `config validate` is there to
-    # name the problem and `list` still shows the pipelines.
-    assert pipeline_rooted_at('code/salesdata').resolve_paths_from == 'code/salesdata'
+def test_a_root_that_is_not_rooted_leaves_the_rest_of_the_cli_working():
+    """The whole reason it is not a field validator, driven rather than asserted as a round-trip.
+
+    A validator would raise at load, and `main.py` answers a load failure with `cfg = None` —
+    which takes every pipeline command with it, including the two that explain the problem. So
+    the config has to load: `config validate` names the fault, and the renderers still show the
+    pipeline. Asserting only that the field round-trips leaves all three of those unmeasured."""
+    pipeline = pipeline_rooted_at('code/salesdata')
+
+    faults = pipeline_value_faults('salesdata', pipeline, on_disk=True)
+    published = pipeline_to_dict('salesdata', pipeline)
+
+    assert [(problem.site, problem.fault) for problem in faults] == [(ROOT_SITE, ConfigFault.NOT_A_ROOTED_PATH)]
+    assert published['lambda']['fn']['name'] == 'n'
+    assert published['resolve_paths_from']['declared'] is True
 
 
 def test_the_root_is_absent_by_default():
@@ -1015,3 +1031,20 @@ def test_one_fault_value_publishes_one_row_shape(tmp_path):
     assert [row.path for row in rows] == [None, None]
     # Shown rather than swallowed: the characters are the finding, so both rows quote them.
     assert all(row.shown == repr('~nosuchuser/code') for row in rows)
+
+
+def test_a_declared_resource_scopes_a_pipeline_that_holds_none_of_that_kind():
+    """The scope vocabulary is what dectl declares, not what one file happens to contain.
+
+    Read off the emitted rows it is a function of the config, so `glue` raised on a pipeline
+    holding no glue job — a Python traceback, in a tool whose every other refusal goes through
+    `error()`. No door reaches it today only because the command tree carries a resource the
+    config declares; whoever adds a door for a new kind inherits it."""
+    bare = PipelineConfig.model_validate({'buckets': {'raw': 'sales-raw'}})
+
+    assert declared_resource_names() >= {'glue', 'lambda', 'sfn', 's3', 'iceberg', 'monitor', 'pipeline'}
+    for resource in declared_resource_names():
+        assert pipeline_value_faults('p', bare, on_disk=False, resource=resource) == []
+
+    with pytest.raises(ValueError, match='no resource named'):
+        pipeline_value_faults('p', bare, on_disk=False, resource='nosuchkind')
