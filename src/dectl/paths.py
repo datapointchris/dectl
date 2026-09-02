@@ -112,9 +112,22 @@ class DeclaresValues:
     declaration failed to arrive look identical, and the difference showed up as a missing
     warning three modules away."""
 
+    # The word the CLI, the error text and `validate --json` use for this kind of resource. It
+    # lives beside the declarations because every row they emit carries it.
+    RESOURCE: ClassVar[str] = ''
     PATH_FIELDS: ClassVar[Mapping[str, PathKind]] = {}
     KEY_FIELDS: ClassVar[frozenset[str]] = frozenset()
     BUCKET_FIELDS: ClassVar[frozenset[str]] = frozenset()
+    # A declared field whose rows a reader knows by another name than its owner's `RESOURCE`.
+    # `buckets` sits on the pipeline and is `s3` to the CLI, to `list` and to `config show`.
+    # Declared rather than spelled in the walk that emits it, so the scope guard and the
+    # renderers read the same answer the rows carry.
+    FIELD_RESOURCE: ClassVar[Mapping[str, str]] = {}
+
+    @classmethod
+    def site_resource(cls, field: str) -> str:
+        """The resource name a row for this field carries."""
+        return cls.FIELD_RESOURCE.get(field, cls.RESOURCE)
 
     @classmethod
     def local_only_fields(cls) -> frozenset[str]:

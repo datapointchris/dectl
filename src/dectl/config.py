@@ -116,18 +116,17 @@ class StrictModel(BaseModel):
 
 
 class ResourceModel(StrictModel, DeclaresValues):
-    """One resource a pipeline holds by alias, and which of its fields dectl resolves locally.
+    """One resource a pipeline holds, and which of its fields dectl resolves locally.
 
-    `RESOURCE` is the word the CLI, the error text and `validate --json` use for this kind. The
-    three field declarations come from `DeclaresValues`, in `paths.py`, so `env` can read them
-    without importing this module.
+    `RESOURCE` and the three field declarations come from `DeclaresValues`, in `paths.py`, so
+    `env` can read them without importing this module.
 
-    Four mechanisms read them: `declared_paths`, `declared_keys`, `declared_names` and
-    `env.aws_names_of`. A field declared to some and not the others is checked one way and not
-    another, or excluded from the env-effect guard and never checked, and all of those read as
-    success. `test_every_string_field_is_classified` is what makes a new field a decision."""
-
-    RESOURCE: ClassVar[str] = ''
+    Every mechanism reading them walks `declaring_members`, which yields the pipeline and its
+    resources alike. A field declared to some declarations and not the others is checked one way
+    and not another, or excluded from the env-effect guard and never checked, and all of those
+    read as success. `test_every_string_field_is_classified` is what makes a new field a
+    decision, and `test_every_declaration_consumer_sees_every_member_shape` is what keeps a
+    consumer from walking its own way to a narrower set."""
 
 
 class Defaults(StrictModel):
@@ -225,6 +224,10 @@ class PipelineConfig(ResourceModel):
     # `buckets` is alias -> real bucket name, so each entry is a name to check and the alias is
     # what names it back to the reader.
     BUCKET_FIELDS: ClassVar[frozenset[str]] = frozenset({'buckets'})
+    # `buckets` sits on the pipeline and holds no model of its own, but `s3` is the word the
+    # CLI, `list` and `config show` give that collection, so it is the word its rows carry and
+    # the word a caller scopes a door by.
+    FIELD_RESOURCE: ClassVar[Mapping[str, str]] = {'buckets': 's3'}
 
     # Directory holding this pipeline's code. Every relative path in the block below — a lambda's
     # source_dir, a glue job's scripts — resolves against it, so a deploy targets the same files
@@ -327,8 +330,9 @@ def resource_members(pipeline: PipelineConfig) -> list[tuple[str, str, ResourceM
     alias; one held as a bare field — `monitor` is the shape — contributes an empty alias, and
     requiring a `dict` left any declaration on such a field inert with nothing going red.
 
-    `buckets` is a plain `dict[str, str]` and holds no model, so it is not reached here;
-    `declared_names` covers it, because nothing about a bucket name is a local path."""
+    `buckets` is a plain `dict[str, str]` and holds no model, so it is not reached here. The
+    pipeline itself declares it, and `declaring_members` is what puts the pipeline in the
+    walk beside its resources."""
     found = []
     for collection, value in pipeline:
         if isinstance(value, ResourceModel):
@@ -336,6 +340,35 @@ def resource_members(pipeline: PipelineConfig) -> list[tuple[str, str, ResourceM
         elif isinstance(value, dict):
             found.extend((collection, alias, member) for alias, member in value.items() if isinstance(member, ResourceModel))
     return found
+
+
+def declaring_members(pipeline: PipelineConfig) -> list[tuple[str, str, ResourceModel]]:
+    """Every carrier of a declaration in this pipeline: the pipeline itself, then its resources.
+
+    The one walk. `declared_paths`, `declared_keys`, `declared_names`, `declares_nothing` and
+    the scope guard all read this, so a member shape reaches every consumer or none of them.
+    Each consumer filters by the declaration it cares about and by nothing else.
+
+    Walking separately is what this replaces. Four enumerations each had their own traversal
+    and three were wrong for a shape the config already allows: a declaration on the pipeline
+    was invisible to two of them, and a member held as a bare field was misindexed by a third.
+    None of those went red, because a consumer that never sees a value reports no fault for
+    it."""
+    return [('', '', pipeline), *resource_members(pipeline)]
+
+
+def declared_values(pipeline: PipelineConfig, declaration: str) -> list[tuple[PathSite, str, ResourceModel, str]]:
+    """Each (site, collection, owner, field) the named declaration reaches, in walk order.
+
+    `declaration` is the attribute holding the field names — `PATH_FIELDS`, `KEY_FIELDS` or
+    `BUCKET_FIELDS`. The field's own values are left to the caller, because a path wants one
+    row per entry and a bucket wants the alias its mapping keys it by."""
+    sites = []
+    for collection, alias, member in declaring_members(pipeline):
+        owner = type(member)
+        for field in sorted(getattr(owner, declaration)):
+            sites.append((PathSite(owner.site_resource(field), alias, field), collection, member, field))
+    return sites
 
 
 def declared_paths(pipeline: PipelineConfig) -> list[DeclaredPath]:
@@ -347,16 +380,19 @@ def declared_paths(pipeline: PipelineConfig) -> list[DeclaredPath]:
     is declared once beside the field itself rather than restated as a literal here.
 
     Values are substituted here rather than through `render_env_model`, which would also fire
-    `warn_if_environment_had_no_effect` and put a warning in the middle of a validate run."""
+    `warn_if_environment_had_no_effect` and put a warning in the middle of a validate run.
+
+    An unwritten or empty value yields no row, because there is no path to check.
+    `declares_nothing` is what reports it, and it reads the same walk, so the two cannot
+    disagree about which fields exist."""
     paths = []
-    for field, kind in PipelineConfig.PATH_FIELDS.items():
-        value = getattr(pipeline, field)
-        if value:
-            paths.append(DeclaredPath(PathSite(PipelineConfig.RESOURCE, '', field), '', substitute_env(value), kind))
-    for collection, alias, member in resource_members(pipeline):
-        for field, kind in type(member).PATH_FIELDS.items():
-            site = PathSite(type(member).RESOURCE, alias, field)
-            for value in as_values(getattr(member, field)):
+    for site, collection, member, field in declared_values(pipeline, 'PATH_FIELDS'):
+        configured = getattr(member, field)
+        if configured is None:
+            continue
+        kind = type(member).PATH_FIELDS[field]
+        for value in as_values(configured):
+            if value:
                 paths.append(DeclaredPath(site, collection, substitute_env(value), kind))
     return paths
 
@@ -369,11 +405,9 @@ def declared_keys(pipeline: PipelineConfig) -> list[DeclaredKey]:
     silent. A prefix names nothing on disk, so it is a key and not a path; a script is both,
     and appears here and in `declared_paths`."""
     keys = []
-    for _, alias, member in resource_members(pipeline):
-        for field in sorted(type(member).KEY_FIELDS):
-            site = PathSite(type(member).RESOURCE, alias, field)
-            for value in as_values(getattr(member, field)):
-                keys.append(DeclaredKey(site, substitute_env(value)))
+    for site, _, member, field in declared_values(pipeline, 'KEY_FIELDS'):
+        for value in as_values(getattr(member, field)):
+            keys.append(DeclaredKey(site, substitute_env(value)))
     return keys
 
 
@@ -383,36 +417,48 @@ def declared_names(pipeline: PipelineConfig) -> list[DeclaredName]:
     `script_bucket` is the third operand `join_uri` joins, beside the prefix and the script that
     `declared_keys` covers. Each `buckets` entry is the same kind of value reached through a
     different verb — `s3 export`, `s3 ALIAS mount`, `s3 ALIAS uri` — and neither is a path, so
-    neither resolves against anything."""
-    # `s3` rather than `pipeline`: `buckets` holds no model to carry a `RESOURCE`, and `s3` is
-    # the word the CLI, `list` and `config show` already use for that collection. The literal
-    # sits here because there is nowhere else for it, not because the word is in doubt.
+    neither resolves against anything.
+
+    A field holding a mapping names its own aliases — `buckets` is `raw`, `staged` and the rest
+    — and those win over the owner's alias, which for the pipeline is empty. `s3` as the
+    resource comes from `FIELD_RESOURCE` rather than from a literal here, so the scope guard
+    reads the same word these rows carry."""
     names = []
-    for field in sorted(PipelineConfig.BUCKET_FIELDS):
-        for alias, value in as_aliased_values(getattr(pipeline, field)):
-            names.append(DeclaredName(PathSite('s3', alias, field), substitute_env(value)))
-    for _, alias, member in resource_members(pipeline):
-        for field in sorted(type(member).BUCKET_FIELDS):
-            site = PathSite(type(member).RESOURCE, alias, field)
-            for _, value in as_aliased_values(getattr(member, field)):
-                names.append(DeclaredName(site, substitute_env(value)))
+    for site, _, member, field in declared_values(pipeline, 'BUCKET_FIELDS'):
+        for alias, value in as_aliased_values(getattr(member, field)):
+            named = site._replace(alias=alias) if alias else site
+            names.append(DeclaredName(named, substitute_env(value)))
     return names
 
 
 def declares_nothing(pipeline: PipelineConfig) -> list[PathSite]:
-    """Every site whose declared field holds a list and that list is empty.
+    """Every site whose declared path field holds nothing to check.
 
     A field declared in `PATH_FIELDS` and holding no value yields no `DeclaredPath`, so every
     check driven by that enumeration has nothing to look at. For a glue job that is the whole
     of its `ScriptLocation`, which `build_job_update` takes from `scripts[0]` — an empty list
-    passes the schema and the deploy reaches the index. Driven off the declaration rather than
-    off `pipeline.glue_jobs`, so the next resource with a required list of paths gets it."""
+    passes the schema and the deploy reaches the index.
+
+    An empty *string* is the same absence and is worse resolved than reported. `Path('')` is
+    `.`, which `/` drops, so an empty `source_dir` resolves to the anchor itself and the deploy
+    zips the whole checkout — `.git`, a sibling function's source, any state file beside them —
+    as that function's code. A glue script is caught by `key_fault` on its way to an S3 key;
+    `source_dir` is the declared path with no key behind it, so nothing else covers it.
+
+    Both are reported at the site rather than at the join, so `config validate` and the deploy
+    say the same sentence and neither has to resolve a value to know it is absent.
+
+    `None` is not empty, it is unwritten: an optional declared field such as
+    `resolve_paths_from` says the key was left out, and leaving it out is the documented way to
+    keep the earlier behaviour. Only a key the writer put there and left blank is a fault."""
     empty = []
-    for _, alias, member in resource_members(pipeline):
-        for field in sorted(type(member).PATH_FIELDS):
-            value = getattr(member, field)
-            if isinstance(value, list) and not value:
-                empty.append(PathSite(type(member).RESOURCE, alias, field))
+    for site, _, member, field in declared_values(pipeline, 'PATH_FIELDS'):
+        configured = getattr(member, field)
+        if configured is None:
+            continue
+        values = as_values(configured)
+        if not values or not all(values):
+            empty.append(site)
     return empty
 
 
@@ -441,10 +487,18 @@ def pipeline_path_faults(
     # config and proceeds to deploy. Three spellings for one concept live in this module —
     # `GlueJobConfig.RESOURCE` is `glue`, its collection is `glue_jobs` — so `resource` is
     # checked against the declared set rather than trusted, and an alias against the pipeline's.
-    known_resources = {model.RESOURCE for _, _, model in ((c, a, type(m)) for c, a, m in resource_members(pipeline))}
-    if resource and resource not in known_resources | {PipelineConfig.RESOURCE}:
+    #
+    # Both sets are read off the rows themselves rather than recomputed from `resource_members`.
+    # A `buckets` row is labelled `s3` and its owner is the pipeline, so a guard walking members
+    # refused the one word its own output uses, and an `s3` door got a traceback rather than a
+    # refusal. Whatever a row can carry is a scope a caller may name.
+    sites = [*(path.site for path in declared_paths(pipeline)), *(key.site for key in declared_keys(pipeline))]
+    sites.extend(name.site for name in declared_names(pipeline))
+    sites.extend(declares_nothing(pipeline))
+    known_resources = {site.resource for site in sites} | {PipelineConfig.RESOURCE}
+    if resource and resource not in known_resources:
         raise ValueError(f'no resource named {resource!r} in pipeline {pipeline_name!r}; declared: {sorted(known_resources)}')
-    known_aliases = {member_alias for _, member_alias, _ in resource_members(pipeline)}
+    known_aliases = {site.alias for site in sites if site.alias}
     if alias and alias not in known_aliases:
         raise ValueError(f'no alias named {alias!r} in pipeline {pipeline_name!r}; declared: {sorted(known_aliases)}')
 
@@ -454,11 +508,29 @@ def pipeline_path_faults(
     def row(site: PathSite, path: Path | None, fault: ConfigFault, configured: str) -> UnusableValue:
         return UnusableValue(pipeline_name, site, path, fault, configured)
 
+    def refused_values(found: list[UnusableValue]) -> set[tuple[PathSite, str]]:
+        """Which (site, value) pairs already carry a fault, so nothing reports one twice.
+
+        Read at each point a new fault class is about to be added, because what counts as
+        already-refused grows as the run goes on. Spelling it inline at each of those points
+        made the two reads look independent, and a fault class added between them would have
+        produced a duplicate row rather than an error."""
+        return {(problem.site, problem.configured) for problem in found}
+
     # Machine-independent, so these run whatever `on_disk` says and whatever the root turns out
     # to be. Gated on the root, declaring one on a box that never holds the checkout would
     # report less than declaring none.
-    problems = [row(site, None, ConfigFault.DECLARES_NOTHING, '') for site in declares_nothing(pipeline) if in_scope(site)]
+    nothing = declares_nothing(pipeline)
+    problems = [row(site, None, ConfigFault.DECLARES_NOTHING, '') for site in nothing if in_scope(site)]
+
+    # An empty value that is also a key operand is reported once, as the absence it is. Saying
+    # both that it declares nothing and that it is not a clean key answers a question nobody
+    # asked, and the spelling row is the one without the remedy in it. A `script_prefix` is a
+    # key and not a path, so nothing above covers it and an empty one still reports here.
+    declared_empty = set(nothing)
     for key in declared_keys(pipeline):
+        if not key.value and key.site in declared_empty:
+            continue
         fault = key_fault(key.value)
         if fault and in_scope(key.site):
             problems.append(row(key.site, None, fault, key.value))
@@ -468,18 +540,23 @@ def pipeline_path_faults(
             problems.append(row(name.site, None, fault, name.value))
 
     # Every value anchored to the root is checked for leaving it, not only the ones a key check
-    # happens to reach for another reason. `ESCAPES_ROOT` is named for the anchor, and reaching
-    # it only through `key_fault` left a lambda `source_dir` of `..` uploading the parent of the
-    # declared root — `.git` and a sibling checkout included — with `config validate` clean.
-    # An absolute or `~`-rooted value is exempt: it resolves to itself, so it never claimed the
-    # anchor, and `source_dir` is documented as allowed to sit anywhere.
-    already = {(problem.site, problem.configured) for problem in problems}
-    for declared in declared_paths(pipeline):
-        anchored = not declared.value.startswith('~') and not PurePosixPath(declared.value).is_absolute()
-        if not anchored or not escapes_root(declared.value) or not in_scope(declared.site):
-            continue
-        if (declared.site, declared.value) not in already:
-            problems.append(row(declared.site, None, ConfigFault.ESCAPES_ROOT, declared.value))
+    # reaches for another reason. A lambda `source_dir` of `..` resolves to the parent of the
+    # declared root, and the deploy uploads what it finds there — `.git` and a sibling checkout
+    # included. An absolute or `~`-rooted value is exempt: it resolves to itself, so it never
+    # claimed the anchor, and `source_dir` is documented as allowed to sit anywhere.
+    #
+    # Only where an anchor is declared. Without one the root is the working directory, a
+    # relative `../shared/code` is an ordinary path that `zip_lambda` has always followed, and
+    # refusing it fails a config that deploys. `key_fault` is untouched by that gate — an S3 key
+    # is machine-independent and is checked whether or not this pipeline names a root.
+    if pipeline.resolve_paths_from:
+        already = refused_values(problems)
+        for declared in declared_paths(pipeline):
+            anchored = not declared.value.startswith('~') and not PurePosixPath(declared.value).is_absolute()
+            if not anchored or not escapes_root(declared.value) or not in_scope(declared.site):
+                continue
+            if (declared.site, declared.value) not in already:
+                problems.append(row(declared.site, None, ConfigFault.ESCAPES_ROOT, declared.value))
     if not on_disk:
         return problems
 
@@ -499,7 +576,7 @@ def pipeline_path_faults(
     # would place `./copy.py` somewhere real and `jobs//copy.py` somewhere else, and a second
     # row about the wrong question buries the one that has the remedy in it. Keyed on the value
     # as well as the site, so one bad script does not silence the check on its siblings.
-    refused = {(problem.site, problem.configured) for problem in problems}
+    refused = refused_values(problems)
     for declared in declared_paths(pipeline):
         if declared.site == ROOT_SITE or not in_scope(declared.site) or (declared.site, declared.value) in refused:
             continue
