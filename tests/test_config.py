@@ -43,11 +43,13 @@ from dectl.env import set_active_environment
 from dectl.env import substitute_env
 from dectl.pipeline_view import aws_names_only
 from dectl.values import FAULT_WORDING
+from dectl.values import ROOT_FORM
 from dectl.values import SPELLING_FAULTS
 from dectl.values import ConfigFault
 from dectl.values import PathKind
 from dectl.values import deployable_files
 from dectl.values import path_fault
+from dectl.values import root_fault
 
 
 def test_template_config_is_valid():
@@ -865,3 +867,22 @@ def test_a_source_dir_naming_the_checkout_does_not_ship_its_git_directory(tmp_pa
     shipped = {str(found.relative_to(tmp_path)) for found in deployable_files(tmp_path)}
 
     assert shipped == {'code/handler.py'}
+
+
+def test_a_relative_root_renders_where_it_actually_lands():
+    # `root_fault` refuses it and every deploy door reports it, but `config show` and
+    # `list --json` render the root without running the walk first. A relative value printed
+    # back as the resolved anchor is the confident wrong answer that command exists to prevent:
+    # it resolves against wherever dectl was run, which is the dependency the key removes.
+    pipeline = pipeline_rooted_at('code/salesdata')
+
+    assert pipeline_root(pipeline) == Path.cwd() / 'code' / 'salesdata'
+    assert resolve_from_root(pipeline, 'handler') == Path.cwd() / 'code' / 'salesdata' / 'handler'
+
+
+def test_every_value_the_root_check_refuses_is_named_by_its_remedy():
+    # A remedy that accepts what the check refuses is unactionable while reading as complete.
+    # Each refused spelling has to be findable in the sentence the reader is shown.
+    for value, phrase in [('code/salesdata', 'relative'), ('', 'blank'), ('{env}/salesdata', '{env}')]:
+        assert root_fault(value) is ConfigFault.NOT_A_ROOTED_PATH
+        assert phrase in ROOT_FORM, f'ROOT_FORM does not name why {value!r} is refused'

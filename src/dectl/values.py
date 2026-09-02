@@ -152,8 +152,9 @@ ANCHOR_FORM = (
     'or write an absolute or ~-rooted path, which resolves on its own and is not anchored'
 )
 ROOT_FORM = (
-    'a directory paths resolve from is absolute or ~-rooted: /srv/salesdata or ~/code/salesdata, '
-    'never a relative path, which resolves against wherever dectl was run'
+    'a directory paths resolve from is absolute or ~-rooted: /srv/salesdata or ~/code/salesdata. '
+    'A relative one resolves against wherever dectl was run, and so does a blank one or one '
+    'beginning {env}, because the environment is not known until after the config is read'
 )
 BUCKET_FORM = (
     'an S3 bucket name is 3-63 characters of lowercase letters, digits, dots and hyphens, '

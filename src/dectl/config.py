@@ -270,7 +270,18 @@ def pipeline_root(pipeline: PipelineConfig) -> Path:
     leaves `validate --json` with an exit writing zero bytes."""
     if not pipeline.resolve_paths_from:
         return Path.cwd()
-    return expand_home(substitute_env(pipeline.resolve_paths_from))
+    declared = substitute_env(pipeline.resolve_paths_from)
+    # A relative root is joined onto the working directory, which is where it actually lands.
+    # `root_fault` refuses one and every deploy door reports it, but `config show` and
+    # `list --json` render this without asking — and a relative path printed as a resolved one
+    # is the confident wrong answer that command exists to prevent.
+    #
+    # A `~`-rooted value that expands to nothing is left as written. It was never relative, so
+    # joining it onto the working directory would invent a directory nobody named; it is
+    # reported as `unresolvable_home` and the reader needs to see what they typed.
+    if declared.startswith('~'):
+        return expand_home(declared)
+    return Path.cwd() / expand_home(declared)
 
 
 def resolve_from_root(pipeline: PipelineConfig, substituted_path: str) -> Path:
