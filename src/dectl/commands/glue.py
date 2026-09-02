@@ -1,6 +1,7 @@
 import time
 from pathlib import Path
 from typing import Annotated
+from typing import NamedTuple
 
 import boto3
 import typer
@@ -51,7 +52,21 @@ def script_key(glue_job: GlueJobConfig, script: str) -> str:
 
 
 def script_uri(glue_job: GlueJobConfig, script: str) -> str:
-    return join_uri(substitute_env(glue_job.script_bucket), substitute_env(glue_job.script_prefix), substitute_env(script))
+    """Where one script lands, built from `script_key` so `ScriptLocation` cannot name a
+    different object from the one the upload wrote."""
+    return f's3://{substitute_env(glue_job.script_bucket)}/{script_key(glue_job, script)}'
+
+
+class ResolvedScript(NamedTuple):
+    """One script of a job, as the deploy needs it: the S3-side name and the file on disk.
+
+    `name` is substituted, because every other consumer of a script name is — `script_key`
+    substitutes both halves of the key it builds, `declared_paths` substitutes, and the verb
+    holds a `render_env_model`'d job. A pair carrying the raw string beside the resolved path
+    is two renderings of one file, and nothing at a call site can see which it is holding."""
+
+    name: str
+    path: Path
 
 
 def configured_uris(glue_job: GlueJobConfig) -> str:
@@ -64,8 +79,8 @@ def configured_uris(glue_job: GlueJobConfig) -> str:
     return ' · '.join(join_uri(glue_job.script_bucket, glue_job.script_prefix, script) for script in glue_job.scripts)
 
 
-def resolve_scripts(pipeline_name: str, pipeline: PipelineConfig, alias: str) -> list[tuple[str, Path]]:
-    """Every script of one job as (config string, file on disk), or exit naming what is wrong.
+def resolve_scripts(pipeline_name: str, pipeline: PipelineConfig, alias: str) -> list[ResolvedScript]:
+    """Every script of one job as a substituted name and a file on disk, or exit naming what is wrong.
 
     Run before anything is uploaded and before the definition diff, so `deploy` and `deploy
     --plan` refuse the same configs. A `--plan` that could not see a missing script would report
@@ -77,12 +92,12 @@ def resolve_scripts(pipeline_name: str, pipeline: PipelineConfig, alias: str) ->
     by argument rather than by filtering the result is what keeps the root fault: a checkout
     that is not there explains every missing script under it, and ten lines naming ten files
     name the cause in none of them."""
-    refuse_unusable_values(pipeline_path_faults(pipeline_name, pipeline, on_disk=True, resource='glue', alias=alias))
+    refuse_unusable_values(pipeline_path_faults(pipeline_name, pipeline, on_disk=True, resource=GlueJobConfig.RESOURCE, alias=alias))
     job = pipeline.glue_jobs[alias]
-    return [(script, resolve_from_root(pipeline, script)) for script in job.scripts]
+    return [ResolvedScript(substitute_env(script), resolve_from_root(pipeline, script)) for script in job.scripts]
 
 
-def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: list[tuple[str, Path]]) -> None:
+def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: list[ResolvedScript]) -> None:
     """Upload each resolved script under the key its config string spells.
 
     Every path is checked before the first byte goes anywhere: a partial upload leaves the job's
@@ -93,13 +108,16 @@ def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: lis
     The set uploaded has to be the set the definition names, and taking `sources` from the
     caller makes that breakable: a set omitting `scripts[0]` whose every path exists uploads
     cleanly while `build_job_update` emits a `ScriptLocation` nothing wrote, which is what
-    `script_key` exists to prevent."""
-    named = {script for script, _ in sources}
-    if named != set(glue_job.scripts):
-        error(f'{glue_job.name}: asked to upload {sorted(named)}, but the job definition names {sorted(glue_job.scripts)}')
+    `script_key` exists to prevent. Both sides of that comparison are substituted names —
+    `ResolvedScript.name` and a `render_env_model`'d job — because comparing a raw config
+    string to a rendered one presents two spellings of one file as two files."""
+    named = {source.name for source in sources}
+    defined = {substitute_env(script) for script in glue_job.scripts}
+    if named != defined:
+        error(f'{glue_job.name}: asked to upload {sorted(named)}, but the job definition names {sorted(defined)}')
         raise typer.Exit(1)
 
-    missing = [path for _, path in sources if not path.is_file()]
+    missing = [source.path for source in sources if not source.path.is_file()]
     if missing:
         # Not the shared diagnosis, and deliberately worded so it does not read as one: the
         # caller already reported every unusable path by its config key, so reaching here means
@@ -110,10 +128,10 @@ def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: lis
 
     s3 = session.client('s3')
     bucket = substitute_env(glue_job.script_bucket)
-    for script, path in sources:
-        key = script_key(glue_job, script)
-        s3.upload_file(Filename=str(path), Bucket=bucket, Key=key)
-        success(f'uploaded {path} -> s3://{bucket}/{key}')
+    for source in sources:
+        key = script_key(glue_job, source.name)
+        s3.upload_file(Filename=str(source.path), Bucket=bucket, Key=key)
+        success(f'uploaded {source.path} -> s3://{bucket}/{key}')
 
 
 def build_job_update(existing: dict, glue_job: GlueJobConfig) -> dict:
@@ -341,7 +359,7 @@ def make_glue_job_app(
         no_args_is_help=True,
         help=(
             f'Glue job [bold]{alias}[/bold] → {job_config.name}\n\n'
-            f'{destinations}\n\n'
+            f'Scripts upload to: {destinations}\n\n'
             f'As configured. Run "dectl {pipeline_name} list" for the active environment.'
         ),
     )

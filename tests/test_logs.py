@@ -215,9 +215,9 @@ def glue_event(event_id: str, timestamp: int, message: str) -> dict:
 
 
 def test_glue_tail_filters_both_groups_by_run_id_without_waiting_for_streams():
-    # The regression: tailing used to poll describe_log_streams for the output stream and then,
-    # sequentially, for the error stream — up to two minutes of silence before the first line for
-    # a job that never writes to stderr. Nothing may block on a stream existing.
+    # Nothing may block on a stream existing. Polling describe_log_streams for the output
+    # stream and then, sequentially, for the error stream costs up to two minutes of silence
+    # before the first line whenever a job never writes to stderr.
     client = FakeCloudWatchLogs({GLUE_OUTPUT_LOG_GROUP: [glue_event('a', RUN_START + 10, 'first line')]})
 
     with console.capture() as capture:
@@ -303,7 +303,8 @@ def test_glue_tail_merges_the_two_groups_in_timestamp_order():
 
 
 def test_glue_tail_stops_once_the_run_reaches_a_terminal_state(monkeypatch):
-    # Following used to loop forever, so `run --follow` never returned on its own.
+    # `run --follow` returns on its own: the tail stops at a terminal state rather than
+    # looping until the reader interrupts it.
     monkeypatch.setattr('dectl.logs.time.sleep', lambda _seconds: None)
     client = FakeCloudWatchLogs({GLUE_OUTPUT_LOG_GROUP: [glue_event('a', RUN_START + 10, 'done')]})
 

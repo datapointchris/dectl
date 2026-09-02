@@ -4,9 +4,11 @@ from pathlib import Path
 
 import pytest
 
+from dectl.config import ROOT_SITE
 from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
 from dectl.config import LambdaConfig
+from dectl.config import declared_paths
 from dectl.config import pipeline_root
 from dectl.env import active_environment
 from dectl.env import render_env_model
@@ -57,7 +59,7 @@ def test_pipeline_to_dict_has_stable_shape_and_substitutes_env(monkeypatch):
     assert data['lambda']['notifier']['name'] == 'salesdata-prod-notifier'
     assert data['sfn']['ingest']['name'] == 'salesdata-prod-ingest'
     assert data['s3']['raw']['bucket'] == 'salesdata-prod-raw'
-    assert data['iceberg']['events'] == {'database': 'salesdata-prod-catalog', 'table': 'events'}
+    assert data['iceberg']['events'] == {'database': 'salesdata-prod-catalog', 'table': 'events', 'paths': {}}
     # Must be JSON-serializable with no rich markup leaking in.
     assert 'salesdata' in json.dumps(data)
 
@@ -143,7 +145,7 @@ def test_a_glue_job_with_no_scripts_renders_through_both_doors():
     data = pipeline_to_dict('p', pipeline)
     render_pipeline('p', pipeline)
 
-    assert data['glue']['j']['script_paths'] == []
+    assert data['glue']['j']['paths'] == {}
 
 
 def test_an_alias_with_a_space_survives_every_consumer():
@@ -165,19 +167,35 @@ def test_an_alias_with_a_space_survives_every_consumer():
 
     data = pipeline_to_dict('salesdata', pipeline)
 
-    assert data['lambda']['weird alias']['source_path'] == '/srv/salesdata/code'
+    assert data['lambda']['weird alias']['paths'] == {'source_dir': ['/srv/salesdata/code']}
     assert aws_names_only(pipeline)['lambdas']['weird alias'].get('source_dir') is None
 
 
 def test_json_carries_the_resolved_path_of_every_declared_path():
-    # The reader is asking which file a deploy sends. The config string does not answer that,
-    # and the repo row alone does not either.
+    # Derived from `declared_paths` rather than asserted as two hand-written keys: giving
+    # StepFunctionConfig a declared `definition_file` left the old assertion green while the
+    # field was resolved and published nowhere, which is a completeness guard reporting complete
+    # on a member it never looked at.
     pipeline = rooted_pipeline().pipelines['salesdata']
 
     data = pipeline_to_dict('salesdata', pipeline)
 
-    assert data['glue']['copy']['script_paths'] == ['/srv/salesdata/jobs/copy.py']
-    assert data['lambda']['notifier']['source_path'] == '/srv/salesdata/modules/notifier/code'
+    published = set()
+    for resource, aliases in data.items():
+        if resource == 'resolve_paths_from' or not isinstance(aliases, dict):
+            continue
+        for alias, body in aliases.items():
+            published.update((resource, alias, field) for field in body.get('paths', {}))
+
+    expected = set()
+    for declared in declared_paths(pipeline):
+        if declared.site != ROOT_SITE:
+            expected.add((declared.site.resource, declared.site.alias, declared.site.field))
+
+    assert published == expected
+
+    assert data['glue']['copy']['paths'] == {'scripts': ['/srv/salesdata/jobs/copy.py']}
+    assert data['lambda']['notifier']['paths'] == {'source_dir': ['/srv/salesdata/modules/notifier/code']}
 
 
 def test_json_substitutes_the_script_prefix_like_every_other_name(monkeypatch):
@@ -222,10 +240,13 @@ def test_a_source_dir_token_does_not_silence_the_no_effect_warning(monkeypatch, 
 
     pipeline_to_dict('salesdata', config.pipelines['salesdata'])
 
-    assert 'changed nothing' in capsys.readouterr().err
+    assert active_environment.warned_about_missing_placeholder
 
 
-def test_a_glue_script_token_does_not_silence_the_no_effect_warning(monkeypatch, capsys):
+def test_a_glue_script_token_is_an_aws_name_and_silences_the_warning(monkeypatch, capsys):
+    # A glue script is a local path and the second operand of its S3 key, so `--env` changing it
+    # changes the object S3 holds and the ScriptLocation naming it. Warning that `--env changed
+    # nothing` there prints a sentence that is false about the very field it is looking at.
     monkeypatch.setattr(active_environment, 'name', 'prod')
     monkeypatch.setattr(active_environment, 'source', '--env')
     monkeypatch.setattr(active_environment, 'warned_about_missing_placeholder', False)
@@ -245,29 +266,32 @@ def test_a_glue_script_token_does_not_silence_the_no_effect_warning(monkeypatch,
 
     pipeline_to_dict('salesdata', config.pipelines['salesdata'])
 
-    assert 'changed nothing' in capsys.readouterr().err
+    assert not active_environment.warned_about_missing_placeholder
 
 
 @pytest.mark.parametrize(
-    'resource',
+    ('resource', 'warns'),
     [
-        LambdaConfig(name='hardcoded-dev', source_dir='modules/{env}/code'),
-        GlueJobConfig(name='hardcoded-dev', script_bucket='sales-scripts', scripts=['jobs/{env}/c.py'], role='r'),
+        (LambdaConfig(name='hardcoded-dev', source_dir='modules/{env}/code'), True),
+        (GlueJobConfig(name='hardcoded-dev', script_bucket='sales-scripts', scripts=['jobs/{env}/c.py'], role='r'), False),
     ],
-    ids=['lambda', 'glue'],
+    ids=['lambda source_dir is local only', 'glue script is also a key operand'],
 )
-def test_a_path_token_does_not_silence_the_warning_at_the_deploy_door(monkeypatch, capsys, resource):
+def test_the_deploy_door_asks_the_same_question_as_the_read_door(monkeypatch, capsys, resource, warns):
     # The read door and the write door ask the same question of the same resource, so they get
     # the same answer. `render_env_model` is what every deploy verb resolves through, and it
     # passed the whole dump — so the guard fired on `list` and went quiet on the deploy that
     # acts on the wrong environment, which is the case it exists for.
+    #
+    # A lambda `source_dir` is zipped and uploaded as bytes, so nothing in AWS carries its name
+    # and a token there answers the guard's question falsely. A glue script's name reaches S3.
     monkeypatch.setattr(active_environment, 'name', 'prod')
     monkeypatch.setattr(active_environment, 'source', '--env')
     monkeypatch.setattr(active_environment, 'warned_about_missing_placeholder', False)
 
     render_env_model(resource)
 
-    assert 'changed nothing' in capsys.readouterr().err
+    assert active_environment.warned_about_missing_placeholder == warns
 
 
 def test_a_root_token_does_not_silence_the_no_effect_warning(monkeypatch, capsys):
@@ -285,4 +309,4 @@ def test_a_root_token_does_not_silence_the_no_effect_warning(monkeypatch, capsys
 
     pipeline_to_dict('salesdata', config.pipelines['salesdata'])
 
-    assert 'changed nothing' in capsys.readouterr().err
+    assert active_environment.warned_about_missing_placeholder

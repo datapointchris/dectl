@@ -101,22 +101,23 @@ file so `config init` stays valid — a test asserts `TEMPLATE_CONFIG` round-tri
 
 ### Paths
 
-`src/dectl/paths.py` owns the path domain and `config.py` owns the walk over the models —
-`declared_paths`, `declared_keys`, `pipeline_path_faults`, `config_path_faults`. Read
-`paths.py`'s module docstring before changing either; these are the constraints a new
-path-bearing resource has to meet, which the docstrings do not state.
+`src/dectl/paths.py` answers whether a value the config names outside the program can be what
+it has to be; `config.py` walks the models and builds the records it defines. Read `paths.py`'s
+module docstring before changing either. Below are the constraints a new resource has to meet,
+which the docstrings do not state.
 
 - **A resource declares its own path, key and bucket fields, on the model.**
   `ResourceModel.PATH_FIELDS` maps a field to the `PathKind` it must be; `KEY_FIELDS` names the
   fields a glue S3 key is built from; `BUCKET_FIELDS` names the fields that have to be real S3
   bucket names. `declared_paths`, `declared_keys`, `declared_names` and `env.aws_names_of` all
   read them, so a field declared to some and not the others is checked one way and not another
-  — and every one of those reads as success.
-  `test_every_path_field_on_the_models_is_declared` is what holds the path half.
-- **Displaying one is a second edit, and only that.** `pipeline_to_dict` and `render_pipeline`
-  name a key per resource (`script_paths`, `source_path`), so a new resource's path needs a row
-  in each. The checking, the resolution and the env-guard exclusion come free from the
-  declaration.
+  — and every one of those reads as success. `test_every_string_field_is_classified` makes a new
+  field a decision rather than a default: it is in one of the three, or named in
+  `UNCHECKED_FIELDS` with the reason.
+- **Declaring is the whole edit.** Checking, resolution, the env-guard exclusion, the `paths`
+  block in `--json` and the printed row all come from the declaration. Nothing needs adding to
+  `pipeline_to_dict` or `render_pipeline` — `configuration.md` § "Every tool prints its resolved
+  config" is why: a row is guaranteed by something that runs, not by remembering to add one.
 - **A new `ConfigFault` needs a `FAULT_WORDING` entry, a decision about `SPELLING_FAULTS`, and
   a line in `recovery_lines`.** The first two fail in opposite directions: a missing wording
   raises where a reader needs the answer, and a missing `SPELLING_FAULTS` entry silently reports
@@ -134,16 +135,16 @@ path-bearing resource has to meet, which the docstrings do not state.
   is not: as one it could only reach the values carrying no `{env}`.
 - **A deploy door scopes `pipeline_path_faults` by argument, never by filtering its result.**
   Filtering drops the row naming the absent root, which is the cause of every row it kept.
-- **Nothing in `paths.py` or the walk exits the process.** A refusal raised beneath a command
-  that has already committed to emitting a document leaves `--json` writing zero bytes, so
-  `expand_home` is total and `home_fault` reports. `refuse_unusable_paths` is where the exit
-  lives, and every door calls it.
+- **Nothing in the path domain or the walk exits the process.** A refusal raised beneath a
+  command that has already committed to emitting a document leaves `--json` writing zero bytes.
+  `render_unusable_values` is the lines as data and `refuse_unusable_values` is the one exit;
+  every door reaches one of the two.
+- **A value crossing the substitution boundary carries the substituted name.** `ResolvedScript`
+  is that boundary for a glue deploy. A record pairing a raw config string with a resolved path
+  presents two spellings of one file as two files, and no call site can see which it holds.
 
-`script_key` is the one place a glue S3 key is built. The upload, `ScriptLocation` and
-`--extra-py-files` all read it; any two disagreeing means Glue fetches an object nothing wrote.
-`join_uri` is the shape underneath it, shared with the per-alias help panel — which passes raw
-operands on purpose, because it is built before `--env` is parsed and a resolved name there
-would be the default environment's under every other.
+`script_key` is the one place a glue S3 key is built; `script_uri` and the upload both reach it.
+`join_uri` is the URI shape beneath it, shared with the per-alias help panel.
 
 `deploy` runs everything that can refuse before it writes anything — `resolve_scripts`, then
 `plan_glue_job_update`, then the upload, then `apply_glue_job_update`. `build_job_update` exits

@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 
 from dectl import prompt
 from dectl.commands.glue import GlueRunWatcher
+from dectl.commands.glue import ResolvedScript
 from dectl.commands.glue import apply_glue_job_update
 from dectl.commands.glue import build_job_update
 from dectl.commands.glue import follow_glue_run
@@ -23,6 +24,7 @@ from dectl.config import config_path_faults
 from dectl.config import pipeline_path_faults
 from dectl.env import active_environment
 from dectl.paths import ConfigFault
+from dectl.paths import PathSite
 from dectl.paths import bucket_fault
 
 runner = CliRunner()
@@ -440,8 +442,8 @@ def test_extra_py_files_name_the_same_objects_the_upload_wrote(tmp_path, monkeyp
 )
 def test_a_key_that_s3_would_store_literally_is_refused(tmp_path, written, expected):
     # Each shape is pinned to its own fault, not to "one of the two". `validate --json`
-    # publishes the name, so an assertion satisfied by either value pins neither: making
-    # NOT_A_CLEAN_KEY unreachable left the suite green.
+    # publishes the name, so an assertion satisfied by either value pins neither — an
+    # unreachable NOT_A_CLEAN_KEY would satisfy it for every input here.
     #
     # A leading ~ is ESCAPES_ROOT rather than a spelling fault: it resolves through $HOME, which
     # is the same dependence on where the deploy ran that `resolve_paths_from` exists to remove.
@@ -641,6 +643,17 @@ def test_an_absent_root_is_reported_alone_at_the_deploy_door(tmp_path):
         resolve_scripts('proj', pipeline, 'j')
 
 
+@pytest.mark.parametrize(('resource', 'alias'), [('glue_jobs', 'j'), ('glue', 'J')])
+def test_a_scope_naming_nothing_raises_rather_than_reporting_a_clean_config(tmp_path, resource, alias):
+    # An unrecognised scope returned no faults, and every door reads no faults as a clean config
+    # and proceeds to deploy. `glue_jobs` is the collection where `glue` is the resource, and
+    # both spellings live in the same module, so the typo is the one a reader would make.
+    pipeline = glue_pipeline(str(tmp_path / 'nowhere'), ['jobs/a.py'])
+
+    with pytest.raises(ValueError):
+        pipeline_path_faults('proj', pipeline, on_disk=True, resource=resource, alias=alias)
+
+
 def test_both_doors_report_one_absent_root_the_same_way(tmp_path):
     # The property `pipeline_path_faults`'s docstring claims. `config validate` walks the whole
     # config and a deploy scopes to one job; scoping is an argument, so neither door can filter
@@ -672,7 +685,7 @@ def test_upload_scripts_refuses_a_partial_set_handed_to_it_directly(tmp_path):
     (tmp_path / 'present.py').write_text('x')
     pipeline = glue_pipeline(str(tmp_path), ['present.py'])
     s3 = FakeS3Client()
-    sources = [('present.py', tmp_path / 'present.py'), ('absent.py', tmp_path / 'absent.py')]
+    sources = [ResolvedScript('present.py', tmp_path / 'present.py'), ResolvedScript('absent.py', tmp_path / 'absent.py')]
 
     with pytest.raises(typer.Exit):
         upload_scripts(FakeS3Session(s3), pipeline.glue_jobs['j'], sources)
@@ -703,10 +716,11 @@ def test_the_deploy_door_names_the_pipeline_and_the_config_key(tmp_path, capsys)
     with pytest.raises(typer.Exit):
         resolve_scripts('salesdata', pipeline, 'j')
 
-    err = capsys.readouterr().err
-    assert 'salesdata' in err
-    assert 'glue/j script' in err
-    assert 'dectl config show' in err
+    # Asserted on the row rather than on the sentence: `'glue/j script'` is a prefix of
+    # `'glue/j script_prefix'`, so a substring match cannot say which key the door named.
+    faults = pipeline_path_faults('salesdata', pipeline, on_disk=True, resource='glue', alias='j')
+    assert [(f.pipeline, f.site) for f in faults] == [('salesdata', PathSite('glue', 'j', 'scripts'))]
+    assert 'dectl config show' in capsys.readouterr().err
 
 
 class FakeDeploySession:
@@ -785,10 +799,45 @@ def test_plan_refuses_a_missing_script_rather_than_reporting_a_clean_diff(monkey
     assert session.s3.uploads == []
 
 
+def test_deploy_handles_a_script_whose_name_carries_the_env_token(monkeypatch, tmp_path):
+    # The verb holds a render_env_model'd job, so both sides of the set guard have to be
+    # substituted names: comparing 'jobs/{env}/copy.py' to 'jobs/prod/copy.py' presents two
+    # spellings of one file as two files. Driven through the verb, because handing
+    # upload_scripts a raw pipeline.glue_jobs['j'] hides exactly that mismatch.
+    monkeypatch.setattr(active_environment, 'name', 'prod')
+    (tmp_path / 'jobs' / 'prod').mkdir(parents=True)
+    (tmp_path / 'jobs' / 'prod' / 'copy.py').write_text('x')
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '1'},
+            'pipelines': {
+                'proj': {
+                    'resolve_paths_from': str(tmp_path),
+                    'glue_jobs': {
+                        'copy': {
+                            'name': 'my-job',
+                            'script_bucket': 'salesdata-scripts',
+                            'scripts': ['jobs/{env}/copy.py'],
+                            'role': 'new-role',
+                        }
+                    },
+                }
+            },
+        }
+    )
+    session = FakeDeploySession({'Name': 'my-job', 'Role': 'old-role'})
+    monkeypatch.setattr('dectl.session.make_session', lambda _config: session)
+
+    result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy', '--yes'])
+
+    assert result.exit_code == 0
+    assert [key for _, _, key in session.s3.uploads] == ['scripts/jobs/prod/copy.py']
+    assert session.glue.captured_update['Command']['ScriptLocation'] == 's3://salesdata-scripts/scripts/jobs/prod/copy.py'
+
+
 def test_deploy_uploads_every_script_and_writes_the_definition(monkeypatch, tmp_path):
-    # The write path, end to end. Deleting either the upload call or the apply call from the
-    # deploy verb left the whole suite green, so the re-sequencing this branch is largely about
-    # was unpinned by anything asserting the writes happened at all.
+    # The write path, end to end. Nothing else asserts the writes happen at all, so deleting
+    # either the upload call or the apply call from the deploy verb is invisible without this.
     (tmp_path / 'copy.py').write_text('x')
     config = deploy_config(tmp_path)
     session = FakeDeploySession({'Name': 'my-job', 'Role': 'old-role'})
@@ -803,15 +852,14 @@ def test_deploy_uploads_every_script_and_writes_the_definition(monkeypatch, tmp_
 
 
 def test_uploading_a_set_the_definition_does_not_name_is_refused(tmp_path):
-    # `upload_scripts` used to iterate `glue_job.scripts` itself, so the set uploaded covering
-    # the set the definition names held by construction. Taking `sources` from the caller made
-    # it breakable: every path here exists, so nothing else in the function refuses, and the
-    # deploy would write a ScriptLocation naming an object nothing uploaded.
+    # Taking `sources` from the caller makes the set uploaded breakable against the set the
+    # definition names. Every path here exists, so nothing else in the function refuses, and
+    # the deploy would write a ScriptLocation naming an object nothing uploaded.
     (tmp_path / 'first.py').write_text('x')
     job = GlueJobConfig(name='my-job', script_bucket='sales-scripts', scripts=['first.py', 'second.py'], role='r')
     s3 = FakeS3Client()
 
     with pytest.raises(typer.Exit):
-        upload_scripts(FakeS3Session(s3), job, [('first.py', tmp_path / 'first.py')])
+        upload_scripts(FakeS3Session(s3), job, [ResolvedScript('first.py', tmp_path / 'first.py')])
 
     assert s3.uploads == []

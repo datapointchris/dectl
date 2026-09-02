@@ -20,9 +20,8 @@ from dectl.output import console
 from dectl.output import emit_json
 from dectl.output import error
 from dectl.output import info
-from dectl.output import stderr_console
 from dectl.output import success
-from dectl.paths import recovery_lines
+from dectl.paths import refuse_unusable_values
 from dectl.pipeline_view import pipeline_to_dict
 from dectl.pipeline_view import render_pipeline
 
@@ -125,7 +124,7 @@ def config_validate(
 
     A pipeline that names `resolve_paths_from` is checked all the way down: the directory
     itself, every glue script, and every lambda source_dir. A pipeline that names none is still
-    checked for how its glue keys are spelled and whether its bucket names are ones S3 accepts,
+    checked for how its S3 keys are spelled and whether its bucket names are ones S3 accepts,
     both answerable on any machine; its files are not, since they resolve from wherever you run
     dectl.
 
@@ -184,10 +183,6 @@ def config_validate(
 
     if problems:
         error(f'config at {CONFIG_PATH} matches the schema, but names values that cannot be used:')
-        for problem in problems:
-            stderr_console.print(f'  {problem}', markup=False)
-        for line in recovery_lines(problems):
-            stderr_console.print(line)
-        raise typer.Exit(1)
+        refuse_unusable_values(problems)
 
     success(f'config at {CONFIG_PATH} is valid')

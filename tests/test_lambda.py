@@ -484,6 +484,11 @@ class RecordingLambdaClient:
         self.code = ZipFile
 
     def get_waiter(self, name):
+        # Real botocore raises `ValueError: Waiter does not exist` for a name it does not know,
+        # so a fake handing back a waiter for anything lets a wrong name ship green. `deploy
+        # --publish` passes the version-suffixed one, which is exactly where a typo would live.
+        if name != 'function_updated_v2':
+            raise ValueError(f'Waiter does not exist: {name}')
         return SimpleNamespace(wait=lambda **kwargs: None)
 
     def publish_version(self, FunctionName):
@@ -544,7 +549,7 @@ def test_lambda_deploy_refuses_a_missing_source_and_writes_nothing(monkeypatch, 
 def test_the_lambda_door_names_the_same_site_config_validate_does(tmp_path):
     # Which pipeline, which alias, which config key — asserted on the row rather than on the
     # sentence it renders to. A bare path cannot say which `notifier` it meant when several
-    # pipelines carry one, and that is what this door printed before.
+    # pipelines carry one.
     pipeline = PipelineConfig.model_validate(
         {'resolve_paths_from': str(tmp_path), 'lambdas': {'notifier': {'name': 'n', 'source_dir': 'modules/absent'}}}
     )

@@ -5,20 +5,22 @@ Three questions, and they are not the same question. `path_fault` asks whether a
 spelled in a way S3 will store as written. `bucket_fault` asks whether a string can name an S3
 bucket at all. A glue script answers the first two — it is uploaded from disk and named by a
 key built from the config string. A lambda `source_dir` answers only the first, a glue
-`script_prefix` only the second, and a bucket name only the third, which is why `config.py`
-enumerates them as three records rather than flagging one with a set of booleans.
+`script_prefix` only the second, and a bucket name only the third, so `config.py` enumerates
+them as three records.
 
-One vocabulary reports all three. `ConfigFault` is the name a caller branches on and
-`validate --json` publishes; the records that feed it stay separate, because the record is
-where conflating two questions leaves a value with nowhere to be declared.
+One vocabulary reports all three: `ConfigFault` is the name a caller branches on and
+`validate --json` publishes. Keeping the records separate is what gives a value that answers
+only one of the three somewhere to be declared.
 
 Nothing here knows what a pipeline is. The models and the walk over them are `config.py`'s.
 """
 
 import re
+from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
 from pathlib import PurePosixPath
+from typing import ClassVar
 from typing import NamedTuple
 
 import typer
@@ -90,11 +92,38 @@ FAULT_WORDING = {
 # wrong without naming what is right leaves the reader to guess, and these are the faults where
 # `config show` cannot help: it prints the resolved path, which has the malformation normalised
 # out of it, and it shows a bucket name back exactly as written.
-KEY_FORM = 'a glue key is written as plain relative segments: jobs/copy.py, never ./x, ../x, ~/x, /x, a//b or a trailing /'
+KEY_FORM = 'an S3 key is written as plain relative segments: jobs/copy.py, never ./x, ../x, ~/x, /x, a//b or a trailing /'
 BUCKET_FORM = (
     'an S3 bucket name is 3-63 characters of lowercase letters, digits, dots and hyphens, '
     'starts and ends with a letter or digit, holds no doubled dot, and is not an IP address'
 )
+
+
+class DeclaresValues:
+    """A config model that says which of its fields name something outside the program.
+
+    `PATH_FIELDS` maps a field to what it has to be on disk, `KEY_FIELDS` names the fields a
+    glue S3 key is built from, and `BUCKET_FIELDS` the fields that have to be bucket names. A
+    field can be in more than one: a glue script is uploaded from disk *and* is the second
+    operand of its key, which is why it is an AWS name as well as a local path.
+
+    Declared here rather than on the config model so `env` can import it. Reaching for these by
+    name with a `getattr` default let a model that declared nothing and a model whose
+    declaration failed to arrive look identical, and the difference showed up as a missing
+    warning three modules away."""
+
+    PATH_FIELDS: ClassVar[Mapping[str, PathKind]] = {}
+    KEY_FIELDS: ClassVar[frozenset[str]] = frozenset()
+    BUCKET_FIELDS: ClassVar[frozenset[str]] = frozenset()
+
+    @classmethod
+    def local_only_fields(cls) -> frozenset[str]:
+        """The declared fields that name nothing in AWS.
+
+        What the env-effect guard drops. A path that is also a key operand or a bucket name is
+        an AWS name — `--env` changing it changes the object written — so it stays in the dump
+        the guard reads."""
+        return frozenset(cls.PATH_FIELDS) - cls.KEY_FIELDS - cls.BUCKET_FIELDS
 
 
 class PathSite(NamedTuple):
@@ -200,12 +229,33 @@ def home_fault(configured: str) -> ConfigFault | None:
 DIRECTORY_KINDS = frozenset({PathKind.DIRECTORY, PathKind.NON_EMPTY_DIRECTORY})
 
 
-def deployable_files(source: Path) -> list[Path]:
-    """The files under `source` a deploy would send, bytecode caches excluded.
+def is_deployable(found: Path) -> bool:
+    """Whether one entry under a source directory is a file a deploy would send."""
+    return found.is_file() and '__pycache__' not in found.parts
 
-    One counter, read by `path_fault` and by `zip_lambda`, so `config validate` and the deploy
-    cannot disagree about whether a directory holds anything to send."""
-    return [found for found in sorted(source.rglob('*')) if found.is_file() and '__pycache__' not in found.parts]
+
+def deployable_files(source: Path) -> list[Path]:
+    """Every file under `source` a deploy would send, in a stable order.
+
+    `zip_lambda` needs the list. `path_fault` needs only whether there is one, which is
+    `has_deployable_files` — building and sorting a whole tree to answer yes or no costs 70ms
+    on a 7,000-file source against 0.4ms, and `config validate` reads a config file."""
+    return sorted(found for found in source.rglob('*') if is_deployable(found))
+
+
+def has_deployable_files(source: Path) -> bool:
+    """Whether `source` holds anything a deploy would send, stopping at the first one."""
+    return any(is_deployable(found) for found in source.rglob('*'))
+
+
+def escapes_root(configured: str) -> bool:
+    """Whether this value climbs out of the directory it resolves from.
+
+    A `..` segment is the whole of it for a value already known to be relative. A leading `~`
+    or an absolute path leave the root as well, but they are legal for a value nothing derives
+    a key from — a lambda `source_dir` may sit anywhere — so the caller decides which arms
+    apply. `key_fault` runs all three; the path walk runs this one over relative values."""
+    return '..' in configured.split('/')
 
 
 def path_fault(path: Path, expects: PathKind) -> ConfigFault | None:
@@ -219,7 +269,7 @@ def path_fault(path: Path, expects: PathKind) -> ConfigFault | None:
         return ConfigFault.EXPECTED_DIRECTORY
     if expects is PathKind.FILE and not path.is_file():
         return ConfigFault.EXPECTED_FILE
-    if expects is PathKind.NON_EMPTY_DIRECTORY and not deployable_files(path):
+    if expects is PathKind.NON_EMPTY_DIRECTORY and not has_deployable_files(path):
         return ConfigFault.EMPTY_DIRECTORY
     return None
 
@@ -227,10 +277,9 @@ def path_fault(path: Path, expects: PathKind) -> ConfigFault | None:
 def key_fault(configured: str) -> ConfigFault | None:
     """Why this configured string cannot become an S3 key, or None when it can.
 
-    Every segment has to be a plain name, tested as such. A round trip against `PurePosixPath`
-    is the trap: it normalises `.`, `//` and a trailing slash away — the very shapes S3 stores
-    literally — so it agrees with the raw string on every input that matters, and a bare `.` is
-    its own normalised form.
+    Every segment has to be a plain name, tested as such. `PurePosixPath` normalises `.`, `//`
+    and a trailing slash away — the very shapes S3 stores literally — so anything routed
+    through it agrees with the raw string on every input that matters.
 
     A leading `~` escapes the root the way an absolute path does. `PurePosixPath` calls it
     relative and holds no `..`, so both of the other arms miss it, and it resolves through
@@ -242,7 +291,7 @@ def key_fault(configured: str) -> ConfigFault | None:
     disappears with it. A config carrying a malformed key still loads, `config validate` names
     it and the deploy refuses it, so the diagnosis reaches the reader without the CLI that
     delivers it going away."""
-    if configured.startswith('~') or PurePosixPath(configured).is_absolute() or '..' in configured.split('/'):
+    if configured.startswith('~') or PurePosixPath(configured).is_absolute() or escapes_root(configured):
         return ConfigFault.ESCAPES_ROOT
     if not all(segment and segment != '.' for segment in configured.split('/')):
         return ConfigFault.NOT_A_CLEAN_KEY
@@ -264,9 +313,22 @@ def recovery_lines(problems: list[UnusableValue]) -> list[str]:
         lines.append(KEY_FORM)
     if ConfigFault.NOT_A_BUCKET_NAME in faults:
         lines.append(BUCKET_FORM)
+    if faults & SPELLING_FAULTS:
+        # A form says what the value has to look like and no more. Every other fault names a
+        # command, so a spelling-only run would be the one that names none.
+        lines.append('run "dectl config edit" to fix it')
     if faults - SPELLING_FAULTS:
         lines.append('run "dectl config show" to see where each configured path resolves')
     return lines
+
+
+def render_unusable_values(problems: list[UnusableValue]) -> list[str]:
+    """Every unusable value as a line, then what to do about them.
+
+    The whole message as data, so a door that has to emit a document rather than exit — `config
+    validate --json` — reads the same lines the deploy doors print. Splitting the rendering from
+    the exit is what stops the second door rebuilding this loop and drifting from it."""
+    return [str(problem) for problem in problems] + recovery_lines(problems)
 
 
 # S3's own bucket naming rule, read off the service's documentation rather than off any check
@@ -295,15 +357,13 @@ def bucket_fault(configured: str) -> ConfigFault | None:
 
 
 def refuse_unusable_values(problems: list[UnusableValue]) -> None:
-    """Print every unusable path and exit, or return when there are none.
+    """Print every unusable value and exit, or return when there are none.
 
     The one reporter, and the one place in the path domain that exits — so a glue deploy, a
     lambda deploy and `config validate` say the same sentence about the same fault, and nothing
     beneath a command that has committed to emitting a document can cut it short."""
     if not problems:
         return
-    for problem in problems:
-        error(str(problem))
-    for line in recovery_lines(problems):
+    for line in render_unusable_values(problems):
         error(line)
     raise typer.Exit(1)

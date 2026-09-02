@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from dectl.output import error
 from dectl.output import stderr_console
 from dectl.output import warn
+from dectl.paths import DeclaresValues
 
 DEFAULT_ENV = 'dev'
 ENV_PLACEHOLDER = '{env}'
@@ -91,17 +92,20 @@ def warn_if_environment_had_no_effect(value: Any) -> None:
 
 
 def aws_names_of(model: BaseModel) -> dict[str, Any]:
-    """A model's fields with its local paths dropped, for the env-effect guard.
+    """A model's fields with its purely-local ones dropped, for the env-effect guard.
 
     `warn_if_environment_had_no_effect` asks whether `--env` changed an AWS name, and a `{env}`
-    in a local path answers yes while naming nothing in AWS. `pipeline_view.aws_names_only` does
-    the same for a whole pipeline; this is the per-resource half, and it is the one the deploy
-    verbs go through — without it the guard fired on `list` and went quiet on the deploy that
-    acts on the wrong environment.
+    in a purely local path answers yes while naming nothing in AWS. `pipeline_view.aws_names_only`
+    does the same for a whole pipeline; this is the per-resource half, and it is the one the
+    deploy verbs go through.
 
-    `PATH_FIELDS` is read off the class rather than imported, because `config` imports this
-    module and the declaration lives on `config.ResourceModel`."""
-    local = getattr(type(model), 'PATH_FIELDS', {})
+    `local_only_fields` is the subtraction that matters: a glue `scripts` entry is a path *and*
+    the second operand of the S3 key, so `--env` changing it changes the object written and the
+    `ScriptLocation` naming it. Dropping every `PATH_FIELDS` member instead made the guard say
+    `--env` changed nothing about a job where it changes the file S3 holds."""
+    if not isinstance(model, DeclaresValues):
+        return model.model_dump()
+    local = type(model).local_only_fields()
     return {field: value for field, value in model.model_dump().items() if field not in local}
 
 

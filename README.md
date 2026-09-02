@@ -294,7 +294,7 @@ dectl config init        # write a starter config (fails if one already exists)
 dectl config example     # print a full example of every option, for side-by-side reference
 dectl config edit        # open it in $VISUAL / $EDITOR (seeds one from the template if missing)
 dectl config validate    # check it parses, matches the schema, and its paths are usable
-                         # add --json for {outcome, unusable_paths}
+                         # add --json for {outcome, unusable_values}
 dectl config show        # resolved pipelines with alias -> AWS name mapping
 dectl config path        # print the config file path
 ```
@@ -365,8 +365,8 @@ cause, and ten lines each naming a file name that cause in none of them.
 
 `config show` prints the resolved directory for every pipeline, with `~` expanded and
 `{env}` substituted, and marks the ones falling back to the working directory. It prints
-the resolved path of every script and `source_dir` beneath it, so the file a deploy would
-send is on the page rather than inferred. `config show --json` and `list --json` carry the
-same under `resolve_paths_from`, `script_paths` and `source_path`. `validate --json` emits
-an object with `outcome` and `unusable_paths`, so a caller can tell a clean config from one
-that could not be read at all.
+the resolved path of every declared path beneath it, named by the config key it came from,
+so the file a deploy would send is on the page rather than inferred. `config show --json`
+and `list --json` carry the same under `resolve_paths_from` and a `paths` block per
+resource. `validate --json` emits an object with `outcome` and `unusable_values`, so a
+caller can tell a clean config from one that could not be read at all.

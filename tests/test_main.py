@@ -23,8 +23,24 @@ def test_reference_prints_the_grammar():
     assert '[--follow]' in result.stdout
 
 
-def reference_text() -> str:
-    return '\n'.join(REFERENCE_GLOBAL)
+def row_entries(row: str) -> list[str]:
+    """One reference row's entries, as `verb [flags]` strings.
+
+    Rows are ` · `-separated, and the `config` row leads with its own label. Split rather than
+    searched as one string: the `config` row contains the substring `path`, so a top-level
+    `path` command missing from the row that should name it satisfied a search of the joined
+    text. A guard one row can satisfy on another row's behalf is not a guard."""
+    label, _, rest = row.partition('  ')
+    entries = (rest or label).split('·')
+    return [entry.strip() for entry in entries if entry.strip()]
+
+
+GLOBAL_ENTRIES = row_entries(REFERENCE_GLOBAL[0])
+CONFIG_ENTRIES = row_entries(REFERENCE_GLOBAL[1])
+
+
+def names_in(entries: list[str]) -> set[str]:
+    return {entry.split(' ')[0] for entry in entries}
 
 
 def test_the_reference_names_every_static_global_command():
@@ -38,7 +54,7 @@ def test_the_reference_names_every_static_global_command():
     static = {name for name, command in tree.commands.items() if not hasattr(command, 'commands')}
 
     assert static
-    assert {name for name in static if name not in reference_text()} == set()
+    assert static - names_in(GLOBAL_ENTRIES) == set()
 
 
 def test_the_reference_names_every_config_verb_and_its_json_flag():
@@ -50,8 +66,8 @@ def test_the_reference_names_every_config_verb_and_its_json_flag():
     with_json = {name for name, command in config_tree.commands.items() if any(param.name == 'as_json' for param in command.params)}
 
     assert verbs and with_json
-    assert {verb for verb in verbs if verb not in reference_text()} == set()
-    assert {verb for verb in with_json if f'{verb} [--json]' not in reference_text()} == set()
+    assert verbs - names_in(CONFIG_ENTRIES) == set()
+    assert {f'{verb} [--json]' for verb in with_json} - set(CONFIG_ENTRIES) == set()
 
 
 def test_update_installs_the_published_release(monkeypatch):

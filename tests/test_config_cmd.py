@@ -48,10 +48,10 @@ def test_validate_accepts_the_template(monkeypatch, tmp_path):
     monkeypatch.setattr('dectl.config.CONFIG_PATH', config_path)
     monkeypatch.setattr('dectl.commands.config_cmd.CONFIG_PATH', config_path)
 
-    result = runner.invoke(config_app, ['validate'])
+    result = runner.invoke(config_app, ['validate', '--json'])
 
     assert result.exit_code == 0
-    assert 'valid' in result.stdout
+    assert json.loads(result.stdout)['outcome'] == 'valid'
 
 
 def test_validate_reports_missing_config(monkeypatch, tmp_path):
@@ -283,10 +283,10 @@ def test_validate_accepts_a_root_whose_paths_are_all_present(monkeypatch, tmp_pa
     deployable(root / 'code')
     point_at(monkeypatch, tmp_path, config_naming(str(root)))
 
-    result = runner.invoke(config_app, ['validate'])
+    result = runner.invoke(config_app, ['validate', '--json'])
 
     assert result.exit_code == 0
-    assert 'valid' in result.stdout
+    assert json.loads(result.stdout)['outcome'] == 'valid'
 
 
 def test_validate_rejects_a_root_that_is_not_on_this_machine(monkeypatch, tmp_path):
@@ -366,10 +366,10 @@ def test_env_is_substituted_before_a_declared_path_is_checked(monkeypatch, tmp_p
     raw = config_naming(str(root), source_dir='modules/{env}/code')
     point_at(monkeypatch, tmp_path, raw)
 
-    result = runner.invoke(config_app, ['validate'])
+    result = runner.invoke(config_app, ['validate', '--json'])
 
     assert result.exit_code == 0
-    assert 'valid' in result.stdout
+    assert json.loads(result.stdout)['outcome'] == 'valid'
 
 
 def test_env_is_substituted_inside_the_root_itself(monkeypatch, tmp_path):
@@ -380,10 +380,10 @@ def test_env_is_substituted_inside_the_root_itself(monkeypatch, tmp_path):
     raw = config_naming(str(tmp_path / '{env}' / 'salesdata'))
     point_at(monkeypatch, tmp_path, raw)
 
-    result = runner.invoke(config_app, ['validate'])
+    result = runner.invoke(config_app, ['validate', '--json'])
 
     assert result.exit_code == 0
-    assert 'valid' in result.stdout
+    assert json.loads(result.stdout)['outcome'] == 'valid'
 
 
 def test_validate_checks_key_shape_even_without_a_declared_root(monkeypatch, tmp_path):
