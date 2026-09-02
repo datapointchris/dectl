@@ -1,6 +1,21 @@
 import contextlib
 import operator
+import os
 import re
+
+# The same reasoning as the width pinned below, for the other thing a terminal decides. A console
+# that believes it is writing to one emits SGR escapes, so `'names nothing to deploy' in
+# result.stderr` passes bare and fails under `FORCE_COLOR=1` on output correct in both. Measured:
+# nineteen tests across seven files, none of them about colour.
+#
+# Removed from the environment rather than set on the console objects, because rich reads it per
+# call and the two settings that look like the fix each reach only half. `no_color` suppresses
+# colour and leaves bold, which is seven of the nineteen. `force_terminal` reaches both and has no
+# public setter after construction, and these consoles are built at import in `dectl.output`.
+#
+# `NO_COLOR` and a `TERM` naming no colour are left alone: both push rendering towards plain, which
+# is the direction every assertion here already reads.
+os.environ.pop('FORCE_COLOR', None)
 
 import pytest
 from botocore.exceptions import ClientError
