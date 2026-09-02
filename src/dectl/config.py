@@ -1,9 +1,6 @@
-from enum import StrEnum
 from pathlib import Path
 from pathlib import PurePosixPath
-from typing import NamedTuple
 
-import typer
 import yaml
 from pyclisteno.paths import config_home
 from pydantic import BaseModel
@@ -15,32 +12,15 @@ from dectl.env import ENV_PLACEHOLDER
 from dectl.env import substitute_env
 from dectl.output import error
 from dectl.output import stderr_console
-
-
-def expands_at_load(value: str) -> None:
-    """Check `~` expansion, unless a `{env}` makes the real value unknowable here.
-
-    A token can sit anywhere, `~{env}/code` included, so no stand-in preserves both the shape
-    and the user name. `render_env_model` re-validates with the substituted value inside every
-    verb, which is where a templated path's expansion is actually decidable."""
-    if ENV_PLACEHOLDER not in value:
-        expand_home(value)
-
-
-def expand_home(value: str) -> Path:
-    """`~` expansion that reports an unresolvable home as a config error.
-
-    `Path.expanduser()` raises RuntimeError for a `~user` naming nobody — `~code/x`, a missing
-    slash, is the likeliest typo in a path key. Pydantic does not wrap RuntimeError into a
-    ValidationError, and `CONFIG_LOAD_ERRORS` catches only YAMLError and ValidationError, so an
-    uncaught one escapes main.py's import-time guard and takes down every command, including the
-    `config` commands that exist to repair the file. Raising ValueError puts it back inside the
-    schema failure every caller already handles."""
-    try:
-        return Path(value).expanduser()
-    except RuntimeError as exc:
-        raise ValueError(f'{value!r} names a home directory that cannot be resolved on this machine') from exc
-
+from dectl.paths import DeclaredKey
+from dectl.paths import DeclaredPath
+from dectl.paths import PathKind
+from dectl.paths import PathSite
+from dectl.paths import UnusablePath
+from dectl.paths import expand_home_or_exit
+from dectl.paths import expands_at_load
+from dectl.paths import key_fault
+from dectl.paths import path_fault
 
 # `$XDG_CONFIG_HOME/dectl/config.yaml`, falling back to `~/.config` when the variable is unset.
 # `config_home()` reads the environment at import, so a process that exports the variable after
@@ -59,14 +39,14 @@ defaults:
 
 pipelines:
   example-pipeline:
-    # Where this pipeline's code lives. The relative paths below — every glue `scripts` entry and
-    # every lambda `source_dir` — resolve against it, so a deploy reaches the same files from any
-    # directory. Absolute or ~-rooted; a relative value is rejected.
+    # The directory the relative paths below resolve from — every glue `scripts` entry and every
+    # lambda `source_dir` — so a deploy reaches the same files from any directory. Absolute or
+    # ~-rooted; a relative value is rejected.
     #
-    # Left out, those paths resolve against the directory dectl is run from, so a deploy has to
-    # be run from the checkout. Set it and `config validate` checks the directory and every path
-    # resolving against it, which is why the example below stays commented.
-    # repo: ~/code/example-pipeline
+    # Left out, those paths resolve from the directory dectl is run in, so a deploy has to be run
+    # from the checkout. Set it and `config validate` checks the directory and every path
+    # resolving from it, which is why the example below stays commented.
+    # resolve_paths_from: ~/code/example-pipeline
     glue_jobs:
       source-copy:
         name: my-{env}-source-copy-job
@@ -221,9 +201,9 @@ class MonitorConfig(StrictModel):
 class PipelineConfig(StrictModel):
     # Directory holding this pipeline's code. Every relative path in the block below — a lambda's
     # source_dir, a glue job's scripts — resolves against it, so a deploy targets the same files
-    # from any working directory. Where no repo is set, they resolve against the process's
-    # working directory, so a config that names none has to be run from the pipeline's checkout.
-    repo: str | None = None
+    # from any working directory. Left unset they resolve against the process's working
+    # directory, so a config that names none has to be run from the pipeline's checkout.
+    resolve_paths_from: str | None = None
     glue_jobs: dict[str, GlueJobConfig] = {}
     lambdas: dict[str, LambdaConfig] = {}
     step_functions: dict[str, StepFunctionConfig] = {}
@@ -234,10 +214,10 @@ class PipelineConfig(StrictModel):
     monitor: MonitorConfig = MonitorConfig()
     jenkins: JenkinsJobConfig | None = None
 
-    @field_validator('repo')
+    @field_validator('resolve_paths_from')
     @classmethod
-    def repo_is_rooted(cls, value: str | None) -> str | None:
-        """Reject a relative repo, which would reintroduce the dependency the key removes.
+    def root_is_rooted(cls, value: str | None) -> str | None:
+        """Reject a relative root, which would reintroduce the dependency the key removes.
 
         `~` counts as rooted because expansion makes it absolute. Existence is deliberately not
         checked here: a config is loaded on every invocation, including on a machine that holds
@@ -261,27 +241,23 @@ class DectlConfig(StrictModel):
     pipelines: dict[str, PipelineConfig]
 
 
+# The resource is `pipeline` because the key belongs to the pipeline block rather than to any
+# resource in it, and the alias is empty for the same reason — so `label` is the config key on
+# its own, which is what a reader typed and what they can grep the file for.
+ROOT_SITE = PathSite('pipeline', '', 'resolve_paths_from')
+
+
 def pipeline_root(pipeline: PipelineConfig) -> Path:
     """The directory this pipeline's relative paths resolve against.
 
-    `{env}` is substituted here, so a repo under a per-environment root joins a substituted
-    `source_dir` without half of the result staying literal.
-
-    This is the only door a `repo` is expanded through, and it is where an unresolvable one is
-    reported. `PipelineConfig` never passes through `render_env_model` — that runs per resource,
-    and `repo` belongs to the pipeline — so a `{env}` deferred at load has no other place to
-    surface, and a bare ValueError would traceback out of `show`, `validate` and `list` alike."""
-    if not pipeline.repo:
+    `{env}` is substituted here, so a root under a per-environment directory joins a substituted
+    `source_dir` without half of the result staying literal."""
+    if not pipeline.resolve_paths_from:
         return Path.cwd()
-    try:
-        return expand_home(substitute_env(pipeline.repo))
-    except ValueError as exc:
-        error(f'repo cannot be resolved: {exc}')
-        stderr_console.print('run "dectl config edit" to fix it', style='dim')
-        raise typer.Exit(1) from exc
+    return expand_home_or_exit(substitute_env(pipeline.resolve_paths_from))
 
 
-def resolve_in_repo(pipeline: PipelineConfig, configured_path: str) -> Path:
+def resolve_from_root(pipeline: PipelineConfig, configured_path: str) -> Path:
     """One of a pipeline's configured paths, as an absolute path.
 
     Substitution is applied to both halves and is idempotent, so a caller passing an already
@@ -289,210 +265,122 @@ def resolve_in_repo(pipeline: PipelineConfig, configured_path: str) -> Path:
 
     An entry that is already absolute is returned unchanged, which is what `Path.__truediv__`
     does with an absolute right-hand side. A `source_dir` may therefore sit outside the repo. A
-    glue `scripts` entry may not — `GlueJobConfig.scripts_are_relative` refuses that, because the
-    S3 key is built from the configured string rather than from the resolved path."""
-    return pipeline_root(pipeline) / expand_home(substitute_env(configured_path))
-
-
-class DeclaredPath(NamedTuple):
-    """One filesystem path a pipeline's config names, with `{env}` already substituted.
-
-    The three components are separate fields and `label` is derived from them. Folding them
-    into a sentence and recovering them with a split makes a string built for a human to read
-    load-bearing for a lookup, and every consumer then re-derives the same split."""
-
-    resource: str
-    # Empty for `repo`, which belongs to the pipeline rather than to a resource.
-    alias: str
-    field: str
-    # Where this value lives in the dumped model: the collection key and the field key inside
-    # it. Carried rather than reconstructed, so excluding a path field from a dump cannot fall
-    # open on a resource nobody wrote a branch for. Empty for `repo`, excluded by name.
-    model_path: tuple[str, str]
-    value: str
-    is_dir: bool
-    # Whether an S3 key is built from the configured string, which constrains how it may be
-    # written. Only a glue script is: a lambda source_dir is uploaded as bytes.
-    is_s3_key: bool
-
-    @property
-    def label(self) -> str:
-        """How this path is named to a reader, in errors and in `config validate`."""
-        return f'{self.resource}/{self.alias} {self.field}' if self.alias else self.field
+    glue `scripts` entry may not — `key_fault` refuses that, and `pipeline_path_faults` runs it
+    from `config validate` and from the deploy, because the S3 key is built from the configured
+    string rather than from the resolved path."""
+    return pipeline_root(pipeline) / expand_home_or_exit(substitute_env(configured_path))
 
 
 def declared_paths(pipeline: PipelineConfig) -> list[DeclaredPath]:
-    """Every path this pipeline's config names, `repo` included.
+    """Every filesystem path this pipeline's config names, its own root included.
 
-    The single enumeration. `missing_declared_paths` checks what it returns, `pipeline_to_dict`
-    and `render_pipeline` display it, and `resolve_scripts` takes the glue subset. A new
-    path-bearing field added here is checked and shown at once; one added anywhere else is
-    checked and never shown, or shown and never checked.
+    The single enumeration of what is checked and resolved. `pipeline_path_faults` checks what
+    it returns, `resolved_paths` resolves it for both renderers, and `aws_names_only` excludes
+    it from the env-effect guard. A path-bearing field added here is checked, resolved and
+    excluded at once; one added anywhere else is checked and never resolved, or resolved and
+    never checked.
 
     Values are substituted here rather than through `render_env_model`, which would also fire
     `warn_if_environment_had_no_effect` and put a warning in the middle of a validate run."""
     paths = []
-    if pipeline.repo:
-        paths.append(DeclaredPath('repo', '', 'repo', ('', ''), substitute_env(pipeline.repo), True, False))
+    if pipeline.resolve_paths_from:
+        paths.append(DeclaredPath(ROOT_SITE, '', substitute_env(pipeline.resolve_paths_from), PathKind.DIRECTORY))
     paths.extend(
-        DeclaredPath('glue', alias, 'script', ('glue_jobs', 'scripts'), substitute_env(script), False, True)
+        DeclaredPath(PathSite('glue', alias, 'scripts'), 'glue_jobs', substitute_env(script), PathKind.FILE)
         for alias, job in pipeline.glue_jobs.items()
         for script in job.scripts
     )
     paths.extend(
-        DeclaredPath('lambda', alias, 'source_dir', ('lambdas', 'source_dir'), substitute_env(fn.source_dir), True, False)
+        DeclaredPath(PathSite('lambda', alias, 'source_dir'), 'lambdas', substitute_env(fn.source_dir), PathKind.DIRECTORY)
         for alias, fn in pipeline.lambdas.items()
     )
     return paths
 
 
-class PathFault(StrEnum):
-    """Why a declared path cannot be used.
+def declared_keys(pipeline: PipelineConfig) -> list[DeclaredKey]:
+    """Every configured string a glue S3 key is built from.
 
-    A name callers branch on. The sentence a reader sees is in FAULT_WORDING, so rewording the
-    message does not break `validate --json`, whose `fault` key is this value."""
-
-    ABSENT = 'absent'
-    EXPECTED_DIRECTORY = 'expected_directory'
-    EXPECTED_FILE = 'expected_file'
-    NOT_A_CLEAN_KEY = 'not_a_clean_key'
-    ESCAPES_REPO = 'escapes_repo'
-
-
-# The faults about how a value is spelled rather than about what is on disk. They are reported
-# against the configured string, since resolution normalises away the very thing they name.
-KEY_FAULTS = frozenset({PathFault.NOT_A_CLEAN_KEY, PathFault.ESCAPES_REPO})
-
-FAULT_WORDING = {
-    PathFault.ABSENT: 'not found',
-    PathFault.EXPECTED_DIRECTORY: 'is a file, not a directory',
-    PathFault.EXPECTED_FILE: 'is a directory, not a file',
-    PathFault.NOT_A_CLEAN_KEY: 'is not written as a plain relative path, and the S3 key is built from it',
-    PathFault.ESCAPES_REPO: 'climbs out of the pipeline repo, and the S3 key is built from it',
-}
+    `script_key` joins two of them — the prefix and the script — so both are subject to the
+    same spelling rules, and checking only the operand a bug was found in leaves the other
+    silent. A prefix names nothing on disk, so it is a key and not a path; a script is both,
+    and appears here and in `declared_paths`."""
+    keys = []
+    for alias, job in pipeline.glue_jobs.items():
+        keys.append(DeclaredKey(PathSite('glue', alias, 'script_prefix'), substitute_env(job.script_prefix)))
+        keys.extend(DeclaredKey(PathSite('glue', alias, 'scripts'), substitute_env(script)) for script in job.scripts)
+    return keys
 
 
-def path_fault(path: Path, is_dir: bool) -> PathFault | None:
-    """Why this path on disk cannot be used, or None when it can.
+def pipeline_path_faults(
+    pipeline_name: str,
+    pipeline: PipelineConfig,
+    *,
+    on_disk: bool = True,
+    resource: str = '',
+    alias: str = '',
+) -> list[UnusablePath]:
+    """Every declared path and key of one pipeline that cannot be used, with the reason.
 
-    An absent path and one present with the wrong type have opposite remedies — check the tree
-    out, or fix the config key that names it — so they never share a name."""
-    if not path.exists():
-        return PathFault.ABSENT
-    if is_dir and not path.is_dir():
-        return PathFault.EXPECTED_DIRECTORY
-    if not is_dir and not path.is_file():
-        return PathFault.EXPECTED_FILE
-    return None
-
-
-def key_fault(configured: str) -> PathFault | None:
-    """Why this configured string cannot become an S3 key, or None when it can.
-
-    Tested against the string itself, never a `Path` round trip. `pathlib` collapses `.`, `//`
-    and a trailing slash, which are exactly the shapes S3 stores literally — so a normalised
-    probe agrees with the raw string on every input except the ones that matter.
-
-    A leading `~` escapes the repo the way an absolute path does. `PurePosixPath` calls it
-    relative and holds no `..`, so both of the other arms miss it, and it resolves through
-    `$HOME` — the same dependence on where the deploy ran that `repo` exists to remove,
-    arriving by a different route.
-
-    Checked here rather than in a field validator on purpose. A schema failure blanks the whole
-    pipeline tree, because `main.py` falls back to `cfg = None` and every pipeline command
-    disappears with it. A config carrying a malformed key still loads, `config validate` names
-    it and the deploy refuses it, so the diagnosis reaches the reader without the CLI that
-    delivers it going away."""
-    if configured.startswith('~') or PurePosixPath(configured).is_absolute() or '..' in PurePosixPath(configured).parts:
-        return PathFault.ESCAPES_REPO
-    if configured != str(PurePosixPath(configured)) or configured.endswith('/'):
-        return PathFault.NOT_A_CLEAN_KEY
-    return None
-
-
-class UnusablePath(NamedTuple):
-    """One declared path that this config or this machine cannot supply, and why.
-
-    Carries the components rather than the rendered sentence, for the same reason
-    `DeclaredPath` does: `validate --json` emits them separately, and `__str__` is the one
-    place they are joined."""
-
-    pipeline: str
-    resource: str
-    alias: str
-    field: str
-    path: Path
-    fault: PathFault
-    # The string as written. A key fault is about the spelling, and `path` has already had the
-    # `.`, the doubled separator and the trailing slash collapsed out of it by resolution — so
-    # three differently-malformed entries render as one identical row without this.
-    configured: str
-
-    @property
-    def label(self) -> str:
-        return f'{self.resource}/{self.alias} {self.field}' if self.alias else self.field
-
-    @property
-    def shown(self) -> str:
-        """The value to show the reader: what they wrote for a spelling fault, the resolved
-        path for a fault about what is on disk."""
-        return self.configured if self.fault in KEY_FAULTS else str(self.path)
-
-    def __str__(self) -> str:
-        return f'{self.pipeline}: {self.label} {FAULT_WORDING[self.fault]}: {self.shown}'
-
-
-def declared_path_faults(pipeline_name: str, pipeline: PipelineConfig, on_disk: bool = True) -> list[UnusablePath]:
-    """Every declared path of one pipeline that cannot be used, with the reason.
-
-    Both doors call this — `config validate` over every pipeline, and a deploy over the one it
-    is about — so a reader gets the same diagnosis whichever one they came in by.
+    Every door calls this — `config validate` over the whole config, a glue deploy over one job,
+    a lambda deploy over one function — so a reader gets the same diagnosis whichever one they
+    came in by. The scope is an argument rather than something a caller filters afterwards: a
+    caller filtering the result drops the root row, which is the one fault that explains every
+    other row it kept.
 
     `on_disk=False` keeps the machine-independent half. How a key is written is a property of
     the config and is answerable anywhere; whether a file is present is a property of this
-    machine and is only meaningful once a `repo` says where to look."""
-    problems = []
-    # `script_prefix` is the other operand of the concatenation `script_key` performs, so it is
-    # subject to the same spelling rules as a script. It is not a filesystem path, so it is
-    # checked here rather than declared as one — nothing resolves it and nothing displays it as
-    # a file. One malformed prefix is one fault however many scripts hang off it.
-    for alias, job in pipeline.glue_jobs.items():
-        prefix = substitute_env(job.script_prefix)
-        prefix_fault = key_fault(prefix)
-        if prefix_fault:
-            problems.append(UnusablePath(pipeline_name, 'glue', alias, 'script_prefix', Path(prefix), prefix_fault, prefix))
+    machine and is only meaningful once a root says where to look."""
+
+    def in_scope(site: PathSite) -> bool:
+        return (not resource or site.resource == resource) and (not alias or site.alias == alias)
+
+    # An absent root is the cause of every path fault beneath it, so it is reported alone. A job
+    # with ten scripts otherwise prints ten lines that each name a file, and the answer — that
+    # the checkout is not there — is in none of them. Never filtered by scope either: a caller
+    # asking about one job still cannot deploy it, and this is why.
+    if on_disk and pipeline.resolve_paths_from:
+        root = pipeline_root(pipeline)
+        root_fault = path_fault(root, PathKind.DIRECTORY)
+        if root_fault:
+            return [UnusablePath(pipeline_name, ROOT_SITE, root, root_fault, pipeline.resolve_paths_from)]
+
+    problems = [
+        UnusablePath(pipeline_name, key.site, Path(key.value), fault, key.value)
+        for key in declared_keys(pipeline)
+        if in_scope(key.site) and (fault := key_fault(key.value))
+    ]
+    # A value whose spelling is already refused is not also reported as missing. Resolution
+    # would place `./copy.py` somewhere real and `jobs//copy.py` somewhere else, and a second
+    # row about the wrong question buries the one that has the remedy in it. Keyed on the value
+    # as well as the site, so one bad script does not silence the check on its siblings.
+    refused = {(problem.site, problem.configured) for problem in problems}
+    if not on_disk:
+        return problems
     for declared in declared_paths(pipeline):
-        resolved = resolve_in_repo(pipeline, declared.value)
-        fault = key_fault(declared.value) if declared.is_s3_key else None
-        if fault is None and on_disk:
-            fault = path_fault(resolved, is_dir=declared.is_dir)
+        if not in_scope(declared.site) or (declared.site, declared.value) in refused:
+            continue
+        resolved = resolve_from_root(pipeline, declared.value)
+        fault = path_fault(resolved, declared.expects)
         if fault:
-            problems.append(UnusablePath(pipeline_name, declared.resource, declared.alias, declared.field, resolved, fault, declared.value))
+            problems.append(UnusablePath(pipeline_name, declared.site, resolved, fault, declared.value))
     return problems
 
 
-def missing_declared_paths(config: DectlConfig) -> list[UnusablePath]:
-    """Every path a repo-declaring pipeline names that this config or machine cannot supply.
+def config_path_faults(config: DectlConfig) -> list[UnusablePath]:
+    """Every declared path and key in the config that this config or machine cannot supply.
 
-    A pipeline without a repo is skipped rather than reported. Its paths resolve against whatever
-    directory dectl is run from, so their absence right here says nothing about whether a deploy
-    run from the checkout would find them, and reporting it would fail `validate` on a config
-    that is correct.
+    A pipeline naming no root is still checked for how its keys are written, which is
+    answerable on any machine. Its files are not: they resolve against whatever directory dectl
+    is run from, so their absence right here says nothing about whether a deploy run from the
+    checkout would find them, and reporting it would fail `validate` on a config that is
+    correct.
 
-    Checking the repo directory alone would answer half the question. A repo that exists and
+    Checking the root directory alone would answer half the question. A root that exists and
     holds none of the source the pipeline names is present and useless, and the deploy is where
-    that surfaces otherwise. A repo that is itself absent stops the walk, since every path under
-    it would then report the same one cause."""
+    that surfaces otherwise."""
     problems = []
     for name, pipeline in config.pipelines.items():
-        if not pipeline.repo:
-            problems.extend(declared_path_faults(name, pipeline, on_disk=False))
-            continue
-        root_fault = path_fault(pipeline_root(pipeline), is_dir=True)
-        if root_fault:
-            problems.append(UnusablePath(name, 'repo', '', 'repo', pipeline_root(pipeline), root_fault, pipeline.repo or ''))
-            continue
-        problems.extend(declared_path_faults(name, pipeline))
+        problems.extend(pipeline_path_faults(name, pipeline, on_disk=bool(pipeline.resolve_paths_from)))
     return problems
 
 
@@ -557,7 +445,7 @@ def report_config_error(exc: yaml.YAMLError | ValidationError) -> None:
         stderr_console.print(line, markup=False)
     # The headline already named the file, and repeating a long path here wraps across two
     # lines on a narrow terminal, which breaks it mid-token for anyone copying it.
-    stderr_console.print('run "dectl config edit" to fix it', style='dim')
+    stderr_console.print('run "dectl config edit" to fix it')
 
 
 def init_config() -> Path:

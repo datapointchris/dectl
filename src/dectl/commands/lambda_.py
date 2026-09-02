@@ -9,12 +9,11 @@ from botocore.exceptions import ConnectTimeoutError
 from botocore.exceptions import EndpointConnectionError
 from botocore.exceptions import ReadTimeoutError
 
-from dectl.config import FAULT_WORDING
 from dectl.config import DectlConfig
 from dectl.config import LambdaConfig
 from dectl.config import PipelineConfig
-from dectl.config import path_fault
-from dectl.config import resolve_in_repo
+from dectl.config import pipeline_path_faults
+from dectl.config import resolve_from_root
 from dectl.durable import EXECUTION_STATUSES
 from dectl.durable import SUFFIX_SEARCH_LIMIT
 from dectl.durable import epoch_millis
@@ -36,6 +35,10 @@ from dectl.output import emit_json
 from dectl.output import error
 from dectl.output import info
 from dectl.output import success
+from dectl.paths import FAULT_WORDING
+from dectl.paths import PathKind
+from dectl.paths import path_fault
+from dectl.paths import refuse_unusable_paths
 from dectl.payloads import read_payload
 
 # Widen the CloudWatch window around an execution's recorded start and end. The records are
@@ -51,8 +54,13 @@ def zip_lambda(source: Path) -> Path:
     accepts it, so the function's code is replaced with nothing. A directory that exists and
     holds nothing reaches this on ordinary routes — an uninitialised submodule, or a source_dir
     naming a build directory before the build ran — so the count is what is checked, not the
-    directory."""
-    fault = path_fault(source, is_dir=True)
+    directory.
+
+    The directory check repeats what the caller already ran through `pipeline_path_faults`, and
+    repeating it is what keeps the refusal a property of this function rather than of whoever
+    calls it. The caller's message names the config key; this one names only the path, because
+    at this altitude the config key is not known."""
+    fault = path_fault(source, PathKind.DIRECTORY)
     if fault:
         error(f'lambda source_dir {FAULT_WORDING[fault]}: {source}')
         error('run "dectl config show" to see where each configured path resolves')
@@ -144,7 +152,11 @@ def make_lambda_function_app(
         session = make_session(config)
         client = session.client('lambda')
 
-        source = resolve_in_repo(pipeline, fn.source_dir)
+        # Named the way `config validate` names it — which pipeline, which alias, which config
+        # key — rather than as a bare path. `zip_lambda` refuses the same directory a moment
+        # later and can only say the path, because the config key does not reach it.
+        refuse_unusable_paths(pipeline_path_faults(pipeline_name, pipeline, resource='lambda', alias=alias))
+        source = resolve_from_root(pipeline, fn.source_dir)
         info(f'zipping {source}')
         zip_path = zip_lambda(source)
 

@@ -11,9 +11,9 @@ from rich.syntax import Syntax
 from dectl.config import CONFIG_LOAD_ERRORS
 from dectl.config import CONFIG_PATH
 from dectl.config import TEMPLATE_CONFIG
+from dectl.config import config_path_faults
 from dectl.config import init_config
 from dectl.config import load_config
-from dectl.config import missing_declared_paths
 from dectl.config import report_config_error
 from dectl.output import console
 from dectl.output import emit_json
@@ -119,11 +119,12 @@ def config_edit() -> None:
 def config_validate(
     as_json: Annotated[bool, typer.Option('--json', help='Emit the unusable paths as machine-readable JSON to stdout.')] = False,
 ) -> None:
-    """Check the config parses, matches the schema, and that declared repo paths are on this machine.
+    """Check the config parses, matches the schema, and that its declared paths are usable.
 
-    A pipeline that names a `repo` is checked all the way down: the directory itself, every glue
-    script, and every lambda source_dir. A pipeline that names none is left alone, since its
-    paths resolve against wherever you run dectl from.
+    A pipeline that names `resolve_paths_from` is checked all the way down: the directory
+    itself, every glue script, and every lambda source_dir. A pipeline that names none is still
+    checked for how its glue keys are written, which is answerable on any machine; its files are
+    not, since they resolve from wherever you run dectl.
 
     --json emits an object carrying `outcome` and `unusable_paths`. The outcome separates a
     clean config from one that could not be read at all, which an empty list alone folds
@@ -155,7 +156,7 @@ def config_validate(
         refuse('no_config', f'config at {CONFIG_PATH} was removed while it was being read')
         raise typer.Exit(1)
 
-    problems = missing_declared_paths(config)
+    problems = config_path_faults(config)
     if as_json:
         emit_json(
             {
@@ -163,9 +164,9 @@ def config_validate(
                 'unusable_paths': [
                     {
                         'pipeline': p.pipeline,
-                        'resource': p.resource,
-                        'alias': p.alias,
-                        'field': p.field,
+                        'resource': p.site.resource,
+                        'alias': p.site.alias,
+                        'field': p.site.field,
                         'configured': p.configured,
                         'path': str(p.path),
                         'fault': str(p.fault),
@@ -180,7 +181,7 @@ def config_validate(
         error(f'config at {CONFIG_PATH} matches the schema, but names paths that cannot be used:')
         for problem in problems:
             stderr_console.print(f'  {problem}', markup=False)
-        stderr_console.print('run "dectl config show" to see where each configured path resolves', style='dim')
+        stderr_console.print('run "dectl config show" to see where each configured path resolves')
         raise typer.Exit(1)
 
     success(f'config at {CONFIG_PATH} is valid')

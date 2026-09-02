@@ -1,9 +1,12 @@
 import pytest
+import typer
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
 import dectl.main
+from dectl.commands.config_cmd import config_app
 from dectl.config import DectlConfig
+from dectl.main import REFERENCE_GLOBAL
 from dectl.main import app
 
 runner = CliRunner()
@@ -18,6 +21,37 @@ def test_reference_prints_the_grammar():
     assert 'Set / pipeline verbs' in result.stdout
     # Option-syntax brackets must survive verbatim, not be eaten as rich markup tags.
     assert '[--follow]' in result.stdout
+
+
+def reference_text() -> str:
+    return '\n'.join(REFERENCE_GLOBAL)
+
+
+def test_the_reference_names_every_static_global_command():
+    # `reference` exists because --help shows almost nothing on a fresh machine, so a command
+    # missing from it is invisible to the reader it was written for. Derived from the tree
+    # rather than listed here: a command added to either app has to appear without this test
+    # being edited.
+    tree = typer.main.get_command(app)
+    # A leaf, not a group: the pipeline sub-apps are assembled from config and are exactly what
+    # `reference` exists to be independent of.
+    static = {name for name, command in tree.commands.items() if not hasattr(command, 'commands')}
+
+    assert static
+    assert {name for name in static if name not in reference_text()} == set()
+
+
+def test_the_reference_names_every_config_verb_and_its_json_flag():
+    # The flags too, not only the verbs. `validate --json` was added to the README and to the
+    # command while the reference kept the flagless spelling, which is the half of the surface a
+    # reader on a fresh machine actually sees.
+    config_tree = typer.main.get_command(config_app)
+    verbs = set(config_tree.commands)
+    with_json = {name for name, command in config_tree.commands.items() if any(param.name == 'as_json' for param in command.params)}
+
+    assert verbs and with_json
+    assert {verb for verb in verbs if verb not in reference_text()} == set()
+    assert {verb for verb in with_json if f'{verb} [--json]' not in reference_text()} == set()
 
 
 def test_update_installs_the_published_release(monkeypatch):

@@ -1,5 +1,4 @@
 import json
-import re
 
 from typer.testing import CliRunner
 
@@ -192,9 +191,9 @@ def test_show_still_names_a_missing_config_as_missing(monkeypatch, tmp_path):
 
 
 def test_validate_json_emits_the_unusable_paths_as_objects(monkeypatch, tmp_path):
-    repo = tmp_path / 'salesdata'
-    repo.mkdir()
-    point_at(monkeypatch, tmp_path, config_naming(str(repo), source_dir='modules/code'))
+    root = tmp_path / 'salesdata'
+    root.mkdir()
+    point_at(monkeypatch, tmp_path, config_naming(str(root), source_dir='modules/code'))
 
     result = runner.invoke(config_app, ['validate', '--json'])
 
@@ -208,7 +207,7 @@ def test_validate_json_emits_the_unusable_paths_as_objects(monkeypatch, tmp_path
                 'alias': 'notifier',
                 'field': 'source_dir',
                 'configured': 'modules/code',
-                'path': str(repo / 'modules' / 'code'),
+                'path': str(root / 'modules' / 'code'),
                 'fault': 'absent',
             }
         ],
@@ -216,9 +215,9 @@ def test_validate_json_emits_the_unusable_paths_as_objects(monkeypatch, tmp_path
 
 
 def test_validate_json_separates_a_clean_config_from_one_it_could_not_read(monkeypatch, tmp_path):
-    repo = tmp_path / 'salesdata'
-    (repo / 'code').mkdir(parents=True)
-    point_at(monkeypatch, tmp_path, config_naming(str(repo)))
+    root = tmp_path / 'salesdata'
+    (root / 'code').mkdir(parents=True)
+    point_at(monkeypatch, tmp_path, config_naming(str(root)))
 
     clean = runner.invoke(config_app, ['validate', '--json'])
     point_at(monkeypatch, tmp_path, BAD_CONFIG)
@@ -244,13 +243,13 @@ def test_validate_json_keeps_stdout_parseable_on_a_schema_failure(monkeypatch, t
     assert 'pipelines.p.step_function' in result.stderr
 
 
-def config_naming(repo: str, source_dir: str = 'code') -> str:
+def config_naming(root: str, source_dir: str = 'code') -> str:
     return (
         'defaults:\n'
         '  account_id: "1"\n'
         'pipelines:\n'
         '  salesdata:\n'
-        f'    repo: {repo}\n'
+        f'    resolve_paths_from: {root}\n'
         '    lambdas:\n'
         '      notifier:\n'
         '        name: n\n'
@@ -258,10 +257,20 @@ def config_naming(repo: str, source_dir: str = 'code') -> str:
     )
 
 
-def test_validate_accepts_a_repo_whose_paths_are_all_present(monkeypatch, tmp_path):
-    repo = tmp_path / 'salesdata'
-    (repo / 'code').mkdir(parents=True)
-    point_at(monkeypatch, tmp_path, config_naming(str(repo)))
+def faults_from(result) -> list[tuple[str, str, str]]:
+    """The (resource, field, fault) triples `validate --json` reported.
+
+    Read off the published document rather than off the sentence stderr rendered. `PathFault`
+    exists so the wording can change without breaking a consumer, and a test matching the
+    wording is a consumer of it — it goes red on a reworded message and stays green on a wrong
+    fault, which is the pair of failures backwards."""
+    return [(p['resource'], p['field'], p['fault']) for p in json.loads(result.stdout)['unusable_paths']]
+
+
+def test_validate_accepts_a_root_whose_paths_are_all_present(monkeypatch, tmp_path):
+    root = tmp_path / 'salesdata'
+    (root / 'code').mkdir(parents=True)
+    point_at(monkeypatch, tmp_path, config_naming(str(root)))
 
     result = runner.invoke(config_app, ['validate'])
 
@@ -269,64 +278,54 @@ def test_validate_accepts_a_repo_whose_paths_are_all_present(monkeypatch, tmp_pa
     assert 'valid' in result.stdout
 
 
-def strip_wrapping(text: str) -> str:
-    """Undo rich's soft wrap so a path assertion does not depend on the terminal's width.
-
-    The assertion is about what the command reported, so it has to read the command's own
-    output rather than recompute the answer beside it."""
-    return re.sub(r'\s+', ' ', text)
-
-
-def test_validate_rejects_a_repo_that_is_not_on_this_machine(monkeypatch, tmp_path):
+def test_validate_rejects_a_root_that_is_not_on_this_machine(monkeypatch, tmp_path):
     point_at(monkeypatch, tmp_path, config_naming(str(tmp_path / 'absent')))
 
-    result = runner.invoke(config_app, ['validate'])
+    result = runner.invoke(config_app, ['validate', '--json'])
 
     assert result.exit_code == 1
-    assert 'repo not found' in strip_wrapping(result.stderr)
-    assert str(tmp_path / 'absent') in strip_wrapping(result.stderr)
+    assert faults_from(result) == [('pipeline', 'resolve_paths_from', 'absent')]
 
 
-def test_validate_rejects_a_present_repo_that_is_missing_the_source(monkeypatch, tmp_path):
-    # The readiness half. A repo that exists and holds none of the source the pipeline names is
+def test_validate_rejects_a_present_root_that_is_missing_the_source(monkeypatch, tmp_path):
+    # The readiness half. A root that exists and holds none of the source the pipeline names is
     # present and useless, and checking the directory alone would report it converged.
-    repo = tmp_path / 'salesdata'
-    repo.mkdir()
-    raw = config_naming(str(repo), source_dir='modules/code')
+    root = tmp_path / 'salesdata'
+    root.mkdir()
+    raw = config_naming(str(root), source_dir='modules/code')
     point_at(monkeypatch, tmp_path, raw)
 
-    result = runner.invoke(config_app, ['validate'])
+    result = runner.invoke(config_app, ['validate', '--json'])
 
     assert result.exit_code == 1
-    assert 'lambda/notifier source_dir not found' in strip_wrapping(result.stderr)
-    assert str(repo / 'modules' / 'code') in strip_wrapping(result.stderr)
+    assert faults_from(result) == [('lambda', 'source_dir', 'absent')]
 
 
 def test_validate_reports_a_file_named_as_a_source_dir_as_a_file(monkeypatch, tmp_path):
-    # Absent and present-with-the-wrong-type have opposite remedies, so the wording separates
-    # them: check the tree out, or fix the config key.
-    repo = tmp_path / 'salesdata'
-    repo.mkdir()
-    (repo / 'code').write_text('not a directory')
-    raw = config_naming(str(repo))
+    # Absent and present-with-the-wrong-type have opposite remedies — check the tree out, or fix
+    # the config key — so they are separate values rather than one wording apart.
+    root = tmp_path / 'salesdata'
+    root.mkdir()
+    (root / 'code').write_text('not a directory')
+    raw = config_naming(str(root))
     point_at(monkeypatch, tmp_path, raw)
 
-    result = runner.invoke(config_app, ['validate'])
+    result = runner.invoke(config_app, ['validate', '--json'])
 
     assert result.exit_code == 1
-    assert 'is a file, not a directory' in strip_wrapping(result.stderr)
+    assert faults_from(result) == [('lambda', 'source_dir', 'expected_directory')]
 
 
 def test_validate_checks_glue_scripts_and_not_only_lambda_sources(monkeypatch, tmp_path):
     # Both halves of the walk are checked. Deleting either one has to turn this red.
-    repo = tmp_path / 'salesdata'
-    (repo / 'code').mkdir(parents=True)
+    root = tmp_path / 'salesdata'
+    (root / 'code').mkdir(parents=True)
     raw = (
         'defaults:\n'
         '  account_id: "1"\n'
         'pipelines:\n'
         '  salesdata:\n'
-        f'    repo: {repo}\n'
+        f'    resolve_paths_from: {root}\n'
         '    glue_jobs:\n'
         '      copy:\n'
         '        name: n\n'
@@ -341,19 +340,19 @@ def test_validate_checks_glue_scripts_and_not_only_lambda_sources(monkeypatch, t
     )
     point_at(monkeypatch, tmp_path, raw)
 
-    result = runner.invoke(config_app, ['validate'])
+    result = runner.invoke(config_app, ['validate', '--json'])
 
     assert result.exit_code == 1
-    assert 'glue/copy script not found' in strip_wrapping(result.stderr)
-    assert str(repo / 'jobs' / 'copy.py') in strip_wrapping(result.stderr)
+    assert faults_from(result) == [('glue', 'scripts', 'absent')]
+    assert json.loads(result.stdout)['unusable_paths'][0]['path'] == str(root / 'jobs' / 'copy.py')
 
 
 def test_env_is_substituted_before_a_declared_path_is_checked(monkeypatch, tmp_path):
     # The deploys resolve these through render_env_model, so a validator reading the raw model
     # would fail a config whose deploy works.
-    repo = tmp_path / 'salesdata'
-    (repo / 'modules' / 'dev' / 'code').mkdir(parents=True)
-    raw = config_naming(str(repo), source_dir='modules/{env}/code')
+    root = tmp_path / 'salesdata'
+    (root / 'modules' / 'dev' / 'code').mkdir(parents=True)
+    raw = config_naming(str(root), source_dir='modules/{env}/code')
     point_at(monkeypatch, tmp_path, raw)
 
     result = runner.invoke(config_app, ['validate'])
@@ -362,11 +361,11 @@ def test_env_is_substituted_before_a_declared_path_is_checked(monkeypatch, tmp_p
     assert 'valid' in result.stdout
 
 
-def test_env_is_substituted_inside_the_repo_itself(monkeypatch, tmp_path):
+def test_env_is_substituted_inside_the_root_itself(monkeypatch, tmp_path):
     # Half-substituting the join is worse than not substituting at all: the resolved path is
     # neither what the config says nor what the environment asked for.
-    repo = tmp_path / 'dev' / 'salesdata'
-    (repo / 'code').mkdir(parents=True)
+    root = tmp_path / 'dev' / 'salesdata'
+    (root / 'code').mkdir(parents=True)
     raw = config_naming(str(tmp_path / '{env}' / 'salesdata'))
     point_at(monkeypatch, tmp_path, raw)
 
@@ -376,9 +375,9 @@ def test_env_is_substituted_inside_the_repo_itself(monkeypatch, tmp_path):
     assert 'valid' in result.stdout
 
 
-def test_validate_checks_key_shape_even_without_a_repo(monkeypatch, tmp_path):
+def test_validate_checks_key_shape_even_without_a_declared_root(monkeypatch, tmp_path):
     # How a key is written is a property of the config, answerable on any machine. Only whether
-    # a file is present needs a repo to say where to look.
+    # a file is present needs a root to say where to look.
     raw = (
         'defaults:\n'
         '  account_id: "1"\n'
@@ -397,7 +396,7 @@ def test_validate_checks_key_shape_even_without_a_repo(monkeypatch, tmp_path):
     result = runner.invoke(config_app, ['validate', '--json'])
 
     assert result.exit_code == 1
-    assert [p['fault'] for p in json.loads(result.stdout)['unusable_paths']] == ['escapes_repo']
+    assert [p['fault'] for p in json.loads(result.stdout)['unusable_paths']] == ['escapes_root']
 
 
 def test_a_malformed_key_leaves_the_rest_of_the_cli_working(monkeypatch, tmp_path):

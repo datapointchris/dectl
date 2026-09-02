@@ -216,7 +216,7 @@ REFERENCE_SET_VERBS = [
 ]
 REFERENCE_GLOBAL = [
     'reference · env · list [--json] · search KEYWORD [--json] · update [--check]',
-    'config  init · show [--json] · path · example · edit · validate',
+    'config  init · show [--json] · path · example · edit · validate [--json]',
 ]
 
 
@@ -328,7 +328,7 @@ def main(
         print_environment_banner()
         if CONFIG_ERROR is not None:
             report_config_error(CONFIG_ERROR)
-            stderr_console.print('pipeline commands are absent from the help below until it loads', style='dim')
+            stderr_console.print('pipeline commands are absent from the help below until it loads')
         print(ctx.get_help())
 
 

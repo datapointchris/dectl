@@ -304,18 +304,19 @@ instead of silently ignoring it. `config example` prints to stdout (highlighted 
 terminal, plain when redirected), so you can display the full reference in one pane
 while editing the real config in another.
 
-### Running from anywhere: `repo`
+### Running from anywhere: `resolve_paths_from`
 
 Every read talks to AWS and needs no local file, so a read runs from any directory.
 Deploys are the exception: a Glue job's `scripts` and a Lambda's `source_dir` are paths,
-and without a `repo` they resolve against the directory you happen to be standing in.
+and without `resolve_paths_from` they resolve from the directory you happen to be standing
+in.
 
-Give a pipeline a `repo` and they resolve against that instead:
+Give a pipeline a `resolve_paths_from` and they resolve from that instead:
 
 ```yaml
 pipelines:
   salesdata:
-    repo: ~/code/salesdata
+    resolve_paths_from: ~/code/salesdata
     lambdas:
       notifier:
         name: salesdata-{env}-notifier
@@ -323,32 +324,37 @@ pipelines:
 ```
 
 `dectl salesdata lambda notifier deploy` now zips `~/code/salesdata/modules/lambda/notifier/code`
-from wherever you run it. With several pipelines each naming their own `repo`, one config
-drives every repo's deploys and you never change directory to do it.
+from wherever you run it. With several pipelines each naming their own directory, one
+config drives every checkout's deploys and you never change directory to do it.
 
 The value must be absolute or start with `~`. A relative one would resolve against the
 working directory, which is the dependency the key removes, so it fails validation. A
 `{env}` token in it is substituted like any other name.
 
-A `source_dir` may be absolute and sit outside the repo — it is zipped and uploaded as
-bytes, so nothing else depends on where it came from. A glue `scripts` entry may not: its
-S3 key is built from the string you write, and S3 stores that string as given. `../x.py`,
-`/srv/x.py`, `./x.py`, `jobs//x.py` and `x.py/` all name objects nothing will look for, so
-`config validate` and the deploy both refuse them. The config still loads either way, which
-is what keeps the rest of the CLI available to tell you.
+A `source_dir` may be absolute and sit outside that directory — it is zipped and uploaded
+as bytes, so nothing else depends on where it came from. A glue `scripts` entry may not:
+its S3 key is built from the string you write, and S3 stores that string as given.
+`../x.py`, `/srv/x.py`, `~/x.py`, `./x.py`, `jobs//x.py` and `x.py/` all name objects
+nothing will look for, so `config validate` and the deploy both refuse them. `script_prefix`
+is the other half of the same key and is held to the same spelling. The config still loads
+either way, which is what keeps the rest of the CLI available to tell you.
 
-Omit `repo` and nothing changes: paths resolve against the working directory, and a deploy
-has to run from the checkout.
+Omit `resolve_paths_from` and nothing changes: paths resolve from the working directory,
+and a deploy has to run from the checkout.
 
-`config validate` checks a pipeline that names a `repo` all the way down — the directory,
-every script, every `source_dir` — and says of each one whether it is absent or present
-with the wrong type, since those have opposite fixes. It says nothing about a pipeline with
-no `repo`, because those paths depend on where you run it from.
+`config validate` checks a pipeline that names `resolve_paths_from` all the way down — the
+directory, every script, every `source_dir` — and says of each one whether it is absent or
+present with the wrong type, since those have opposite fixes. For a pipeline that names
+none it still checks how the glue keys are written, which is answerable on any machine; only
+whether a file is present needs a directory to look in.
+
+An absent directory is reported on its own. Every path beneath it would carry the same one
+cause, and ten lines each naming a file name that cause in none of them.
 
 `config show` prints the resolved directory for every pipeline, with `~` expanded and
 `{env}` substituted, and marks the ones falling back to the working directory. It prints
 the resolved path of every script and `source_dir` beneath it, so the file a deploy would
 send is on the page rather than inferred. `config show --json` and `list --json` carry the
-same under `repo`, `script_paths` and `source_path`. `validate --json` emits an object
-with `outcome` and `unusable_paths`, so a caller can tell a clean config from one that
-could not be read at all.
+same under `resolve_paths_from`, `script_paths` and `source_path`. `validate --json` emits
+an object with `outcome` and `unusable_paths`, so a caller can tell a clean config from one
+that could not be read at all.

@@ -99,40 +99,30 @@ its own block listing which lambdas / step machines to tail, kept separate so th
 is defined in one scannable place. When you change a model, update `TEMPLATE_CONFIG` in the same
 file so `config init` stays valid — a test asserts `TEMPLATE_CONFIG` round-trips through the models.
 
-A pipeline's optional `repo` is the directory its relative paths resolve against, which is what
-lets a deploy run from any working directory. **Every config value naming a file or directory
-goes through `resolve_in_repo(pipeline, value)`, never `Path(value)`** — missing it reintroduces
-the dependency on where dectl was invoked, silently. `pipeline_root` is the fallback half: no
-`repo` means `Path.cwd()`. Both substitute `{env}`, so a path is resolved the same way every
-other name is.
+### Paths
 
-**`declared_paths` is the one enumeration of which config fields hold paths, and everything that
-touches a path reads it.** `missing_declared_paths` checks it, `pipeline_to_dict` and
-`render_pipeline` display it through `resolved_paths`, `aws_names_only` excludes it from the
-env-effect guard, and `resolve_scripts` takes the glue subset. Adding a field there is the whole
-edit; adding it anywhere else gets it checked and never shown, or shown and never checked. Both
-failures read as success.
+`src/dectl/paths.py` owns the path domain and `config.py` owns the walk over the models —
+`declared_paths`, `declared_keys`, `pipeline_path_faults`, `config_path_faults`. Read
+`paths.py`'s module docstring before changing either; these are the constraints a new
+path-bearing resource has to meet, which the docstrings do not state.
 
-`path_fault` and `key_fault` say *why* a path is unusable and return a `PathFault`, never a
-sentence — `validate --json` publishes the name as its discriminator, so the wording lives in
-`FAULT_WORDING` and can change without breaking a caller. `key_fault` reads the configured
-string rather than a `Path` of it, because `pathlib` collapses `.`, `//` and a trailing slash,
-which are exactly the shapes S3 stores literally.
-
-**A malformed key is not a schema failure.** `main.py` falls back to `cfg = None` on a load
-error, so every pipeline command disappears — including the ones that would report the problem.
-Anything about how a value is *written* is checked by `config validate` and by the deploy;
-a field validator gets only what stops the value being a path at all.
-
-`expand_home` is the guarded `~` expansion, and `expands_at_load` is the half that skips a value
-carrying `{env}` — no stand-in preserves both a path's shape and its user name, so a templated
-path is decided by `render_env_model`'s re-validation inside the verb instead. That
-re-validation raises outside `CONFIG_LOAD_ERRORS`, so `render_env_model` catches it and reports
-the key rather than letting a pydantic traceback out.
-
-A glue `scripts` entry must be a plain relative path, because its S3 key is built from the
-config string. A lambda `source_dir` has no such restriction: it is zipped and uploaded as bytes
-with no key derived from it.
+- **A value naming a file is declared in `declared_paths`; one an S3 key is built from is
+  declared in `declared_keys`.** A glue script is both. Everything that checks, resolves or
+  excludes a value reads those two, so a field added to a model without a row is checked by
+  nothing and resolved by nothing — and both failures read as success.
+  `test_every_path_field_on_the_models_is_declared` is what holds it.
+- **Displaying one is a second edit, and only that.** `pipeline_to_dict` and `render_pipeline`
+  name a key per resource (`script_paths`, `source_path`), so a new resource's path needs a row
+  in each. The checking, the resolution and the env-guard exclusion come free from the two
+  enumerations.
+- **Every value naming a file or directory goes through `resolve_from_root(pipeline, value)`,
+  never `Path(value)`** — missing it reintroduces the dependency on where dectl was invoked,
+  silently. `pipeline_root` is the fallback half: no `resolve_paths_from` means `Path.cwd()`.
+- **A fault about how a value is *written* belongs to `config validate` and to the deploy,
+  never to a field validator.** `main.py` falls back to `cfg = None` on a load error, so a
+  schema failure blanks the whole pipeline tree — including the commands that would report it.
+- **A deploy door scopes `pipeline_path_faults` by argument, never by filtering its result.**
+  Filtering drops the row naming the absent root, which is the cause of every row it kept.
 
 `script_key` is the one place a glue S3 key is built. The upload, `ScriptLocation` and
 `--extra-py-files` all read it; any two disagreeing means Glue fetches an object nothing wrote.
@@ -145,8 +135,8 @@ after an upload leaves `ScriptLocation` pointing at code the user was just told 
 `TEMPLATE_CONFIG` is the single source for the example config: `config init` writes it, `config
 example` prints it (syntax-highlighted on a TTY, plain when piped so `config example > config.yaml`
 stays clean), and it exercises every option so it doubles as side-by-side reference while editing.
-Its `repo` line stays commented — uncommented it would name a directory no machine has, and
-`config validate` checks declared repo paths, so `config init` would write a config that fails.
+Its `resolve_paths_from` line stays commented — uncommented it would name a directory no machine
+has, and `config validate` checks it, so `config init` would write a config that fails.
 
 All models inherit `StrictModel` (`extra='forbid'`), so an unknown key — a typo like
 `step_function:` — is a loud error rather than a silently dropped field. Because forbidding
@@ -207,6 +197,7 @@ and an eval'd `s3 export` stay clean.
 | `invoke.py` | The Lambda Invoke domain: how long to wait for one, the client to send it through, and which failures may safely be sent again. Kept out of `session.py` for the reason `durable.py` is kept out of `logs.py` — it is the Lambda API, not the boto3 session. |
 | `output.py` | The two `rich` consoles and the `error`/`success`/`info`/`warn` helpers, plus `emit_json` (bare-print JSON for `--json`) and `format_duration`. Use these, not bare `print`, for anything human-facing. `error` and `warn` write to `stderr_console`; `success` and `info` write to stdout. |
 | `pipeline_view.py` | Shared pipeline rendering — `render_pipeline` (human) and `pipeline_to_dict` (the stable `--json` shape). Used by both `main.py` (`list`) and `config_cmd.py` (`show`); lives outside both to avoid the `main` ↔ `config_cmd` import cycle. |
+| `paths.py` | The path domain: whether a resolved `Path` is usable, whether a configured string can become an S3 key, and how a `~` expands. Knows nothing of pipelines — `config.py` walks the models and builds the records this defines, the same split as `durable.py` beside `commands/lambda_.py`. |
 | `payloads.py` | `read_payload` — resolves a `--payload-file` path or `-` (stdin) to a JSON string for `lambda`/`sfn` `run`. |
 | `logs.py` | CloudWatch log tailing (Glue, Lambda, and the multi-group `monitor` stream) plus Step Functions execution-history rendering, including structured-JSON pretty-printing. `LogGroupCursor` is the shared primitive all three tailers poll through. |
 | `durable.py` | The Lambda durable-functions domain: qualifier resolution, execution lookup by name/ARN, and execution-history rendering. Kept out of `logs.py` because it is the Lambda API, not CloudWatch. |

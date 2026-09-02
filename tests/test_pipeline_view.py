@@ -69,43 +69,43 @@ def test_render_pipeline_prints_alias_to_name_lines(monkeypatch, capsys):
     assert 'iceberg/events: salesdata-dev-catalog.events' in out
 
 
-def test_json_carries_the_repo_with_its_tilde_already_expanded():
+def test_json_carries_the_root_with_its_tilde_already_expanded():
     # The expansion happens between the file and the behaviour, so a reader who sees only the
     # written value cannot tell which directory a deploy would reach.
     config = DectlConfig.model_validate(
         {
             'defaults': {'account_id': '1'},
-            'pipelines': {'salesdata': {'repo': '~/code/salesdata', 'buckets': {'raw': 'b'}}},
+            'pipelines': {'salesdata': {'resolve_paths_from': '~/code/salesdata', 'buckets': {'raw': 'b'}}},
         }
     )
 
     data = pipeline_to_dict('salesdata', config.pipelines['salesdata'])
 
-    assert data['repo'] == {'path': str(Path.home() / 'code' / 'salesdata'), 'declared': True}
+    assert data['resolve_paths_from'] == {'path': str(Path.home() / 'code' / 'salesdata'), 'declared': True}
 
 
-def test_json_marks_an_undeclared_repo_as_the_working_directory():
-    # An undeclared repo still resolves. Reporting the path with no flag beside it would read
-    # as a declared value and hide that the resolution follows the shell.
+def test_json_marks_an_unset_root_as_the_working_directory():
+    # An unset root still resolves. Reporting the path with no flag beside it would read as a
+    # declared value and hide that the resolution follows the shell.
     pipeline = make_pipeline().pipelines['salesdata']
 
     data = pipeline_to_dict('salesdata', pipeline)
 
-    assert data['repo'] == {'path': str(Path.cwd()), 'declared': False}
+    assert data['resolve_paths_from'] == {'path': str(Path.cwd()), 'declared': False}
 
 
-def test_an_undeclared_repo_is_reported_as_the_working_directory():
+def test_an_unset_root_is_reported_as_the_working_directory():
     # Asserted on the value rather than the printed line. A cwd long enough to wrap makes a
     # stdout assertion pass or fail on the width of whichever terminal ran it.
     pipeline = make_pipeline().pipelines['salesdata']
 
     assert pipeline_root(pipeline) == Path.cwd()
-    assert pipeline.repo is None
+    assert pipeline.resolve_paths_from is None
 
 
-def repo_pipeline(**overrides) -> DectlConfig:
+def rooted_pipeline(**overrides) -> DectlConfig:
     pipeline = {
-        'repo': '/srv/salesdata',
+        'resolve_paths_from': '/srv/salesdata',
         'glue_jobs': {
             'copy': {'name': 'j', 'script_bucket': 'b-{env}', 'script_prefix': 'scripts/{env}', 'scripts': ['jobs/copy.py'], 'role': 'r'}
         },
@@ -121,7 +121,9 @@ def test_a_glue_job_with_no_scripts_renders_through_both_doors():
     config = DectlConfig.model_validate(
         {
             'defaults': {'account_id': '1'},
-            'pipelines': {'p': {'repo': '/srv/x', 'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'b', 'scripts': [], 'role': 'r'}}}},
+            'pipelines': {
+                'p': {'resolve_paths_from': '/srv/x', 'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'b', 'scripts': [], 'role': 'r'}}}
+            },
         }
     )
     pipeline = config.pipelines['p']
@@ -141,7 +143,7 @@ def test_an_alias_with_a_space_survives_every_consumer():
             'defaults': {'account_id': '1'},
             'pipelines': {
                 'salesdata': {
-                    'repo': '/srv/salesdata',
+                    'resolve_paths_from': '/srv/salesdata',
                     'lambdas': {'weird alias': {'name': 'n', 'source_dir': 'code'}},
                 }
             },
@@ -158,7 +160,7 @@ def test_an_alias_with_a_space_survives_every_consumer():
 def test_json_carries_the_resolved_path_of_every_declared_path():
     # The reader is asking which file a deploy sends. The config string does not answer that,
     # and the repo row alone does not either.
-    pipeline = repo_pipeline().pipelines['salesdata']
+    pipeline = rooted_pipeline().pipelines['salesdata']
 
     data = pipeline_to_dict('salesdata', pipeline)
 
@@ -170,7 +172,7 @@ def test_json_substitutes_the_script_prefix_like_every_other_name(monkeypatch):
     # The prefix is half the destination. Leaving it literal beside a substituted bucket names
     # an S3 location no deploy writes to.
     monkeypatch.setattr(active_environment, 'name', 'prod')
-    pipeline = repo_pipeline().pipelines['salesdata']
+    pipeline = rooted_pipeline().pipelines['salesdata']
 
     data = pipeline_to_dict('salesdata', pipeline)
 
@@ -179,7 +181,7 @@ def test_json_substitutes_the_script_prefix_like_every_other_name(monkeypatch):
 
 
 def test_render_prints_the_resolved_path_of_every_declared_path(capsys):
-    pipeline = repo_pipeline().pipelines['salesdata']
+    pipeline = rooted_pipeline().pipelines['salesdata']
 
     render_pipeline('salesdata', pipeline)
 
@@ -199,7 +201,7 @@ def test_a_source_dir_token_does_not_silence_the_no_effect_warning(monkeypatch, 
             'defaults': {'account_id': '1'},
             'pipelines': {
                 'salesdata': {
-                    'repo': '/srv/salesdata',
+                    'resolve_paths_from': '/srv/salesdata',
                     'lambdas': {'notifier': {'name': 'hardcoded-dev', 'source_dir': 'modules/{env}/code'}},
                 }
             },
@@ -220,7 +222,7 @@ def test_a_glue_script_token_does_not_silence_the_no_effect_warning(monkeypatch,
             'defaults': {'account_id': '1'},
             'pipelines': {
                 'salesdata': {
-                    'repo': '/srv/salesdata',
+                    'resolve_paths_from': '/srv/salesdata',
                     'glue_jobs': {'copy': {'name': 'hardcoded-dev', 'script_bucket': 'b', 'scripts': ['jobs/{env}/c.py'], 'role': 'r'}},
                 }
             },
@@ -232,7 +234,7 @@ def test_a_glue_script_token_does_not_silence_the_no_effect_warning(monkeypatch,
     assert 'changed nothing' in capsys.readouterr().err
 
 
-def test_a_repo_token_does_not_silence_the_no_effect_warning(monkeypatch, capsys):
+def test_a_root_token_does_not_silence_the_no_effect_warning(monkeypatch, capsys):
     # The guard asks whether --env changed an AWS name. A {env} in a local path satisfies
     # contains_env_placeholder without naming anything in AWS, so it must not reach the dump.
     monkeypatch.setattr(active_environment, 'name', 'prod')
@@ -241,7 +243,7 @@ def test_a_repo_token_does_not_silence_the_no_effect_warning(monkeypatch, capsys
     config = DectlConfig.model_validate(
         {
             'defaults': {'account_id': '1'},
-            'pipelines': {'salesdata': {'repo': '~/code/{env}/salesdata', 'buckets': {'raw': 'hardcoded-bucket'}}},
+            'pipelines': {'salesdata': {'resolve_paths_from': '~/code/{env}/salesdata', 'buckets': {'raw': 'hardcoded-bucket'}}},
         }
     )
 

@@ -1,9 +1,10 @@
 from typing import Any
 
+from dectl.config import ROOT_SITE
 from dectl.config import PipelineConfig
 from dectl.config import declared_paths
 from dectl.config import pipeline_root
-from dectl.config import resolve_in_repo
+from dectl.config import resolve_from_root
 from dectl.env import substitute_env
 from dectl.env import warn_if_environment_had_no_effect
 from dectl.output import info
@@ -31,28 +32,29 @@ def aws_names_only(pipeline: PipelineConfig) -> dict[str, Any]:
     `warn_if_environment_had_no_effect` asks whether `--env` changed an AWS name. A `{env}` in a
     local path satisfies `contains_env_placeholder` without naming anything in AWS, so leaving
     one in silences the warning for a pipeline whose bucket and job names all hardcode an
-    environment. Driven from `declared_paths`, so a new path field is excluded by being declared
-    rather than by being remembered here."""
-    dumped = pipeline.model_dump(exclude={'repo'})
+    environment. Every exclusion comes from `declared_paths`, the pipeline's own root included,
+    so a new path field is excluded by being declared rather than by being remembered here. A
+    name in this signature would keep working while the declaration did nothing, which is a
+    mechanism that reads as load-bearing and is not."""
+    dumped = pipeline.model_dump()
     for declared in declared_paths(pipeline):
-        collection, field = declared.model_path
-        if not collection:
-            continue
-        dumped.get(collection, {}).get(declared.alias, {}).pop(field, None)
+        owner = dumped.get(declared.collection, {}).get(declared.site.alias, {}) if declared.collection else dumped
+        owner.pop(declared.site.field, None)
     return dumped
 
 
-def resolved_paths(pipeline: PipelineConfig) -> dict[str, list[str]]:
-    """Every declared path of this pipeline, resolved, keyed by `<resource>/<alias>`.
+def resolved_paths(pipeline: PipelineConfig) -> dict[tuple[str, str], list[str]]:
+    """Every declared path of this pipeline, resolved, keyed by resource and alias.
 
     Both renderers read this rather than walking the resource dicts themselves, so a field added
-    to `declared_paths` is displayed without either of them being edited."""
-    grouped: dict[str, list[str]] = {}
+    to `declared_paths` is resolved without either of them being edited. The key is the pair
+    rather than a `resource/alias` string, so nothing rebuilds the string a `PathSite` already
+    holds and an alias carrying a slash cannot collide with a different resource."""
+    grouped: dict[tuple[str, str], list[str]] = {}
     for declared in declared_paths(pipeline):
-        if declared.resource == 'repo':
+        if declared.site == ROOT_SITE:
             continue
-        key = f'{declared.resource}/{declared.alias}'
-        grouped.setdefault(key, []).append(str(resolve_in_repo(pipeline, declared.value)))
+        grouped.setdefault((declared.site.resource, declared.site.alias), []).append(str(resolve_from_root(pipeline, declared.value)))
     return grouped
 
 
@@ -66,16 +68,19 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
     return {
         'pipeline': name,
         # The resolved directory, with `~` expanded and `{env}` substituted, plus whether the
-        # config named it. An undeclared repo still resolves — to the working directory — and a
-        # reader who cannot tell that apart from a declared one cannot say what a deploy reaches.
-        'repo': {'path': str(pipeline_root(pipeline)), 'declared': pipeline.repo is not None},
+        # config named it. A pipeline that named none still resolves — to the working directory
+        # — and a reader who cannot tell that apart cannot say what a deploy reaches.
+        'resolve_paths_from': {
+            'path': str(pipeline_root(pipeline)),
+            'declared': pipeline.resolve_paths_from is not None,
+        },
         'glue': {
             alias: {
                 'name': substitute_env(job.name),
                 'script_bucket': substitute_env(job.script_bucket),
                 'script_prefix': substitute_env(job.script_prefix),
                 'scripts': [substitute_env(script) for script in job.scripts],
-                'script_paths': resolved.get(f'glue/{alias}', []),
+                'script_paths': resolved.get(('glue', alias), []),
             }
             for alias, job in pipeline.glue_jobs.items()
         },
@@ -84,7 +89,7 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
                 'name': substitute_env(fn.name),
                 'durable': fn.durable,
                 'source_dir': substitute_env(fn.source_dir),
-                'source_path': resolved.get(f'lambda/{alias}', [''])[0],
+                'source_path': resolved.get(('lambda', alias), [''])[0],
             }
             for alias, fn in pipeline.lambdas.items()
         },
@@ -106,20 +111,20 @@ def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
     resolved = resolved_paths(pipeline)
     types = resource_types(pipeline)
     info(f'[bold]{name}[/bold] ({", ".join(types) or "none configured"})')
-    source = '' if pipeline.repo else ' (working directory — no repo set)'
-    info(f'  repo: {pipeline_root(pipeline)}{source}')
+    source = '' if pipeline.resolve_paths_from else ' (working directory — resolve_paths_from is unset)'
+    info(f'  resolve_paths_from: {pipeline_root(pipeline)}{source}')
     for alias, job in pipeline.glue_jobs.items():
         info(f'  glue/{alias}: {substitute_env(job.name)}')
         info(f'    bucket: s3://{substitute_env(job.script_bucket)}/{substitute_env(job.script_prefix)}/')
         # The resolved path, not the config string: the reader is asking which file a deploy
         # would upload, and the config string does not answer that on its own.
-        for path in resolved.get(f'glue/{alias}', []):
+        for path in resolved.get(('glue', alias), []):
             info(f'      {path}')
     for alias, fn in pipeline.lambdas.items():
         # Worth calling out inline: a durable function carries a different set of verbs.
         marker = ' (durable)' if fn.durable else ''
         info(f'  lambda/{alias}: {substitute_env(fn.name)}{marker}')
-        for path in resolved.get(f'lambda/{alias}', []):
+        for path in resolved.get(('lambda', alias), []):
             info(f'    source_dir: {path}')
     for alias, sfn in pipeline.step_functions.items():
         info(f'  sfn/{alias}: {substitute_env(sfn.name)}')

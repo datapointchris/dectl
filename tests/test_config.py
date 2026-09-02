@@ -3,11 +3,13 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import get_args
 from unittest.mock import patch
 
 import pytest
 import typer
 import yaml
+from pydantic import BaseModel
 from pydantic import ValidationError
 
 from dectl.config import CONFIG_LOAD_ERRORS
@@ -15,10 +17,11 @@ from dectl.config import TEMPLATE_CONFIG
 from dectl.config import DectlConfig
 from dectl.config import PipelineConfig
 from dectl.config import config_error_headline
+from dectl.config import declared_paths
 from dectl.config import describe_config_error
 from dectl.config import load_config
 from dectl.config import pipeline_root
-from dectl.config import resolve_in_repo
+from dectl.config import resolve_from_root
 from dectl.env import render_env_model
 from dectl.env import set_active_environment
 
@@ -290,62 +293,121 @@ def test_config_path_falls_back_to_dot_config_when_xdg_is_unset():
     assert resolved == str(Path.home() / '.config' / 'dectl' / 'config.yaml')
 
 
-def pipeline_with_repo(repo) -> PipelineConfig:
+# A field name whose underscore-separated parts include one of these holds a filesystem path.
+# `scripts` carries no such word and is named outright.
+PATH_WORDS = frozenset({'path', 'paths', 'dir', 'dirs', 'file', 'files'})
+PATH_FIELD_NAMES = frozenset({'scripts'})
+
+# Fields carrying a path word that name nothing on this machine. Each is a deliberate
+# exclusion, so a new path-shaped field lands in the assertion rather than in here by default.
+# A Jenkins job path addresses a job on a Jenkins server.
+NOT_LOCAL_PATHS = frozenset({('jenkins', 'job_path')})
+
+
+def is_path_shaped(name: str) -> bool:
+    return name in PATH_FIELD_NAMES or bool(PATH_WORDS & set(name.split('_')))
+
+
+def path_shaped_fields() -> set[tuple[str, str]]:
+    """Every (collection, field) in the pipeline models that names a filesystem path.
+
+    Walked off the models rather than listed, so a path field added to any resource turns up
+    here without this test being edited. The pipeline's own fields carry an empty collection,
+    matching how `declared_paths` marks a value that belongs to the pipeline rather than to a
+    resource."""
+    found = set()
+    for name, field in PipelineConfig.model_fields.items():
+        if is_path_shaped(name):
+            found.add(('', name))
+        for arg in get_args(field.annotation):
+            if isinstance(arg, type) and issubclass(arg, BaseModel):
+                found |= {(name, inner) for inner in arg.model_fields if is_path_shaped(inner)}
+    return found - NOT_LOCAL_PATHS
+
+
+def test_the_field_walk_reaches_the_path_fields_that_exist_today():
+    # The vocabulary above is only as good as the evidence that it reaches something. An empty
+    # walk satisfies the test below for every input, and reads as coverage.
+    assert path_shaped_fields() == {('', 'resolve_paths_from'), ('glue_jobs', 'scripts'), ('lambdas', 'source_dir')}
+
+
+def test_every_path_field_on_the_models_is_declared():
+    # The invariant the design rests on: `declared_paths` is the one enumeration, and everything
+    # that checks, resolves or excludes a path reads it. A field added to a model without a row
+    # there is checked by nothing and resolved by nothing, and both failures read as success —
+    # `config validate` passes and the env-effect guard goes quiet.
+    pipeline = PipelineConfig.model_validate(
+        {
+            'resolve_paths_from': '/srv/salesdata',
+            'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'b', 'scripts': ['x.py'], 'role': 'r'}},
+            'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}},
+            'step_functions': {'flow': {'name': 'm'}},
+            'buckets': {'raw': 'b'},
+            'iceberg_tables': {'events': {'database': 'd', 'table': 't'}},
+        }
+    )
+
+    declared = {(path.collection, path.site.field) for path in declared_paths(pipeline)}
+
+    assert path_shaped_fields() - declared == set()
+
+
+def pipeline_rooted_at(root) -> PipelineConfig:
     raw = {'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}}}
-    if repo is not None:
-        raw['repo'] = repo
+    if root is not None:
+        raw['resolve_paths_from'] = root
     return PipelineConfig.model_validate(raw)
 
 
-def test_repo_anchors_a_relative_path(tmp_path):
-    pipeline = pipeline_with_repo(str(tmp_path))
+def test_the_declared_root_anchors_a_relative_path(tmp_path):
+    pipeline = pipeline_rooted_at(str(tmp_path))
 
-    assert resolve_in_repo(pipeline, 'modules/lambda/code') == tmp_path / 'modules' / 'lambda' / 'code'
-
-
-def test_repo_expands_a_leading_tilde():
-    pipeline = pipeline_with_repo('~/code/salesdata')
-
-    assert resolve_in_repo(pipeline, 'code') == Path.home() / 'code' / 'salesdata' / 'code'
+    assert resolve_from_root(pipeline, 'modules/lambda/code') == tmp_path / 'modules' / 'lambda' / 'code'
 
 
-def test_paths_resolve_against_the_working_directory_without_a_repo():
-    # The behaviour a config that names no repo depends on: dectl is run from the checkout and
+def test_the_declared_root_expands_a_leading_tilde():
+    pipeline = pipeline_rooted_at('~/code/salesdata')
+
+    assert resolve_from_root(pipeline, 'code') == Path.home() / 'code' / 'salesdata' / 'code'
+
+
+def test_paths_resolve_from_the_working_directory_when_no_root_is_set():
+    # The behaviour a config that names no root depends on: dectl is run from the checkout and
     # relative paths mean what they would mean to any other command in that shell.
-    pipeline = pipeline_with_repo(None)
+    pipeline = pipeline_rooted_at(None)
 
-    assert resolve_in_repo(pipeline, 'code') == Path.cwd() / 'code'
-
-
-def test_an_absolute_configured_path_ignores_the_repo(tmp_path):
-    # Mixed absolute and repo-relative entries are legal, so an absolute one has to survive
-    # being joined onto a repo that is nowhere near it.
-    pipeline = pipeline_with_repo(str(tmp_path / 'repo'))
-
-    assert resolve_in_repo(pipeline, '/srv/shared/handler') == Path('/srv/shared/handler')
+    assert resolve_from_root(pipeline, 'code') == Path.cwd() / 'code'
 
 
-def test_pipeline_root_is_the_working_directory_without_a_repo():
-    assert pipeline_root(pipeline_with_repo(None)) == Path.cwd()
+def test_an_absolute_configured_path_ignores_the_root(tmp_path):
+    # Mixed absolute and root-relative entries are legal, so an absolute one has to survive
+    # being joined onto a root that is nowhere near it.
+    pipeline = pipeline_rooted_at(str(tmp_path / 'checkout'))
+
+    assert resolve_from_root(pipeline, '/srv/shared/handler') == Path('/srv/shared/handler')
 
 
-def test_relative_repo_is_rejected():
-    # A relative repo would resolve against the working directory, which is the dependency the
+def test_pipeline_root_is_the_working_directory_when_no_root_is_set():
+    assert pipeline_root(pipeline_rooted_at(None)) == Path.cwd()
+
+
+def test_a_relative_root_is_rejected():
+    # A relative root would resolve against the working directory, which is the dependency the
     # key exists to remove — so it fails validation rather than half-working.
     with pytest.raises(ValidationError):
-        pipeline_with_repo('../salesdata')
+        pipeline_rooted_at('../salesdata')
 
 
-def test_repo_is_absent_by_default():
-    assert pipeline_with_repo(None).repo is None
+def test_the_root_is_absent_by_default():
+    assert pipeline_rooted_at(None).resolve_paths_from is None
 
 
-def test_a_repo_naming_no_real_user_fails_as_a_schema_error():
+def test_a_root_naming_no_real_user_fails_as_a_schema_error():
     # `~code/x` is a missing slash, the likeliest typo in a path key. Path.expanduser() raises
     # RuntimeError for it, pydantic does not wrap that, and CONFIG_LOAD_ERRORS does not catch
     # it — so uncaught it escapes main.py's import guard and takes down `config edit` too.
     with pytest.raises(ValidationError):
-        pipeline_with_repo('~code/salesdata')
+        pipeline_rooted_at('~code/salesdata')
 
 
 def test_a_source_dir_naming_no_real_user_fails_as_a_schema_error():
@@ -358,36 +420,46 @@ def test_every_config_load_failure_is_one_the_callers_catch():
     # failure outside that tuple is one no command recovers from.
     for bad in ('~code/salesdata', '../relative'):
         with pytest.raises(CONFIG_LOAD_ERRORS):
-            pipeline_with_repo(bad)
+            pipeline_rooted_at(bad)
 
 
-def test_the_env_token_is_substituted_into_the_repo():
-    # A token left literal in the repo while source_dir substitutes gives a half-resolved join,
+def test_the_env_token_is_substituted_into_the_root():
+    # A token left literal in the root while source_dir substitutes gives a half-resolved join,
     # which is neither what the config says nor what --env asked for.
     set_active_environment('prod', '--env')
     try:
-        pipeline = pipeline_with_repo('/srv/{env}/salesdata')
-        assert resolve_in_repo(pipeline, 'modules/{env}/code') == Path('/srv/prod/salesdata/modules/prod/code')
+        pipeline = pipeline_rooted_at('/srv/{env}/salesdata')
+        assert resolve_from_root(pipeline, 'modules/{env}/code') == Path('/srv/prod/salesdata/modules/prod/code')
     finally:
         set_active_environment('dev', 'default')
 
 
-def test_a_repo_whose_root_is_a_token_is_still_rejected_as_relative():
+def test_a_root_beginning_with_a_token_is_still_rejected_as_relative():
     # The token is stripped rather than substituted for the rootedness test, because --env is
     # parsed after the config loads.
     with pytest.raises(ValidationError):
-        pipeline_with_repo('{env}/salesdata')
+        pipeline_rooted_at('{env}/salesdata')
 
 
-def test_an_unresolvable_repo_exits_rather_than_raising():
-    # PipelineConfig never passes through render_env_model — that runs per resource, and repo
-    # belongs to the pipeline — so a {env} deferred at load has no other door to surface at.
-    # A bare ValueError here tracebacks out of show, validate and list alike.
-    pipeline = pipeline_with_repo('~nosuchuser-{env}/code')
+@pytest.mark.parametrize(
+    ('pipeline', 'resolve'),
+    [
+        (pipeline_rooted_at('~nosuchuser-{env}/code'), pipeline_root),
+        (pipeline_rooted_at('/srv/salesdata'), lambda p: resolve_from_root(p, '~nosuchuser-{env}/code')),
+    ],
+    ids=['root', 'declared path'],
+)
+def test_an_unresolvable_value_exits_rather_than_raising(pipeline, resolve):
+    # A `{env}` defers the `~` check past load, and nothing re-validates on the read path:
+    # render_env_model runs per resource inside a verb, and validate, show and list never call
+    # it. A bare ValueError from either door tracebacks out of all three.
+    #
+    # Both doors, because fixing the root alone is the shape this review kept finding — a guard
+    # covering the half the bug was reported in.
     set_active_environment('prod', '--env')
     try:
         with pytest.raises(typer.Exit) as exit_info:
-            pipeline_root(pipeline)
+            resolve(pipeline)
         assert exit_info.value.exit_code == 1
     finally:
         set_active_environment('dev', 'default')

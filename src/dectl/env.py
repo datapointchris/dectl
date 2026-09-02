@@ -107,5 +107,5 @@ def render_env_model[ModelT: BaseModel](model: ModelT) -> ModelT:
         for err in exc.errors():
             location = '.'.join(str(part) for part in err['loc']) or '(root)'
             stderr_console.print(f'  {location}: {err["msg"]}', markup=False)
-        stderr_console.print('run "dectl config show" to see the substituted values', style='dim')
+        stderr_console.print('run "dectl config show" to see the substituted values')
         raise typer.Exit(1) from exc

@@ -9,8 +9,8 @@ from rich.table import Table
 from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
 from dectl.config import PipelineConfig
-from dectl.config import declared_path_faults
-from dectl.config import resolve_in_repo
+from dectl.config import pipeline_path_faults
+from dectl.config import resolve_from_root
 from dectl.env import render_env_model
 from dectl.env import substitute_env
 from dectl.logs import tail_glue_run
@@ -19,6 +19,7 @@ from dectl.output import emit_json
 from dectl.output import error
 from dectl.output import info
 from dectl.output import success
+from dectl.paths import refuse_unusable_paths
 from dectl.prompt import confirm_or_exit
 
 RUN_STATE_COLORS = {'SUCCEEDED': 'green', 'FAILED': 'red', 'STOPPED': 'red', 'TIMEOUT': 'red', 'RUNNING': 'cyan'}
@@ -52,16 +53,14 @@ def resolve_scripts(pipeline_name: str, pipeline: PipelineConfig, alias: str) ->
     a clean definition on a config whose real deploy exits, which is the one question `--plan` is
     run to answer.
 
-    The faults come from `declared_path_faults`, so this door and `config validate` report one
-    failure the same way rather than each describing it its own."""
-    problems = [p for p in declared_path_faults(pipeline_name, pipeline) if p.resource == 'glue' and p.alias == alias]
-    if problems:
-        for problem in problems:
-            error(str(problem))
-        error('run "dectl config show" to see where each configured path resolves')
-        raise typer.Exit(1)
+    The faults come from `pipeline_path_faults`, scoped by argument, so this door and `config
+    validate` report one failure the same way rather than each describing it its own. Scoping
+    by argument rather than by filtering the result is what keeps the root fault: a checkout
+    that is not there explains every missing script under it, and ten lines naming ten files
+    name the cause in none of them."""
+    refuse_unusable_paths(pipeline_path_faults(pipeline_name, pipeline, resource='glue', alias=alias))
     job = pipeline.glue_jobs[alias]
-    return [(script, resolve_in_repo(pipeline, script)) for script in job.scripts]
+    return [(script, resolve_from_root(pipeline, script)) for script in job.scripts]
 
 
 def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: list[tuple[str, Path]]) -> None:

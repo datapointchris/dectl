@@ -12,7 +12,7 @@ from dectl.commands.lambda_ import make_lambda_app
 from dectl.commands.lambda_ import zip_lambda
 from dectl.config import DectlConfig
 from dectl.config import PipelineConfig
-from dectl.config import resolve_in_repo
+from dectl.config import resolve_from_root
 from dectl.invoke import DURABLE_SYNC_CAP_SECONDS
 from dectl.invoke import EVENT_ACK_TIMEOUT_SECONDS
 from dectl.invoke import INVOKE_TIMEOUT_MARGIN_SECONDS
@@ -453,16 +453,16 @@ def test_durable_logs_scope_to_the_resolved_execution(monkeypatch):
 
 
 def test_zip_holds_the_resolved_directorys_files_at_the_archive_root(tmp_path):
-    source = tmp_path / 'repo' / 'modules' / 'code'
+    source = tmp_path / 'checkout' / 'modules' / 'code'
     source.mkdir(parents=True)
     (source / 'handler.py').write_text('def handler(event, context): pass')
     (source / 'vendor').mkdir()
     (source / 'vendor' / 'lib.py').write_text('x = 1')
     pipeline = PipelineConfig.model_validate(
-        {'repo': str(tmp_path / 'repo'), 'lambdas': {'fn': {'name': 'n', 'source_dir': 'modules/code'}}}
+        {'resolve_paths_from': str(tmp_path / 'checkout'), 'lambdas': {'fn': {'name': 'n', 'source_dir': 'modules/code'}}}
     )
 
-    zip_path = zip_lambda(resolve_in_repo(pipeline, pipeline.lambdas['fn'].source_dir))
+    zip_path = zip_lambda(resolve_from_root(pipeline, pipeline.lambdas['fn'].source_dir))
 
     with zipfile.ZipFile(zip_path) as archive:
         assert sorted(archive.namelist()) == ['handler.py', 'vendor/lib.py']

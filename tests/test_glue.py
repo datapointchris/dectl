@@ -15,12 +15,14 @@ from dectl.commands.glue import make_glue_app
 from dectl.commands.glue import plan_glue_job_update
 from dectl.commands.glue import resolve_scripts
 from dectl.commands.glue import upload_scripts
+from dectl.config import ROOT_SITE
 from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
-from dectl.config import PathFault
 from dectl.config import PipelineConfig
-from dectl.config import declared_path_faults
+from dectl.config import config_path_faults
+from dectl.config import pipeline_path_faults
 from dectl.env import active_environment
+from dectl.paths import PathFault
 
 runner = CliRunner()
 
@@ -347,12 +349,12 @@ class FakeS3Session:
         return self.s3_client
 
 
-def glue_pipeline(repo, scripts) -> PipelineConfig:
+def glue_pipeline(root, scripts) -> PipelineConfig:
     # A real bucket name, because FakeS3Client applies S3's own naming rule. 'b' is below the
     # three-character minimum and would be rejected by the service.
     raw = {'glue_jobs': {'j': {'name': 'my-job', 'script_bucket': 'salesdata-scripts', 'scripts': scripts, 'role': 'r'}}}
-    if repo is not None:
-        raw['repo'] = repo
+    if root is not None:
+        raw['resolve_paths_from'] = root
     return PipelineConfig.model_validate(raw)
 
 
@@ -416,9 +418,9 @@ def test_extra_py_files_name_the_same_objects_the_upload_wrote(tmp_path, monkeyp
 @pytest.mark.parametrize(
     ('written', 'expected'),
     [
-        ('/srv/shared/handler.py', PathFault.ESCAPES_REPO),
-        ('../sibling/util.py', PathFault.ESCAPES_REPO),
-        ('~/shared/lib.py', PathFault.ESCAPES_REPO),
+        ('/srv/shared/handler.py', PathFault.ESCAPES_ROOT),
+        ('../sibling/util.py', PathFault.ESCAPES_ROOT),
+        ('~/shared/lib.py', PathFault.ESCAPES_ROOT),
         ('./copy.py', PathFault.NOT_A_CLEAN_KEY),
         ('jobs//copy.py', PathFault.NOT_A_CLEAN_KEY),
         ('jobs/./copy.py', PathFault.NOT_A_CLEAN_KEY),
@@ -430,27 +432,40 @@ def test_a_key_that_s3_would_store_literally_is_refused(tmp_path, written, expec
     # publishes the name, so an assertion satisfied by either value pins neither: making
     # NOT_A_CLEAN_KEY unreachable left the suite green.
     #
-    # A leading ~ is ESCAPES_REPO rather than a spelling fault: it resolves through $HOME, which
-    # is the same dependence on where the deploy ran that `repo` exists to remove.
+    # A leading ~ is ESCAPES_ROOT rather than a spelling fault: it resolves through $HOME, which
+    # is the same dependence on where the deploy ran that `resolve_paths_from` exists to remove.
     pipeline = glue_pipeline(str(tmp_path), [written])
 
-    assert [f.fault for f in declared_path_faults('proj', pipeline)] == [expected]
+    assert [f.fault for f in pipeline_path_faults('proj', pipeline)] == [expected]
 
 
-def test_a_malformed_script_prefix_is_refused_like_a_script(tmp_path):
-    # The prefix is the other operand of the concatenation script_key performs, so a `.` or a
-    # doubled separator in it lands in the key exactly as one in the script would.
+@pytest.mark.parametrize(
+    ('written', 'expected'),
+    [
+        ('/scripts', PathFault.ESCAPES_ROOT),
+        ('../scripts', PathFault.ESCAPES_ROOT),
+        ('~/scripts', PathFault.ESCAPES_ROOT),
+        ('./scripts', PathFault.NOT_A_CLEAN_KEY),
+        ('scripts/', PathFault.NOT_A_CLEAN_KEY),
+        ('scripts//sub', PathFault.NOT_A_CLEAN_KEY),
+    ],
+)
+def test_a_script_prefix_is_refused_for_every_shape_a_script_is(tmp_path, written, expected):
+    # The prefix is the other operand of the concatenation script_key performs, so every shape
+    # refused in a script lands in the key identically when it is written in the prefix. The
+    # parametrize is the same list as the script one for that reason: a guard covering one
+    # operand of a join is the fault this pair exists to keep closed.
     (tmp_path / 'copy.py').write_text('x')
     pipeline = PipelineConfig.model_validate(
         {
-            'repo': str(tmp_path),
-            'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'b', 'script_prefix': './scripts', 'scripts': ['copy.py'], 'role': 'r'}},
+            'resolve_paths_from': str(tmp_path),
+            'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'b', 'script_prefix': written, 'scripts': ['copy.py'], 'role': 'r'}},
         }
     )
 
-    faults = declared_path_faults('proj', pipeline)
+    faults = pipeline_path_faults('proj', pipeline)
 
-    assert [(f.field, f.fault) for f in faults] == [('script_prefix', PathFault.NOT_A_CLEAN_KEY)]
+    assert [(f.site.field, f.fault) for f in faults] == [('script_prefix', expected)]
 
 
 def test_a_key_fault_reports_the_string_as_written(tmp_path):
@@ -459,9 +474,51 @@ def test_a_key_fault_reports_the_string_as_written(tmp_path):
     # entries identically.
     pipeline = glue_pipeline(str(tmp_path), ['./jobs/x.py', 'jobs//x.py', 'jobs/x.py/'])
 
-    shown = [f.shown for f in declared_path_faults('proj', pipeline)]
+    shown = [f.shown for f in pipeline_path_faults('proj', pipeline)]
 
     assert shown == ['./jobs/x.py', 'jobs//x.py', 'jobs/x.py/']
+
+
+def test_a_malformed_script_is_not_also_reported_as_missing(tmp_path):
+    # Two rows for one entry, and the second asks the wrong question: `./jobs/x.py` resolves to
+    # somewhere real-looking, so `not found` reads as the remedy when the remedy is the spelling.
+    # Its sibling still gets the on-disk check, which is what keys the suppression on the value.
+    (tmp_path / 'jobs').mkdir()
+    pipeline = glue_pipeline(str(tmp_path), ['./jobs/x.py', 'jobs/present.py'])
+
+    faults = pipeline_path_faults('proj', pipeline)
+
+    assert [(f.configured, f.fault) for f in faults] == [
+        ('./jobs/x.py', PathFault.NOT_A_CLEAN_KEY),
+        ('jobs/present.py', PathFault.ABSENT),
+    ]
+
+
+def test_an_absent_root_is_reported_alone_at_the_deploy_door(tmp_path):
+    # The deploy door is the one you are at when it matters. Filtering a shared diagnoser's
+    # result to one job drops the root row, and ten scripts then print ten lines that each name
+    # a file while the cause — no checkout — is named in none of them. Asserted on the rows the
+    # door reports, not on what they render to.
+    pipeline = glue_pipeline(str(tmp_path / 'nowhere'), ['jobs/a.py', 'jobs/b.py'])
+
+    scoped = pipeline_path_faults('proj', pipeline, resource='glue', alias='j')
+
+    assert [(f.site, f.fault) for f in scoped] == [(ROOT_SITE, PathFault.ABSENT)]
+    with pytest.raises(typer.Exit):
+        resolve_scripts('proj', pipeline, 'j')
+
+
+def test_both_doors_report_one_absent_root_the_same_way(tmp_path):
+    # The property `pipeline_path_faults`'s docstring claims. `config validate` walks the whole
+    # config and a deploy scopes to one job; scoping is an argument, so neither door can filter
+    # the row that carries the cause out of its own answer.
+    pipeline = glue_pipeline(str(tmp_path / 'nowhere'), ['jobs/a.py'])
+    config = DectlConfig.model_validate({'defaults': {'account_id': '1'}, 'pipelines': {'proj': pipeline.model_dump()}})
+
+    from_validate = config_path_faults(config)
+    from_deploy = pipeline_path_faults('proj', pipeline, resource='glue', alias='j')
+
+    assert from_validate == from_deploy
 
 
 def test_a_malformed_script_still_loads_so_the_rest_of_the_cli_survives(tmp_path):
@@ -535,12 +592,12 @@ class FakeDeploySession:
         return self.s3 if name == 's3' else self.glue
 
 
-def deploy_config(repo, max_capacity=None) -> DectlConfig:
+def deploy_config(root, max_capacity=None) -> DectlConfig:
     job = {'name': 'my-job', 'script_bucket': 'b', 'scripts': ['copy.py'], 'role': 'new-role'}
     if max_capacity is not None:
         job['max_capacity'] = max_capacity
     return DectlConfig.model_validate(
-        {'defaults': {'account_id': '1'}, 'pipelines': {'proj': {'repo': str(repo), 'glue_jobs': {'copy': job}}}}
+        {'defaults': {'account_id': '1'}, 'pipelines': {'proj': {'resolve_paths_from': str(root), 'glue_jobs': {'copy': job}}}}
     )
 
 
