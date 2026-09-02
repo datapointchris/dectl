@@ -483,6 +483,21 @@ def pipeline_value_faults(
     came in by. The scope is an argument, because the root row explains every row beneath it
     and a caller filtering the result afterwards drops exactly that one.
 
+    The phases run in this order, and the order is load-bearing:
+
+        1. the root's own spelling      returns alone; every path below it resolves through it
+        2. declares_nothing             a field naming nothing, before anything reads its values
+        3. key and bucket spelling      machine-independent, so they run whatever `on_disk` says
+        4. leaving the anchor           reads `refused_values`; needs a root, so it is gated
+        5. the root on disk             returns alone; an absent root explains every row beneath
+        6. every other path on disk     reads `refused_values`; skipped when `on_disk` is false
+
+    Two of them return rather than append, because a fault that explains every row beneath it is
+    the only useful thing to say. Two read `refused_values`, so a value already refused for how
+    it is written is not also reported as missing. Three ignore nothing and honour the scope; the
+    root-on-disk phase honours no scope, because a caller asking about one job still cannot
+    deploy it. A new fault class has to pick its point, and whether it reads `refused_values`.
+
     `on_disk` says whether this machine's files are part of the question, and it is required
     rather than defaulted because both answers are live and neither is the safe one. How a key
     is written is a property of the config and is answerable anywhere, so it is checked either

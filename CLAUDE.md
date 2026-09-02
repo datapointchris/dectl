@@ -127,10 +127,13 @@ which the docstrings do not state.
   resolution, the env-guard exclusion, the `paths` block in `--json` and the printed row all
   come from the declaration, so nothing needs adding to `pipeline_to_dict` or `render_pipeline`.
   A row guaranteed by something that runs is a row nobody has to remember.
-  **A new resource *kind* is more than that** — its `--json` and human sections carry per-kind
-  AWS fields and are written out, so it needs both renderers, `resource_types`, and the pipeline
-  loop in `main.py`. `test_every_resolved_path_reaches_both_renderers` is what makes a kind with
-  declared paths and no section a red test rather than a missing row.
+  **A new resource *kind* costs six edits**, because its sections carry per-kind AWS fields and
+  are written out: the `--json` section, the `paths` key inside it, the human section, the
+  `print_paths` call inside *that*, `resource_types`, and the pipeline loop in `main.py`. The
+  fourth is the one nothing else would catch, and `s3` is the kind that has neither it nor a
+  `paths` key today. `test_every_resolved_path_reaches_both_renderers` and
+  `test_every_resolved_path_reaches_the_human_renderer` are what make a kind with declared paths
+  and no display a red test rather than a missing row.
 - **A new `ConfigFault` needs a `FAULT_WORDING` entry, a decision about `SPELLING_FAULTS`, and
   a line in `recovery_lines`.** The first two fail in opposite directions: a missing wording
   raises where a reader needs the answer, and a missing `SPELLING_FAULTS` entry silently reports
