@@ -54,6 +54,10 @@ pipelines:
       source-copy:
         name: my-{env}-source-copy-job
         script_bucket: my-script-bucket
+        # The two halves of each script's S3 key, joined as written. Neither resolves against
+        # resolve_paths_from — a prefix names nothing on disk, and a script's key comes from
+        # this string rather than from where the file was found. Both are plain relative
+        # segments: no leading ~ or /, no . or .. segment, no // and no trailing /.
         script_prefix: scripts
         scripts:
           - my-source-copy.py
