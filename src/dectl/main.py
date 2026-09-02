@@ -249,7 +249,10 @@ def reference() -> None:
     console.print()
 
     if cfg:
-        configured = sorted({rtype for p in cfg.pipelines.values() for rtype in resource_types(p)})
+        kinds = set()
+        for pipeline in cfg.pipelines.values():
+            kinds.update(resource_types(pipeline))
+        configured = sorted(kinds)
         if cfg.jenkins and any(p.jenkins for p in cfg.pipelines.values()):
             configured.append('release')
         info(f'Configured on this machine: {", ".join(configured) or "(none)"}')

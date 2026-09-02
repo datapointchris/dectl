@@ -198,12 +198,11 @@ def execution_by_suffix(client, function_name: str, suffix: str, scanned: list[s
     prefix of one carries the timestamp and little else, while the tail is where the entropy is.
     Several matches is a usage error listing the candidates — picking the newest would resolve
     silently to something the caller did not name."""
-    candidates = [
-        found
-        for version in scanned
-        for found in list_executions(client, function_name, version, limit=SUFFIX_SEARCH_LIMIT)
-        if str(found.get('DurableExecutionName', '')).endswith(suffix)
-    ]
+    candidates = []
+    for version in scanned:
+        for found in list_executions(client, function_name, version, limit=SUFFIX_SEARCH_LIMIT):
+            if str(found.get('DurableExecutionName', '')).endswith(suffix):
+                candidates.append(found)
     if not candidates:
         error(f'no durable execution named {suffix}, or ending in it')
         error(f'searched the {SUFFIX_SEARCH_LIMIT} most recent on each of versions {", ".join(scanned)}')
