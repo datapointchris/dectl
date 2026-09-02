@@ -1,5 +1,6 @@
 import contextlib
 import operator
+import re
 
 import pytest
 from botocore.exceptions import ClientError
@@ -126,18 +127,24 @@ def fresh_environment():
     set_active_environment(DEFAULT_ENV, 'default')
 
 
-def unwrapped(text: str) -> str:
-    """Captured output with the console's wrap collapsed, for comparing it against a source list.
+ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*m')
 
-    The width is pinned, so a rendered line is reproducible — but a message longer than the pin
-    still wraps, and the lines it wraps to are not the lines the renderer produced. Comparing a
-    capture against `render_unusable_values`'s own list needs one of the two normalised, and
-    rich breaks at spaces rather than mid-word, so collapsing whitespace recovers the text.
+
+def unwrapped(text: str) -> str:
+    """Captured output as its words, for comparing it against text a renderer was given.
+
+    Two things stand between a capture and the message it carries. The wrap: a line longer than
+    the console still breaks, and the lines it breaks into are not the ones the renderer
+    produced — rich breaks at spaces rather than mid-word, so collapsing whitespace recovers it.
+    And the colour: whether escapes are emitted depends on what the process thinks it is writing
+    to, which is not the same locally and on CI. Measured — this suite passed here and failed
+    there on `no row-per-file view`, where Click's help formatter had put a reset and a dim
+    between `file` and `view`.
 
     For comparing whole messages. An `in` check against the collapse can match a phrase spanning
     two unrelated lines, which is why `test_render_pipeline_prints_alias_to_name_lines` asserts
     tokens instead."""
-    return ' '.join(text.split())
+    return ' '.join(ANSI_ESCAPE.sub('', text).split())
 
 
 @contextlib.contextmanager
