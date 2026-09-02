@@ -11,6 +11,9 @@ from botocore.exceptions import ReadTimeoutError
 
 from dectl.config import DectlConfig
 from dectl.config import LambdaConfig
+from dectl.config import PipelineConfig
+from dectl.config import pipeline_value_faults
+from dectl.config import resolve_from_root
 from dectl.durable import EXECUTION_STATUSES
 from dectl.durable import SUFFIX_SEARCH_LIMIT
 from dectl.durable import epoch_millis
@@ -25,6 +28,7 @@ from dectl.durable import resolve_execution
 from dectl.durable import sweep_executions
 from dectl.durable import tail_durable_history
 from dectl.env import render_env_model
+from dectl.env import substitute_env
 from dectl.logs import DURABLE_OPERATION_ID_KEYS
 from dectl.logs import tail_lambda_logs
 from dectl.output import console
@@ -33,6 +37,12 @@ from dectl.output import error
 from dectl.output import info
 from dectl.output import success
 from dectl.payloads import read_payload
+from dectl.values import FAULT_WORDING
+from dectl.values import SHOW_RESOLVED
+from dectl.values import PathKind
+from dectl.values import deployable_files
+from dectl.values import path_fault
+from dectl.values import refuse_unusable_values
 
 # Widen the CloudWatch window around an execution's recorded start and end. The records are
 # written by the function while the timestamps come from the control plane, so the two are close
@@ -40,17 +50,31 @@ from dectl.payloads import read_payload
 LOG_WINDOW_BUFFER_MS = 60_000
 
 
-def zip_lambda(source_dir: str) -> Path:
-    source = Path(source_dir)
-    if not source.exists():
-        error(f'source directory not found: {source_dir}')
+def zip_lambda(source: Path) -> Path:
+    """Zip a source directory's files at the archive root, refusing to build an empty one.
+
+    An archive with no entries is 22 bytes and perfectly valid, and `update_function_code`
+    accepts it, so the function's code is replaced with nothing. A directory that exists and
+    holds nothing reaches this on ordinary routes — an uninitialised submodule, or a source_dir
+    naming a build directory before the build ran — so the count is what is checked, not the
+    directory. `PathKind.NON_EMPTY_DIRECTORY` is that same question asked of the config, which
+    is what stops `config validate` passing a directory this refuses.
+
+    The check repeats what the caller already ran through `pipeline_value_faults`, and repeating
+    it is what keeps the refusal a property of this function rather than of whoever calls it.
+    The caller's message names the config key; this one names only the path, because at this
+    altitude the config key is not known."""
+    fault = path_fault(source, PathKind.NON_EMPTY_DIRECTORY)
+    if fault:
+        error(f'lambda source_dir {FAULT_WORDING[fault]}: {source}')
+        error(SHOW_RESOLVED)
         raise typer.Exit(1)
 
+    files = deployable_files(source)
     zip_path = Path(tempfile.mkdtemp()) / 'lambda.zip'
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for file in source.rglob('*'):
-            if file.is_file() and '__pycache__' not in file.parts:
-                zf.write(file, file.relative_to(source))
+        for file in files:
+            zf.write(file, file.relative_to(source))
     return zip_path
 
 
@@ -79,7 +103,9 @@ def report_invocation(response: dict, as_json: bool) -> None:
         console.print_json(json.dumps(result, indent=2))
 
 
-def make_lambda_function_app(pipeline_name: str, alias: str, fn_config: LambdaConfig, config: DectlConfig) -> typer.Typer:
+def make_lambda_function_app(
+    pipeline_name: str, alias: str, fn_config: LambdaConfig, pipeline: PipelineConfig, config: DectlConfig
+) -> typer.Typer:
     """Build the per-function sub-app: `dectl PIPELINE lambda <alias> <verb>`.
 
     Verbs close over this function's config and resolve {env} at call time. A function flagged
@@ -122,12 +148,33 @@ def make_lambda_function_app(pipeline_name: str, alias: str, fn_config: LambdaCo
         """
         from dectl.session import make_session
 
+        # Before the refusal, because it is what raises the env-effect warning. A `--env` that
+        # changed no AWS name is exactly what a reader needs to know about a deploy, and a
+        # refusal that exits first means the one door acting on the wrong environment says
+        # nothing about it. The glue door orders it the same way.
         fn = resolved()
+
+        # Named the way `config validate` names it — which pipeline, which alias, which config
+        # key — rather than as a bare path. `zip_lambda` refuses the same directory a moment
+        # later and can only say the path, because the config key does not reach it.
+        #
+        # Ahead of the session, because building one reads the AWS profile and a missing profile
+        # is reported by botocore as a traceback. The machine most likely to be missing the
+        # checkout is the one most likely to be missing the profile, and the config fault is the
+        # one this door can explain.
+        refuse_unusable_values(
+            pipeline_value_faults(pipeline_name, pipeline, on_disk=True, resource=LambdaConfig.RESOURCE, alias=alias),
+            exit_code=1,
+        )
+
+        # Substituted once, here. `resolve_from_root` takes a value the caller has already
+        # rendered, so the deploy resolves exactly the directory the walk checked.
+        source = resolve_from_root(pipeline, substitute_env(fn_config.source_dir))
+
         session = make_session(config)
         client = session.client('lambda')
-
-        info(f'zipping {fn.source_dir}')
-        zip_path = zip_lambda(fn.source_dir)
+        zip_path = zip_lambda(source)
+        info(f'zipped {source}')
 
         info(f'updating code for {fn.name}')
         with zip_path.open('rb') as f:
@@ -482,7 +529,7 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         )
 
 
-def make_lambda_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Typer:
+def make_lambda_app(pipeline_name: str, pipeline: PipelineConfig, config: DectlConfig) -> typer.Typer:
     lambdas = pipeline.lambdas
     alias_list = ', '.join(lambdas.keys()) or '(none configured)'
 
@@ -492,7 +539,7 @@ def make_lambda_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.
     )
     for alias, fn_config in lambdas.items():
         lambda_app.add_typer(
-            make_lambda_function_app(pipeline_name, alias, fn_config, config),
+            make_lambda_function_app(pipeline_name, alias, fn_config, pipeline, config),
             name=alias,
             rich_help_panel='Functions',
         )

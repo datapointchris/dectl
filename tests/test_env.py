@@ -1,5 +1,4 @@
 import pytest
-from typer.testing import CliRunner
 
 from dectl.config import GlueJobConfig
 from dectl.env import active_environment
@@ -9,8 +8,9 @@ from dectl.env import render_env_model
 from dectl.env import set_active_environment
 from dectl.env import substitute_env
 from dectl.main import app
+from tests.conftest import RefusalRunner
 
-runner = CliRunner()
+runner = RefusalRunner()
 
 
 @pytest.fixture(autouse=True)
@@ -109,7 +109,7 @@ def test_warning_is_emitted_once_per_invocation(capsys):
 
 def test_no_warning_when_the_placeholder_is_present(capsys):
     set_active_environment('uat', '--env')
-    render_env_model(GlueJobConfig(name='salesdata-{env}-job', script_bucket='b', scripts=['s.py'], role='r'))
+    render_env_model(GlueJobConfig(name='salesdata-{env}-job', script_bucket='sales-scripts', scripts=['s.py'], role='r'))
 
     assert capsys.readouterr().err == ''
 

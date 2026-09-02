@@ -99,9 +99,98 @@ its own block listing which lambdas / step machines to tail, kept separate so th
 is defined in one scannable place. When you change a model, update `TEMPLATE_CONFIG` in the same
 file so `config init` stays valid — a test asserts `TEMPLATE_CONFIG` round-trips through the models.
 
+### Paths
+
+`src/dectl/values.py` answers whether a value the config names outside the program can be what
+it has to be; `config.py` walks the models and builds the records it defines. Read `values.py`'s
+module docstring before changing either. Below are the constraints a new resource has to meet,
+which the docstrings do not state.
+
+- **A resource declares its own path, key and bucket fields, on the model.**
+  `ResourceModel.PATH_FIELDS` maps a field to the `PathKind` it must be; `KEY_FIELDS` names the
+  fields a glue S3 key is built from; `BUCKET_FIELDS` names the fields that have to be real S3
+  bucket names. `declared_paths`, `declared_keys`, `declared_names` and `env.aws_names_of` all
+  read them, so a field declared to some and not the others is checked one way and not another
+  — and every one of those reads as success. `test_every_string_field_is_classified` makes a new
+  field a decision rather than a default: it is in one of the three, or named in
+  `UNCHECKED_FIELDS` with the reason.
+- **Every enumeration of a declaration reads `declaring_members`, which is the one walk.** It
+  yields the pipeline itself and then each resource, so the three member shapes — held in a
+  dict, held as a bare field, declared on the pipeline — reach every enumeration or none. One
+  that traverses for itself reaches a narrower set, and the failure is silent in both
+  directions: a value nothing enumerates is a value nothing checks, and nothing checked reports
+  no fault. `test_every_declaration_consumer_sees_every_member_shape` names each and drives it.
+  `aws_names_only` is the exception and stays one: it dumps the pipeline as a container and
+  filters what comes back, rather than enumerating values filed inside members. Its own test
+  asserts what it emits.
+- **Adding a path field to a resource that already has a section is the whole edit.** Checking,
+  resolution, the env-guard exclusion, the `paths` block in `--json` and the printed row all
+  come from the declaration, so nothing needs adding to `pipeline_to_dict` or `render_pipeline`.
+  A row guaranteed by something that runs is a row nobody has to remember.
+  **A new resource *kind* costs six edits**, because its sections carry per-kind AWS fields and
+  are written out: the `--json` section, the `paths` key inside it, the human section, the
+  `print_paths` call inside *that*, `resource_types`, and the pipeline loop in `main.py`. The
+  fourth is the one nothing else would catch, and `s3` is the kind that has neither it nor a
+  `paths` key today. `test_every_resolved_path_reaches_both_renderers` and
+  `test_every_resolved_path_reaches_the_human_renderer` are what make a kind with declared paths
+  and no display a red test rather than a missing row.
+- **A new `ConfigFault` needs a `FAULT_WORDING` entry, a decision about `SPELLING_FAULTS`, and
+  a line in `recovery_lines`.** The first two fail in opposite directions: a missing wording
+  raises where a reader needs the answer, and a missing `SPELLING_FAULTS` entry silently reports
+  the resolved path for a fault about how the value is written.
+  `test_every_fault_has_a_sentence` pins the first.
+- **`join_uri` joins three strings and all three are guarded.** `key_fault` covers the prefix
+  and the script, `bucket_fault` covers the bucket. A guard over some operands of a composed
+  value and not the rest is the defect this whole surface keeps producing.
+- **An `s3://` URI is constructed in `values.py` and nowhere else, and the check is a command
+  rather than this sentence.** `rg -n "f's3://" src/` returns two rows, both definitions —
+  `bucket_uri` and `s3_uri`. A third row is a second rendering of one location, and it drifts
+  from the object the deploy wrote. Reading one is a separate question: `iceberg.py` takes a
+  URI Glue hands it apart with `parse_s3_uri`, which constructs nothing.
+- **Every value naming a file or directory goes through `resolve_from_root(pipeline, value)`,
+  never `Path(value)`** — missing it reintroduces the dependency on where dectl was invoked,
+  silently. `pipeline_root` is the fallback half: no `resolve_paths_from` means `Path.cwd()`.
+- **A fault about how a value is *written*, or about what this machine holds, belongs to
+  `config validate` and to the deploy, never to a field validator.** `key_fault`'s docstring
+  carries why. `UNRESOLVABLE_HOME` is the member that most looks like a validator's job and
+  is not: as one it could only reach the values carrying no `{env}`.
+- **A deploy door scopes `pipeline_value_faults` by argument, never by filtering its result.**
+  Filtering drops the row naming the absent root, which is the cause of every row it kept.
+- **Nothing in the path domain or the walk exits the process.** A refusal raised beneath a
+  command that has already committed to emitting a document leaves `--json` writing zero bytes.
+  `render_unusable_values` is the lines as data and `refuse_unusable_values` is the one exit;
+  every door reaches one of the two.
+- **A value crossing the substitution boundary carries the substituted name.** `ResolvedScript`
+  is that boundary for a glue deploy. A record pairing a raw config string with a resolved path
+  presents two spellings of one file as two files, and no call site can see which it holds.
+
+`join_uri` composes a script's destination out of its three operands. `rg -n 'join_key\(|join_uri\(' src/`
+names every composer, and there are four beyond the definitions: `script_uri` for the deploy,
+`script_uris` for both renderers, `configured_uris` for the per-alias help panel, and the upload,
+which needs the key alone because `upload_file` takes the bucket separately.
+
+**Each of the three operands is substituted exactly once, and which caller does it varies.**
+`script_uri` and the upload render nothing and are handed a rendered job. `configured_uris`
+renders nothing and is handed a raw one, because the help panel is built before `--env` is
+parsed, so its `{env}` is left standing rather than resolved to the wrong environment.
+`script_uris` renders its own three operands, because a renderer must not reach `render_env_model`
+— that also asks the env guard, at a narrower scope than the caller already asked it at.
+
+A caller mixing those conventions names an object nothing wrote, and only when the environment's
+own name carries the token: every other name makes `substitute_env` idempotent and the two
+spellings identical. `test_every_site_composing_a_script_destination_substitutes_exactly_once`
+drives all four with a name that tells them apart.
+
+`deploy` runs everything that can refuse before it writes anything — `resolve_scripts`, then
+`plan_glue_job_update`, then the upload, then `apply_glue_job_update`. `build_job_update` exits
+on a capacity Glue would reject and the confirmation can be declined, and either one landing
+after an upload leaves `ScriptLocation` pointing at code the user was just told not to deploy.
+
 `TEMPLATE_CONFIG` is the single source for the example config: `config init` writes it, `config
 example` prints it (syntax-highlighted on a TTY, plain when piped so `config example > config.yaml`
 stays clean), and it exercises every option so it doubles as side-by-side reference while editing.
+Its `resolve_paths_from` line stays commented — uncommented it would name a directory no machine
+has, and `config validate` checks it, so `config init` would write a config that fails.
 
 All models inherit `StrictModel` (`extra='forbid'`), so an unknown key — a typo like
 `step_function:` — is a loud error rather than a silently dropped field. Because forbidding
@@ -162,6 +251,7 @@ and an eval'd `s3 export` stay clean.
 | `invoke.py` | The Lambda Invoke domain: how long to wait for one, the client to send it through, and which failures may safely be sent again. Kept out of `session.py` for the reason `durable.py` is kept out of `logs.py` — it is the Lambda API, not the boto3 session. |
 | `output.py` | The two `rich` consoles and the `error`/`success`/`info`/`warn` helpers, plus `emit_json` (bare-print JSON for `--json`) and `format_duration`. Use these, not bare `print`, for anything human-facing. `error` and `warn` write to `stderr_console`; `success` and `info` write to stdout. |
 | `pipeline_view.py` | Shared pipeline rendering — `render_pipeline` (human) and `pipeline_to_dict` (the stable `--json` shape). Used by both `main.py` (`list`) and `config_cmd.py` (`show`); lives outside both to avoid the `main` ↔ `config_cmd` import cycle. |
+| `values.py` | Whether a value the config names outside the program can be what it has to be: a usable `Path`, a string S3 will store as written, a name S3 accepts for a bucket. Three questions, three records, one `ConfigFault` vocabulary reporting all of them. Knows nothing of pipelines — `config.py` walks the models and builds the records this defines, the same split as `durable.py` beside `commands/lambda_.py`. |
 | `payloads.py` | `read_payload` — resolves a `--payload-file` path or `-` (stdin) to a JSON string for `lambda`/`sfn` `run`. |
 | `logs.py` | CloudWatch log tailing (Glue, Lambda, and the multi-group `monitor` stream) plus Step Functions execution-history rendering, including structured-JSON pretty-printing. `LogGroupCursor` is the shared primitive all three tailers poll through. |
 | `durable.py` | The Lambda durable-functions domain: qualifier resolution, execution lookup by name/ARN, and execution-history rendering. Kept out of `logs.py` because it is the Lambda API, not CloudWatch. |
@@ -181,10 +271,10 @@ and an eval'd `s3 export` stay clean.
   diff and confirms. `--plan` shows it and exits without uploading; `--yes` skips the prompt for
   the pre-Terraform loop. `job_definition_changes` also reports keys dectl *drops*, since a
   detached connection is invisible in a diff that only walks the new definition.
-- **`connections` in config is authoritative, not additive** — it used to union with whatever the
-  job already had, which meant a stale entry could never be removed and a connection renamed in
-  Terraform got silently reattached under its old name on every deploy. `None` (key absent) means
-  dectl does not manage connections; `[]` detaches all.
+- **`connections` in config is authoritative, not additive** — unioning with whatever the job
+  already has makes a stale entry immortal and silently reattaches a connection renamed in
+  Terraform under its old name on every deploy. `None` (key absent) means dectl does not manage
+  connections; `[]` detaches all.
 - **Lambda `$LATEST` vs. published alias** — `deploy` without `--publish` only moves `$LATEST`;
   alias-following triggers keep running the old published version until you `--publish` (which
   moves the configured `live_alias`). `run` always targets `$LATEST`.
@@ -215,10 +305,10 @@ and an eval'd `s3 export` stay clean.
   `LogGroupCursor` (moving `startTime`, boundary dedup by `eventId`), never a named stream.
   Lambda writes each execution environment to a new stream; Glue creates its *error* stream only
   when something first writes to stderr. `tail_glue_run` isolates a run with
-  `logStreamNamePrefix=<run id>` on the two shared Glue groups. It used to wait for the streams
-  to exist via `describe_log_streams` — sequentially, output then error — which cost up to two
-  minutes of silence before the first line whenever a job never wrote to stderr, and pinned the
-  stream list so a traceback landing in a later-created error stream was never shown at all.
+  `logStreamNamePrefix=<run id>` on the two shared Glue groups. Waiting for the streams to exist
+  via `describe_log_streams` is the trap: done sequentially, output then error, it costs up to
+  two minutes of silence before the first line whenever a job never writes to stderr, and it
+  pins the stream list so a traceback landing in a later-created error stream never shows at all.
 - **`glue run --follow` stops on its own and exits non-zero on failure** — `GlueRunWatcher.finished`
   is handed to the tailer as a predicate (it only holds a logs client and cannot ask Glue
   anything), and the watcher keeps the last state so the caller can set the exit code without a

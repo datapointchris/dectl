@@ -1,11 +1,16 @@
 from typing import Any
 
+import typer
 from pydantic import BaseModel
+from pydantic import ValidationError
 
+from dectl.output import error
+from dectl.output import stderr_console
 from dectl.output import warn
+from dectl.values import ENV_PLACEHOLDER
+from dectl.values import DeclaresValues
 
 DEFAULT_ENV = 'dev'
-ENV_PLACEHOLDER = '{env}'
 
 
 class ActiveEnvironment:
@@ -86,8 +91,44 @@ def warn_if_environment_had_no_effect(value: Any) -> None:
     )
 
 
+def aws_names_of(model: BaseModel) -> dict[str, Any]:
+    """A model's fields with its purely-local ones dropped, for the env-effect guard.
+
+    `warn_if_environment_had_no_effect` asks whether `--env` changed an AWS name, and a `{env}`
+    in a purely local path answers yes while naming nothing in AWS. `pipeline_view.aws_names_only`
+    does the same for a whole pipeline; this is the per-resource half, and it is the one the
+    deploy verbs go through.
+
+    `local_only_fields` is the subtraction that matters: a glue `scripts` entry is a path *and*
+    the second operand of the S3 key, so `--env` changing it changes the object written and the
+    `ScriptLocation` naming it. Dropping every `PATH_FIELDS` member instead makes the guard say
+    `--env` changed nothing about a job where it changes the file S3 holds."""
+    if not isinstance(model, DeclaresValues):
+        return model.model_dump()
+    local = type(model).local_only_fields()
+    return {field: value for field, value in model.model_dump().items() if field not in local}
+
+
 def render_env_model[ModelT: BaseModel](model: ModelT) -> ModelT:
-    """Return a copy of a config model with {env} substituted in every string field."""
+    """Return a copy of a config model with {env} substituted in every string field.
+
+    The re-validation is what turns substituted data back into a model, so a config that loaded
+    can still fail here. No shipped model can produce that failure today, and it is caught
+    rather than left to escape because the alternative is a pydantic traceback and a docs URL
+    naming the model rather than the key the reader typed.
+
+    The construct that would make it reachable is a field validator, which `key_fault` and
+    `root_fault` each explain is deliberately absent — a spelling check written as one blanks
+    the pipeline tree at load. So this arm is a backstop for a failure the design excludes, not
+    a handler for one it expects, and a test builds a model carrying a validator to drive it."""
     data = model.model_dump()
-    warn_if_environment_had_no_effect(data)
-    return type(model).model_validate(render_value(data))
+    warn_if_environment_had_no_effect(aws_names_of(model))
+    try:
+        return type(model).model_validate(render_value(data))
+    except ValidationError as exc:
+        error(f"--env {active_environment.name} makes this resource's config invalid:")
+        for err in exc.errors():
+            location = '.'.join(str(part) for part in err['loc']) or '(root)'
+            stderr_console.print(f'  {location}: {err["msg"]}', markup=False)
+        stderr_console.print('run "dectl config show" to see the substituted values')
+        raise typer.Exit(1) from exc

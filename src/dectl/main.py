@@ -23,6 +23,7 @@ from dectl.commands.stepfunctions import make_sfn_app
 from dectl.config import CONFIG_LOAD_ERRORS
 from dectl.config import CONFIG_PATH
 from dectl.config import DectlConfig
+from dectl.config import Defaults
 from dectl.config import PipelineConfig
 from dectl.config import load_config
 from dectl.config import report_config_error
@@ -216,7 +217,7 @@ REFERENCE_SET_VERBS = [
 ]
 REFERENCE_GLOBAL = [
     'reference · env · list [--json] · search KEYWORD [--json] · update [--check]',
-    'config  init · show [--json] · path · example · edit · validate',
+    'config  init · show [--json] · path · example · edit · validate [--json]',
 ]
 
 
@@ -249,7 +250,10 @@ def reference() -> None:
     console.print()
 
     if cfg:
-        configured = sorted({rtype for p in cfg.pipelines.values() for rtype in resource_types(p)})
+        kinds = set()
+        for pipeline in cfg.pipelines.values():
+            kinds.update(resource_types(pipeline))
+        configured = sorted(kinds)
         if cfg.jenkins and any(p.jenkins for p in cfg.pipelines.values()):
             configured.append('release')
         info(f'Configured on this machine: {", ".join(configured) or "(none)"}')
@@ -328,7 +332,7 @@ def main(
         print_environment_banner()
         if CONFIG_ERROR is not None:
             report_config_error(CONFIG_ERROR)
-            stderr_console.print('pipeline commands are absent from the help below until it loads', style='dim')
+            stderr_console.print('pipeline commands are absent from the help below until it loads')
         print(ctx.get_help())
 
 
@@ -349,9 +353,26 @@ def search(
 
 
 @app.command('env', rich_help_panel='Global commands')
-def show_env() -> None:
-    """Show the active environment substituted for {env}, and where it was resolved from."""
-    print_environment_banner()
+def show_env(
+    as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
+) -> None:
+    """Show the environment and AWS account every command below is pointed at.
+
+    The active environment substituted for {env}, where it was resolved from, and the account,
+    region and profile the session is built with. --json carries every one of them, including
+    the resolved defaults that appear in `config show`'s human view and in no other machine
+    door — `aws_profile` decides which AWS account a deploy reaches.
+    """
+    if not as_json:
+        print_environment_banner()
+        return
+
+    # Every field of `Defaults` beside the environment, derived from the model so a field added
+    # to it reaches this without an edit. The environment is the resolved one rather than the
+    # file's, and its source is the fact only this document carries.
+    config = require_config()
+    resolved = {field: getattr(config.defaults, field) for field in Defaults.model_fields if field != 'environment'}
+    emit_json({'environment': active_environment.name, 'source': active_environment.source, **resolved})
 
 
 @app.command('list', rich_help_panel='Global commands')

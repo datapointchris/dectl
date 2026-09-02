@@ -1,12 +1,18 @@
+import json
+
 import pytest
+import typer
 from pydantic import ValidationError
-from typer.testing import CliRunner
 
 import dectl.main
+from dectl.commands.config_cmd import config_app
 from dectl.config import DectlConfig
+from dectl.config import Defaults
+from dectl.main import REFERENCE_GLOBAL
 from dectl.main import app
+from tests.conftest import RefusalRunner
 
-runner = CliRunner()
+runner = RefusalRunner()
 
 
 def test_reference_prints_the_grammar():
@@ -18,6 +24,53 @@ def test_reference_prints_the_grammar():
     assert 'Set / pipeline verbs' in result.stdout
     # Option-syntax brackets must survive verbatim, not be eaten as rich markup tags.
     assert '[--follow]' in result.stdout
+
+
+def row_entries(row: str) -> list[str]:
+    """One reference row's entries, as `verb [flags]` strings.
+
+    Rows are ` · `-separated, and the `config` row leads with its own label. Split rather than
+    searched as one string: the `config` row contains the substring `path`, so a top-level
+    `path` command missing from the row that should name it satisfied a search of the joined
+    text. A guard one row can satisfy on another row's behalf is not a guard."""
+    label, _, rest = row.partition('  ')
+    entries = (rest or label).split('·')
+    return [entry.strip() for entry in entries if entry.strip()]
+
+
+GLOBAL_ENTRIES = row_entries(REFERENCE_GLOBAL[0])
+CONFIG_ENTRIES = row_entries(REFERENCE_GLOBAL[1])
+
+
+def names_in(entries: list[str]) -> set[str]:
+    return {entry.split(' ')[0] for entry in entries}
+
+
+def test_the_reference_names_every_static_global_command():
+    # `reference` exists because --help shows almost nothing on a fresh machine, so a command
+    # missing from it is invisible to the reader it was written for. Derived from the tree
+    # rather than listed here: a command added to either app has to appear without this test
+    # being edited.
+    tree = typer.main.get_command(app)
+    # A leaf, not a group: the pipeline sub-apps are assembled from config and are exactly what
+    # `reference` exists to be independent of.
+    static = {name for name, command in tree.commands.items() if not hasattr(command, 'commands')}
+
+    assert static
+    assert static - names_in(GLOBAL_ENTRIES) == set()
+
+
+def test_the_reference_names_every_config_verb_and_its_json_flag():
+    # The flags too, not only the verbs. `validate --json` was added to the README and to the
+    # command while the reference kept the flagless spelling, which is the half of the surface a
+    # reader on a fresh machine actually sees.
+    config_tree = typer.main.get_command(config_app)
+    verbs = set(config_tree.commands)
+    with_json = {name for name, command in config_tree.commands.items() if any(param.name == 'as_json' for param in command.params)}
+
+    assert verbs and with_json
+    assert verbs - names_in(CONFIG_ENTRIES) == set()
+    assert {f'{verb} [--json]' for verb in with_json} - set(CONFIG_ENTRIES) == set()
 
 
 def test_update_installs_the_published_release(monkeypatch):
@@ -133,3 +186,27 @@ def test_the_bare_banner_carries_the_whole_diagnostic(invalid_config):
     # Not 'Usage: dectl': rich styles the two words differently, so an escape sequence sits
     # between them wherever colour is on, and the phrase is only contiguous without it.
     assert 'Usage:' in result.stdout
+
+
+def test_env_json_carries_every_default_the_human_view_shows(monkeypatch):
+    """`config show` prints four resolved defaults and no machine door carried any of them.
+
+    `aws_profile` is the one that decides which AWS account a deploy reaches. Derived from
+    `Defaults.model_fields`, so a field added to the model reaches this document without an
+    edit — the same derivation the human rows use, which is what keeps the two level."""
+    config = DectlConfig.model_validate({'defaults': {'account_id': '123456789012', 'aws_profile': 'data-eng'}, 'pipelines': {}})
+    monkeypatch.setattr(dectl.main, 'CONFIG_ERROR', None)
+    monkeypatch.setattr(dectl.main, 'cfg', config)
+
+    result = runner.invoke(dectl.main.app, ['--env', 'prod', 'env', '--json'])
+
+    assert result.exit_code == 0
+    published = json.loads(result.stdout)
+    assert published == {
+        'environment': 'prod',
+        'source': '--env',
+        'account_id': '123456789012',
+        'region': 'us-east-2',
+        'aws_profile': 'data-eng',
+    }
+    assert set(Defaults.model_fields) - {'environment'} <= set(published)

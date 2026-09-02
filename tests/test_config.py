@@ -2,18 +2,67 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
+from typing import get_args
+from typing import get_origin
 from unittest.mock import patch
 
 import pytest
+import typer
 import yaml
+from pydantic import BaseModel
 from pydantic import ValidationError
+from pydantic import field_validator
 
+from dectl.config import CONFIG_LOAD_ERRORS
+from dectl.config import ROOT_SITE
 from dectl.config import TEMPLATE_CONFIG
 from dectl.config import DectlConfig
+from dectl.config import Defaults
+from dectl.config import GlueJobConfig
+from dectl.config import IcebergTableConfig
+from dectl.config import JenkinsConfig
+from dectl.config import JenkinsJobConfig
+from dectl.config import LambdaConfig
+from dectl.config import MonitorConfig
+from dectl.config import PipelineConfig
+from dectl.config import ResourceModel
+from dectl.config import StepFunctionConfig
+from dectl.config import StrictModel
 from dectl.config import config_error_headline
+from dectl.config import declared_keys
+from dectl.config import declared_names
+from dectl.config import declared_paths
+from dectl.config import declared_resource_names
+from dectl.config import declared_values
+from dectl.config import declares_nothing
 from dectl.config import describe_config_error
 from dectl.config import load_config
+from dectl.config import pipeline_root
+from dectl.config import pipeline_value_faults
+from dectl.config import resolve_from_root
+from dectl.env import render_env_model
+from dectl.env import set_active_environment
+from dectl.env import substitute_env
+from dectl.pipeline_view import aws_names_only
+from dectl.pipeline_view import pipeline_to_dict
+from dectl.values import ANCHOR_FORM
+from dectl.values import EDIT_CONFIG
+from dectl.values import FAULT_WORDING
+from dectl.values import KEY_FORM
+from dectl.values import ROOT_FORM
+from dectl.values import SHOW_RESOLVED
+from dectl.values import SPELLING_FAULTS
+from dectl.values import ConfigFault
+from dectl.values import DeclaresValues
+from dectl.values import PathKind
+from dectl.values import UnusableValue
+from dectl.values import ValueSite
+from dectl.values import deployable_files
+from dectl.values import path_fault
+from dectl.values import recovery_lines
+from dectl.values import root_fault
 
 
 def test_template_config_is_valid():
@@ -93,7 +142,7 @@ def test_glue_job_arguments_parsed_as_dict():
                 'glue_jobs': {
                     'j': {
                         'name': 'j',
-                        'script_bucket': 'b',
+                        'script_bucket': 'sales-scripts',
                         'scripts': ['s.py'],
                         'role': 'r',
                         'arguments': {'FOO': 'bar', 'NUM': '4'},
@@ -281,3 +330,721 @@ def test_config_path_falls_back_to_dot_config_when_xdg_is_unset():
     resolved = config_path_in_a_fresh_interpreter(env)
 
     assert resolved == str(Path.home() / '.config' / 'dectl' / 'config.yaml')
+
+
+# Every string-valued config field that dectl deliberately does not check, with the reason. A
+# new field lands in the assertion below rather than in here by default, so adding one is a
+# decision about which of the three declarations it belongs in — or an entry here saying why it
+# belongs in none. A name-based heuristic cannot do that job: it read six words plus a literal
+# `scripts`, so `asl`, `handler`, `template`, `manifest` and `entrypoint` were all invisible.
+UNCHECKED_FIELDS = {
+    (Defaults, 'account_id'): 'the AWS account; every call is made against it and AWS reports a mismatch',
+    (Defaults, 'region'): 'an AWS region; botocore rejects one that does not exist',
+    (Defaults, 'environment'): 'the default {env} substitution, which names nothing on its own',
+    (Defaults, 'aws_profile'): 'a local AWS profile; make_session is where a missing one is reported',
+    (JenkinsConfig, 'url'): 'a Jenkins base URL; the request is what fails on a wrong one',
+    (JenkinsConfig, 'user'): 'a Jenkins username; Jenkins authenticates it',
+    (JenkinsConfig, 'token'): 'a Jenkins API token; Jenkins authenticates it',
+    (JenkinsJobConfig, 'job_path'): 'a path within Jenkins, not on this machine or in S3',
+    (JenkinsJobConfig, 'parameters'): 'build parameters posted to Jenkins verbatim; Jenkins rejects a name its job does not take',
+    (GlueJobConfig, 'name'): 'a Glue job name; GetJob is what says whether it exists',
+    (GlueJobConfig, 'role'): 'an IAM role ARN; UpdateJob validates it',
+    (GlueJobConfig, 'arguments'): 'Glue job arguments, passed through; Glue validates them',
+    (GlueJobConfig, 'connections'): 'Glue connection names; UpdateJob validates them',
+    (LambdaConfig, 'name'): 'a Lambda function name; the API is what says whether it exists',
+    (LambdaConfig, 'live_alias'): 'a Lambda alias; update_alias validates it',
+    (StepFunctionConfig, 'name'): 'a state machine name; the API is what says whether it exists',
+    (StepFunctionConfig, 'log_group'): 'a CloudWatch log group; monitor reports it unset',
+    (IcebergTableConfig, 'database'): 'a Glue Data Catalog database; GetTable reports its absence',
+    (IcebergTableConfig, 'table'): 'a Glue Data Catalog table; GetTable reports its absence',
+    (MonitorConfig, 'lambdas'): 'aliases into this pipeline; build_monitor_sources warns on a dangling one',
+    (MonitorConfig, 'step_functions'): 'aliases into this pipeline; build_monitor_sources warns on a dangling one',
+}
+
+
+# What a declared field's value may be: one string, or a list or mapping of them. Anything else
+# is not a value dectl resolves.
+def carries_strings(annotation) -> bool:
+    """Whether this annotation's values are strings dectl might have to resolve.
+
+    Derived from the annotation rather than matched against a list of spellings. A list of the
+    forms in use today is a narrower tree than the models hold: a string-bearing field written
+    any other way — `tuple[str, ...]`, `set[str]`, a nested container — is invisible to the
+    guard below, which then reports every field classified while one is checked by nothing.
+
+    A mapping is judged by its value type, so `dict[str, str]` carries strings and
+    `dict[str, GlueJobConfig]` does not: the key there names an alias rather than a value the
+    config points at something with."""
+    if annotation is str:
+        return True
+    args = [a for a in get_args(annotation) if a is not type(None)]
+    if not args:
+        return False
+    origin = get_origin(annotation)
+    if origin in (dict, Mapping):
+        return carries_strings(args[-1])
+    return any(carries_strings(arg) for arg in args)
+
+
+def string_fields(model: type[BaseModel]) -> set[str]:
+    return {name for name, field in model.model_fields.items() if carries_strings(field.annotation)}
+
+
+def config_models(root: type[BaseModel] = DectlConfig) -> set[type[StrictModel]]:
+    """Every model the config tree holds, from the top of it down.
+
+    Seeded from `DectlConfig` rather than from `PipelineConfig`, and recursive. Seeding from the
+    pipeline put `Defaults`, `JenkinsConfig` and `JenkinsJobConfig` outside the walk entirely,
+    so a string field on any of them was unclassified and unreported — and `aws_profile` is the
+    field that decides which AWS account a deploy reaches.
+
+    Both a bare annotation and a `dict[str, Model]` one, because the code reaches both. Walking
+    only `get_args` left a declaration on `monitor` — a bare `MonitorConfig` field — inert with
+    the whole suite green, which is the guard reporting complete on a member it cannot see."""
+    found: set[type[StrictModel]] = set()
+    pending = [root]
+    while pending:
+        model = pending.pop()
+        for field in model.model_fields.values():
+            for arg in [field.annotation, *get_args(field.annotation)]:
+                if isinstance(arg, type) and issubclass(arg, StrictModel) and arg not in found:
+                    found.add(arg)
+                    pending.append(arg)
+    return found
+
+
+def resource_models() -> set[type[ResourceModel]]:
+    """The subset of the config tree that declares — every `ResourceModel` a pipeline holds."""
+    return {model for model in config_models() if issubclass(model, ResourceModel)}
+
+
+def test_the_model_walk_reaches_every_resource_kind():
+    # The walk above is only as good as the evidence that it reaches something, and an empty one
+    # satisfies every assertion below. Named outright, so a new resource kind is a decision here
+    # too rather than something that silently joins or silently does not.
+    assert {model.RESOURCE for model in resource_models()} == {'pipeline', 'glue', 'lambda', 'sfn', 'iceberg', 'monitor'}
+
+
+def test_every_string_field_is_classified():
+    # The invariant the design rests on: three declarations say what dectl checks about a field,
+    # and everything that checks, resolves or excludes a value reads one of them. A field in
+    # none of them and not named above is checked by nothing, and that reads as success — the
+    # config validates and the env-effect guard goes quiet.
+    #
+    # Every model the config holds, not every model that declares. `config_models` was widened
+    # to reach `Defaults`, `JenkinsConfig` and `JenkinsJobConfig` for exactly this assertion,
+    # and reading `resource_models` here filtered all three back out one function later — so a
+    # string field added to any of them stayed unclassified and unreported, `aws_profile`
+    # included. A model that declares nothing contributes its whole string surface, which is
+    # the right answer: none of it is checked.
+    unclassified = set()
+    for model in config_models():
+        declared = set()
+        if issubclass(model, DeclaresValues):
+            declared = set(model.PATH_FIELDS) | model.KEY_FIELDS | model.BUCKET_FIELDS
+        for field in string_fields(model) - declared:
+            unclassified.add((model, field))
+
+    assert unclassified - set(UNCHECKED_FIELDS) == set()
+
+
+def test_every_exempted_field_is_one_the_classification_walk_can_reach():
+    """An exemption the walk cannot produce is documentation wearing a guard's clothes.
+
+    The guard above subtracts this table from what it found, so a row naming a field the walk
+    never reaches subtracts nothing and asserts nothing. That is not a harmless spare row: eight
+    of these named models the walk had been filtered down past, and their presence is precisely
+    what made the narrow population look deliberate rather than broken. Deleting all eight left
+    the suite green, which is the tell."""
+    reachable = {(model, field) for model in config_models() for field in string_fields(model)}
+
+    assert set(UNCHECKED_FIELDS) - reachable == set()
+
+
+def test_every_declared_path_field_reaches_declared_paths():
+    # The declaration is only half of it: a field declared in PATH_FIELDS and never enumerated
+    # is checked by nothing just as surely as an undeclared one.
+    pipeline = PipelineConfig.model_validate(
+        {
+            'resolve_paths_from': '/srv/salesdata',
+            'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'sales-scripts', 'scripts': ['x.py'], 'role': 'r'}},
+            'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}},
+            'step_functions': {'flow': {'name': 'm'}},
+            'buckets': {'raw': 'sales-raw'},
+            'iceberg_tables': {'events': {'database': 'd', 'table': 't'}},
+        }
+    )
+    declared_on_models = set()
+    for model in resource_models():
+        declared_on_models.update((model.RESOURCE, field) for field in model.PATH_FIELDS)
+
+    enumerated = {(path.site.resource, path.site.field) for path in declared_paths(pipeline)}
+
+    assert declared_on_models - enumerated == set()
+
+
+# Every mechanism that reads a declaration, and the sites each one emits. Named individually
+# rather than sampled: a consumer absent from this table is one nothing holds to the property,
+# and two entries where one calls the other assert a single mechanism twice.
+SITES_OF = {
+    'PATH_FIELDS': {
+        'declared_values': lambda p: {(s.resource, s.alias, s.field) for s, _, _ in declared_values(p, 'PATH_FIELDS')},
+        'declared_paths': lambda p: {(d.site.resource, d.site.alias, d.site.field) for d in declared_paths(p)},
+    },
+    'KEY_FIELDS': {
+        'declared_values': lambda p: {(s.resource, s.alias, s.field) for s, _, _ in declared_values(p, 'KEY_FIELDS')},
+        'declared_keys': lambda p: {(k.site.resource, k.site.alias, k.site.field) for k in declared_keys(p)},
+    },
+    'BUCKET_FIELDS': {
+        'declared_values': lambda p: {(s.resource, s.alias, s.field) for s, _, _ in declared_values(p, 'BUCKET_FIELDS')},
+        'declared_names': lambda p: {(n.site.resource, n.site.alias, n.site.field) for n in declared_names(p)},
+    },
+}
+
+# One config per member shape, and the field each shape's owner is given a declaration on. The
+# alias is the one a row for that member carries: only a dict-held member has one, because the
+# other two are reached without a key. A fourth shape is added by copying a row, so every column
+# here is the value it will have.
+SHAPES = [
+    ('dict-held', LambdaConfig, {'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}}}, 'fn', 'source_dir'),
+    ('bare-field', MonitorConfig, {'monitor': {'lambdas': ['a']}}, '', 'lambdas'),
+    ('on-the-pipeline', PipelineConfig, {'resolve_paths_from': '/srv/x'}, '', 'resolve_paths_from'),
+]
+MEMBER_SHAPES = [shape for shape in SHAPES if shape[1] is not PipelineConfig]
+
+
+@pytest.mark.parametrize(('declaration', 'consumers'), SITES_OF.items(), ids=list(SITES_OF))
+@pytest.mark.parametrize(('shape', 'owner', 'raw', 'alias', 'field'), SHAPES, ids=[s[0] for s in SHAPES])
+def test_every_declaration_consumer_sees_every_member_shape(monkeypatch, declaration, consumers, shape, owner, raw, alias, field):
+    # `declaring_members` is the one walk, and this is what keeps it one. A consumer that
+    # traverses for itself reaches a narrower set, and the failure is silent in every direction:
+    # a value nothing enumerates is a value nothing checks, and no check means no fault.
+    declared = {field: PathKind.DIRECTORY} if declaration == 'PATH_FIELDS' else frozenset({field})
+    monkeypatch.setattr(owner, declaration, declared)
+    # `buckets` sits on the pipeline and is `s3` to a reader, so its rows carry that word
+    # rather than the owner's own.
+    expected = (owner.site_resource(field), alias, field)
+    pipeline = PipelineConfig.model_validate(raw)
+
+    for name, sites in consumers.items():
+        assert expected in sites(pipeline), f'{name} never saw {expected} for a {shape} member'
+
+
+@pytest.mark.parametrize(('shape', 'owner', 'raw', 'alias', 'field'), MEMBER_SHAPES, ids=[s[0] for s in MEMBER_SHAPES])
+def test_declares_nothing_sees_every_member_shape(monkeypatch, shape, owner, raw, alias, field):
+    # Its own entry, because it reports the values the others skip: a declared field holding
+    # nothing yields no row anywhere else, so nothing else can stand in for it.
+    monkeypatch.setattr(owner, 'PATH_FIELDS', {field: PathKind.DIRECTORY})
+    blanked = {**raw}
+    blanked['monitor' if owner is MonitorConfig else 'lambdas'] = (
+        {'lambdas': []} if owner is MonitorConfig else {'fn': {'name': 'n', 'source_dir': ''}}
+    )
+    pipeline = PipelineConfig.model_validate(blanked)
+
+    sites = {(s.resource, s.alias, s.field) for s in declares_nothing(pipeline)}
+
+    assert (owner.site_resource(field), alias, field) in sites, f'declares_nothing missed a {shape} member'
+
+
+@pytest.mark.parametrize(('shape', 'owner', 'raw', 'alias', 'field'), SHAPES, ids=[s[0] for s in SHAPES])
+def test_the_env_guard_dump_drops_a_local_only_field_of_every_member_shape(monkeypatch, shape, owner, raw, alias, field):
+    # `aws_names_only` is the sixth consumer and it does not share the walk: it dumps the
+    # pipeline as a container and filters what comes back, rather than enumerating values filed
+    # inside members. That is a different operation, so it is asserted on its own terms — a
+    # field declared local-only is absent from the dump — rather than made to look uniform.
+    monkeypatch.setattr(owner, 'PATH_FIELDS', {field: PathKind.DIRECTORY})
+    config = DectlConfig.model_validate({'defaults': {'account_id': '1'}, 'pipelines': {'p': raw}})
+    dumped = aws_names_only(config.pipelines['p'])
+
+    if owner is PipelineConfig:
+        assert field not in dumped
+    elif owner is MonitorConfig:
+        assert field not in dumped['monitor']
+    else:
+        assert field not in dumped['lambdas']['fn']
+
+
+def test_the_scope_guard_accepts_every_resource_its_own_rows_carry():
+    # The guard reads its vocabulary off the rows rather than off the members, so it cannot
+    # refuse a word its own output uses. A `buckets` row is labelled `s3` and its owner is the
+    # pipeline, so a guard walking members refuses `s3` and an `s3`-scoped door gets a traceback
+    # rather than a refusal.
+    pipeline = PipelineConfig.model_validate(
+        {
+            'buckets': {'raw': 'Bad_Name'},
+            'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'b', 'scripts': ['x.py'], 'role': 'r'}},
+            'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}},
+        }
+    )
+    emitted = {p.site.resource for p in pipeline_value_faults('p', pipeline, on_disk=False)}
+    emitted |= {n.site.resource for n in declared_names(pipeline)}
+
+    # Named outright, because an empty set satisfies the loop below and the loop is the test.
+    assert emitted == {'s3', 'glue'}
+
+    for resource in emitted:
+        pipeline_value_faults('p', pipeline, on_disk=False, resource=resource)
+
+
+def pipeline_rooted_at(root) -> PipelineConfig:
+    raw = {'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}}}
+    if root is not None:
+        raw['resolve_paths_from'] = root
+    return PipelineConfig.model_validate(raw)
+
+
+def test_the_declared_root_anchors_a_relative_path(tmp_path):
+    pipeline = pipeline_rooted_at(str(tmp_path))
+
+    assert resolve_from_root(pipeline, 'modules/lambda/code') == tmp_path / 'modules' / 'lambda' / 'code'
+
+
+def test_the_declared_root_expands_a_leading_tilde():
+    pipeline = pipeline_rooted_at('~/code/salesdata')
+
+    assert resolve_from_root(pipeline, 'code') == Path.home() / 'code' / 'salesdata' / 'code'
+
+
+def test_paths_resolve_from_the_working_directory_when_no_root_is_set():
+    # The behaviour a config that names no root depends on: dectl is run from the checkout and
+    # relative paths mean what they would mean to any other command in that shell.
+    pipeline = pipeline_rooted_at(None)
+
+    assert resolve_from_root(pipeline, 'code') == Path.cwd() / 'code'
+
+
+def test_an_absolute_configured_path_ignores_the_root(tmp_path):
+    # Mixed absolute and root-relative entries are legal, so an absolute one has to survive
+    # being joined onto a root that is nowhere near it.
+    pipeline = pipeline_rooted_at(str(tmp_path / 'checkout'))
+
+    assert resolve_from_root(pipeline, '/srv/shared/handler') == Path('/srv/shared/handler')
+
+
+def test_pipeline_root_is_the_working_directory_when_no_root_is_set():
+    assert pipeline_root(pipeline_rooted_at(None)) == Path.cwd()
+
+
+@pytest.mark.parametrize('root', ['../salesdata', 'code/salesdata', '{env}/salesdata', ''])
+def test_a_root_that_is_not_rooted_is_reported_rather_than_raised(root):
+    # A relative root resolves against the working directory, which is the dependency the key
+    # exists to remove. It is reported for the reason every other spelling fault is: a schema
+    # failure sends `main.py` to `cfg = None` and takes every pipeline command with it, so the
+    # likeliest first spelling of a new key would blank the CLI that explains it.
+    #
+    # A leading `{env}` is relative whatever the environment resolves to, and `--env` is parsed
+    # after the config loads, so the token is replaced with a plain name rather than substituted.
+    pipeline = pipeline_rooted_at(root)
+
+    faults = pipeline_value_faults('p', pipeline, on_disk=False)
+
+    assert [(f.site.field, f.fault) for f in faults] == [('resolve_paths_from', ConfigFault.NOT_A_ROOTED_PATH)]
+
+
+def test_a_root_that_is_not_rooted_leaves_the_rest_of_the_cli_working():
+    """The whole reason it is not a field validator, driven rather than asserted as a round-trip.
+
+    A validator would raise at load, and `main.py` answers a load failure with `cfg = None` —
+    which takes every pipeline command with it, including the two that explain the problem. So
+    the config has to load: `config validate` names the fault, and the renderers still show the
+    pipeline. Asserting only that the field round-trips leaves all three of those unmeasured."""
+    pipeline = pipeline_rooted_at('code/salesdata')
+
+    faults = pipeline_value_faults('salesdata', pipeline, on_disk=True)
+    published = pipeline_to_dict('salesdata', pipeline)
+
+    assert [(problem.site, problem.fault) for problem in faults] == [(ROOT_SITE, ConfigFault.NOT_A_ROOTED_PATH)]
+    assert published['lambda']['fn']['name'] == 'n'
+    assert published['resolve_paths_from']['declared'] is True
+
+
+def test_the_root_is_absent_by_default():
+    assert pipeline_rooted_at(None).resolve_paths_from is None
+
+
+@pytest.mark.parametrize(
+    ('source_dir', 'faults'),
+    [
+        # Relative and landing outside: the anchor is enforced for every value anchored to it,
+        # not only the ones a key check reaches for another reason. A lambda builds no S3 key,
+        # so `key_fault` never runs on a `source_dir` and only this arm covers it.
+        ('..', [ConfigFault.ESCAPES_ROOT]),
+        # Judged by where it lands rather than by how it is written, so a traversal that stays
+        # inside the root is not refused for leaving it — the row's own resolved path would
+        # disprove the fault name, and the remedy would describe what the config already does.
+        ('code/../..', [ConfigFault.ESCAPES_ROOT]),
+        ('modules/../code', []),
+        ('code', []),
+        # The fourth branch `resolve_from_root` takes. `Path('')` is `.` and `/` drops it, so an
+        # empty value resolves to the anchor itself and the deploy uploads the whole checkout.
+        ('', [ConfigFault.DECLARES_NOTHING]),
+        # Absolute and `~`-rooted values resolve to themselves, so they never claimed the anchor
+        # and the escape arm exempts them. A `source_dir` is documented as free to sit anywhere.
+        ('ABSOLUTE', []),
+        ('~nosuchuser-fixture/code', [ConfigFault.UNRESOLVABLE_HOME]),
+    ],
+)
+def test_every_shape_a_source_dir_can_take_is_judged(tmp_path, source_dir, faults):
+    # One row per branch `resolve_from_root` takes — relative, empty, absolute, `~`-rooted —
+    # because a fixture carrying four spellings of one branch reads as coverage of all of them.
+    (tmp_path / 'code').mkdir()
+    (tmp_path / 'code' / 'handler.py').write_text('x')
+    if source_dir == 'ABSOLUTE':
+        source_dir = str(tmp_path / 'code')
+    pipeline = PipelineConfig.model_validate(
+        {'resolve_paths_from': str(tmp_path), 'lambdas': {'fn': {'name': 'n', 'source_dir': source_dir}}}
+    )
+
+    assert [f.fault for f in pipeline_value_faults('p', pipeline, on_disk=True)] == faults
+
+
+def test_a_source_under_an_excluded_directory_name_still_holds_its_files(tmp_path):
+    # The exclusion is about what sits inside the source, so it is tested below the source and
+    # never against the absolute path. Reading the whole path puts every directory above the
+    # checkout into the question: a tree that happens to live under one named `__pycache__`
+    # reports every lambda source as holding nothing, and the deploy door refuses a directory
+    # with a handler in it.
+    source = tmp_path / '__pycache__' / 'checkout' / 'code'
+    source.mkdir(parents=True)
+    (source / 'handler.py').write_text('def handler(event, context): pass')
+
+    assert path_fault(source, PathKind.NON_EMPTY_DIRECTORY) is None
+    assert [found.name for found in deployable_files(source)] == ['handler.py']
+
+
+def test_a_pycache_inside_the_source_is_still_excluded(tmp_path):
+    source = tmp_path / 'code'
+    (source / '__pycache__').mkdir(parents=True)
+    (source / '__pycache__' / 'handler.cpython-313.pyc').write_bytes(b'\x00')
+
+    assert path_fault(source, PathKind.NON_EMPTY_DIRECTORY) is ConfigFault.EMPTY_DIRECTORY
+
+
+def test_an_absolute_source_dir_still_sits_where_it_likes(tmp_path):
+    # The exemption, stated: an absolute or ~-rooted value resolves to itself, so it never
+    # claimed the anchor. A source_dir is zipped and uploaded as bytes with no key derived from
+    # it, which is why it is allowed outside the root at all.
+    outside = tmp_path / 'elsewhere'
+    outside.mkdir()
+    (outside / 'handler.py').write_text('x')
+    pipeline = PipelineConfig.model_validate(
+        {'resolve_paths_from': str(tmp_path / 'root'), 'lambdas': {'fn': {'name': 'n', 'source_dir': str(outside)}}}
+    )
+    (tmp_path / 'root').mkdir()
+
+    assert pipeline_value_faults('p', pipeline, on_disk=True) == []
+
+
+def test_every_fault_has_a_sentence():
+    # FAULT_WORDING is indexed with no default, so a member added without one raises at the
+    # moment a reader needs the answer.
+    assert set(FAULT_WORDING) == set(ConfigFault)
+
+
+def problem(fault: ConfigFault) -> UnusableValue:
+    return UnusableValue('p', ValueSite('glue', 'j', 'scripts'), None, fault, 'x')
+
+
+def test_a_spelling_fault_is_sent_to_the_form_and_never_to_config_show():
+    # `config show` prints the *resolved* path, with the `./`, the doubled separator and the
+    # trailing slash normalised out — so it renders a malformed key as a correct-looking one and
+    # answers a question the reader did not ask.
+    lines = recovery_lines([problem(ConfigFault.NOT_A_CLEAN_KEY)])
+
+    assert KEY_FORM in lines
+    assert SHOW_RESOLVED not in lines
+
+
+def test_a_spelling_only_run_still_names_a_command():
+    # A form says what the value has to look like and no more. Every other fault names a command,
+    # so this would be the one run that leaves the reader with nothing to do next.
+    assert EDIT_CONFIG in recovery_lines([problem(ConfigFault.NOT_A_BUCKET_NAME)])
+
+
+def test_leaving_the_anchor_gets_its_own_line_rather_than_the_key_one():
+    # The two subjects want opposite things. An S3 key may not be `~/x` or `/x`, and those are
+    # exactly the spellings that fix an anchored directory, so one line for both tells half its
+    # readers to avoid their own remedy.
+    lines = recovery_lines([problem(ConfigFault.ESCAPES_ROOT)])
+
+    assert ANCHOR_FORM in lines
+    assert KEY_FORM not in lines
+
+
+def test_a_run_carrying_two_kinds_of_fault_gets_a_line_for_each():
+    # Dropping either sends those rows nowhere, and the reader fixes the half they were told
+    # about and runs the same command again.
+    lines = recovery_lines([problem(ConfigFault.NOT_A_CLEAN_KEY), problem(ConfigFault.ABSENT)])
+
+    assert KEY_FORM in lines
+    assert EDIT_CONFIG in lines
+    assert SHOW_RESOLVED in lines
+
+
+def test_a_bucket_name_is_checked_on_a_pipeline_that_declares_no_root():
+    # Bucket spelling is a property of the config, not of this machine, so it is answerable with
+    # no anchor and with `on_disk` false. Moving the loop below the `on_disk` gate left the suite
+    # green while this config went from two refusals and exit 3 to `is valid` and exit 0.
+    pipeline = PipelineConfig.model_validate({'buckets': {'raw': 'My_Bad_Bucket', 'curated': 'also..bad'}})
+
+    faults = pipeline_value_faults('p', pipeline, on_disk=False)
+
+    assert {problem.site.field for problem in faults} == {'buckets'}
+    assert {problem.fault for problem in faults} == {ConfigFault.NOT_A_BUCKET_NAME}
+    assert len(faults) == 2
+
+
+# Which side of the spelling line each fault falls on, written out rather than derived. A fault
+# about how a value is *written* is reported against the configured string, because resolution
+# normalises away the very thing it names and a bucket name resolves to nothing at all. A fault
+# about what this machine holds carries the resolved path and is answered by `config show`.
+SPELLING = frozenset(
+    {
+        ConfigFault.NOT_A_CLEAN_KEY,
+        ConfigFault.KEY_ESCAPES_ROOT,
+        ConfigFault.NOT_A_BUCKET_NAME,
+        # A root that is not rooted resolves against the working directory, so there is no
+        # meaningful path to report — the remedy is the form the value has to take.
+        ConfigFault.NOT_A_ROOTED_PATH,
+        # A `~` naming nobody resolves to nothing, so the row carries the written value. The
+        # likeliest cause is a missing slash, which is a fact about the characters and is
+        # invisible in a resolved path — `config show` renders it joined under the anchor.
+        ConfigFault.UNRESOLVABLE_HOME,
+    }
+)
+ON_DISK = frozenset(
+    {
+        ConfigFault.ABSENT,
+        ConfigFault.EXPECTED_DIRECTORY,
+        ConfigFault.EXPECTED_FILE,
+        ConfigFault.EMPTY_DIRECTORY,
+        ConfigFault.DECLARES_NOTHING,
+        ConfigFault.ESCAPES_ROOT,
+    }
+)
+
+
+def test_every_fault_is_classified_as_a_spelling_or_an_on_disk_one():
+    # `SPELLING_FAULTS` is built out of `ConfigFault` members, so `set(ConfigFault) >=` it holds
+    # for every subset including the empty one — it cannot fail, and it was the only thing named
+    # as pinning the property. The table above can: dropping a member from `SPELLING_FAULTS`
+    # fails the first assertion, and adding a fault without deciding its side fails the second.
+    #
+    # The cost of getting it wrong is silent. A spelling fault outside the set is reported with
+    # a resolved path that has the malformation normalised out of it, and its reader is sent to
+    # `config show`, which that fault's own remedy says cannot help.
+    assert SPELLING_FAULTS == SPELLING
+    assert set(ConfigFault) == SPELLING | ON_DISK
+    assert not SPELLING & ON_DISK
+
+
+def rooted_pipeline_naming(tmp_path, source_dir: str) -> PipelineConfig:
+    """A pipeline whose root is present, so a fault beneath it is not hidden by an absent one."""
+    return PipelineConfig.model_validate({'resolve_paths_from': str(tmp_path), 'lambdas': {'fn': {'name': 'n', 'source_dir': source_dir}}})
+
+
+@pytest.mark.parametrize('field', ['resolve_paths_from', 'source_dir'])
+def test_a_home_this_machine_cannot_resolve_is_a_fault_not_a_load_failure(tmp_path, field):
+    pipeline = pipeline_rooted_at('~code/salesdata') if field == 'resolve_paths_from' else rooted_pipeline_naming(tmp_path, '~code/x')
+    # `~code/x` is a missing slash, the likeliest typo in a path key. Whether it resolves is a
+    # property of this machine, so it belongs where every other such property is checked — see
+    # `key_fault`. As a validator it could only reach the values carrying no `{env}`, since the
+    # active environment is not known at load; one door answers for both halves.
+    faults = pipeline_value_faults('p', pipeline, on_disk=True)
+
+    assert [f.fault for f in faults] == [ConfigFault.UNRESOLVABLE_HOME]
+
+
+def test_every_config_load_failure_is_one_the_callers_catch():
+    # Every caller catches CONFIG_LOAD_ERRORS, so a load failure outside that tuple is one no
+    # command recovers from. An unknown key is a load failure; how a value is *written* is not,
+    # because taking the pipeline tree down removes the commands that would report it.
+    with pytest.raises(CONFIG_LOAD_ERRORS):
+        PipelineConfig.model_validate({'resolve_paths_frm': '/srv/x'})
+
+
+def test_the_env_token_is_substituted_into_the_root():
+    # A token left literal in the root while the path beneath it substitutes gives a
+    # half-resolved join, which is neither what the config says nor what --env asked for. The
+    # root's own token is `pipeline_root`'s to resolve; the value joined onto it arrives already
+    # substituted, so both halves are the same rendering.
+    set_active_environment('prod', '--env')
+    try:
+        pipeline = pipeline_rooted_at('/srv/{env}/salesdata')
+        assert resolve_from_root(pipeline, substitute_env('modules/{env}/code')) == Path('/srv/prod/salesdata/modules/prod/code')
+    finally:
+        set_active_environment('dev', 'default')
+
+
+@pytest.mark.parametrize('field', ['resolve_paths_from', 'source_dir'])
+def test_a_templated_home_resolves_to_a_fault_rather_than_a_traceback(tmp_path, field):
+    templated = '~nosuchuser-{env}/code'
+    pipeline = pipeline_rooted_at(templated) if field == 'resolve_paths_from' else rooted_pipeline_naming(tmp_path, templated)
+    # A `{env}` defers the `~` check past load, and nothing re-validates on the read path:
+    # render_env_model runs per resource inside a verb, and validate, show and list never call
+    # it. Raising here reached the reader as a traceback; exiting here reached a --json caller
+    # as zero bytes on a document its command had already committed to emitting.
+    #
+    # Both doors, because a guard covering only the half a fault was reported in leaves the
+    # sibling silent.
+    set_active_environment('prod', '--env')
+    try:
+        faults = pipeline_value_faults('p', pipeline, on_disk=True)
+    finally:
+        set_active_environment('dev', 'default')
+
+    assert [(f.site.field, f.fault) for f in faults] == [(field, ConfigFault.UNRESOLVABLE_HOME)]
+
+
+def test_resolution_never_raises_so_the_renderers_reach_a_faulty_value():
+    # The other half of the same property. `config show` and `list` resolve every declared path
+    # without running the fault walk first, so a total resolver is what keeps them printing.
+    pipeline = pipeline_rooted_at('~nosuchuser/code')
+
+    assert pipeline_root(pipeline) == Path('~nosuchuser/code')
+    assert resolve_from_root(pipeline, 'x.py') == Path('~nosuchuser/code/x.py')
+
+
+def test_a_substituted_value_that_fails_validation_exits_rather_than_raising():
+    # render_env_model re-validates, so a config that loaded can still fail inside a verb. A
+    # bare ValidationError reaches the reader as a pydantic traceback naming the model rather
+    # than the key they typed. No shipped model carries a validator that a substitution can
+    # trip, so the boundary is exercised against one written here — an untestable guard and a
+    # test that cannot fail are the same defect from two sides.
+    class Fussy(StrictModel):
+        name: str
+
+        @field_validator('name')
+        @classmethod
+        def never_prod(cls, value: str) -> str:
+            if 'prod' in value:
+                raise ValueError('refuses prod')
+            return value
+
+    set_active_environment('prod', '--env')
+    try:
+        with pytest.raises(typer.Exit) as exit_info:
+            render_env_model(Fussy(name='sales-{env}'))
+        assert exit_info.value.exit_code == 1
+    finally:
+        set_active_environment('dev', 'default')
+
+
+def test_a_relative_path_is_not_an_escape_when_no_anchor_is_declared(tmp_path):
+    # Without `resolve_paths_from` the root is the working directory and `../shared/code` is an
+    # ordinary path that has always been followed. Enforcing the anchor where none is declared
+    # refuses a config that deploys, which is the one direction this check must not fail in.
+    pipeline = PipelineConfig.model_validate({'lambdas': {'fn': {'name': 'n', 'source_dir': '../shared/code'}}})
+
+    assert pipeline_value_faults('p', pipeline, on_disk=False) == []
+
+
+def test_the_anchor_is_enforced_once_a_pipeline_declares_one(tmp_path):
+    # The other half, so the pair pins the gate rather than the arm: the same value under a
+    # declared anchor is refused, and a test asserting only the first would pass with the check
+    # deleted outright.
+    pipeline = PipelineConfig.model_validate(
+        {'resolve_paths_from': str(tmp_path), 'lambdas': {'fn': {'name': 'n', 'source_dir': '../shared/code'}}}
+    )
+
+    assert [f.fault for f in pipeline_value_faults('p', pipeline, on_disk=False)] == [ConfigFault.ESCAPES_ROOT]
+
+
+def test_a_traversal_that_lands_inside_the_root_is_not_an_escape(tmp_path):
+    # Decided by where the value lands, not by how it is written. Judged lexically, this is
+    # refused for leaving a directory it never leaves — and the row's own resolved path would
+    # have shown it under the root, so the evidence disproved the fault name.
+    (tmp_path / 'code').mkdir()
+    (tmp_path / 'code' / 'handler.py').write_text('x')
+    pipeline = PipelineConfig.model_validate(
+        {'resolve_paths_from': str(tmp_path), 'lambdas': {'fn': {'name': 'n', 'source_dir': 'modules/../code'}}}
+    )
+
+    assert pipeline_value_faults('p', pipeline, on_disk=True) == []
+    assert resolve_from_root(pipeline, 'modules/../code') == tmp_path / 'code'
+
+
+def test_an_escape_reports_where_it_lands_rather_than_how_it_was_written(tmp_path):
+    root = tmp_path / 'anchor'
+    root.mkdir()
+    pipeline = PipelineConfig.model_validate(
+        {'resolve_paths_from': str(root), 'lambdas': {'fn': {'name': 'n', 'source_dir': '../shared/code'}}}
+    )
+
+    [fault] = pipeline_value_faults('p', pipeline, on_disk=False)
+
+    assert fault.fault is ConfigFault.ESCAPES_ROOT
+    # The directory outside the root, not the join that spells the way there. A reader who
+    # cannot see where it lands cannot tell a typo from a deliberate `..`.
+    assert fault.path == tmp_path / 'shared' / 'code'
+    assert '..' not in str(fault.path)
+
+
+def test_a_source_dir_naming_the_checkout_does_not_ship_its_git_directory(tmp_path):
+    # `.` resolves to the anchor, and on an https remote `.git/config` carries a credential
+    # helper line. Excluded by name wherever it sits below the source, so a submodule's `.git`
+    # under an otherwise ordinary source directory is covered by the same rule.
+    (tmp_path / '.git').mkdir()
+    (tmp_path / '.git' / 'config').write_text('[credential]\n  helper = store\n')
+    (tmp_path / 'code').mkdir()
+    (tmp_path / 'code' / 'handler.py').write_text('x')
+
+    shipped = {str(found.relative_to(tmp_path)) for found in deployable_files(tmp_path)}
+
+    assert shipped == {'code/handler.py'}
+
+
+def test_a_relative_root_renders_where_it_actually_lands():
+    # `root_fault` refuses it and every deploy door reports it, but `config show` and
+    # `list --json` render the root without running the walk first. A relative value printed
+    # back as the resolved anchor is the confident wrong answer that command exists to prevent:
+    # it resolves against wherever dectl was run, which is the dependency the key removes.
+    pipeline = pipeline_rooted_at('code/salesdata')
+
+    assert pipeline_root(pipeline) == Path.cwd() / 'code' / 'salesdata'
+    assert resolve_from_root(pipeline, 'handler') == Path.cwd() / 'code' / 'salesdata' / 'handler'
+
+
+def test_every_value_the_root_check_refuses_is_named_by_its_remedy():
+    # A remedy that accepts what the check refuses is unactionable while reading as complete.
+    # Each refused spelling has to be findable in the sentence the reader is shown.
+    for value, phrase in [('code/salesdata', 'relative'), ('', 'blank'), ('{env}/salesdata', '{env}')]:
+        assert root_fault(value) is ConfigFault.NOT_A_ROOTED_PATH
+        assert phrase in ROOT_FORM, f'ROOT_FORM does not name why {value!r} is refused'
+
+
+def test_one_fault_value_publishes_one_row_shape(tmp_path):
+    """A `~` naming nobody resolves to nothing at either site, so both rows say so.
+
+    The root row published the configured string in the `path` key while every leaf row
+    published null, which gives a `--json` consumer branching on `path is None` two answers to
+    one `fault`. The leaf row named no value at all, so the missing slash the fault exists to
+    point at was on screen nowhere."""
+    leaf = PipelineConfig.model_validate(
+        {'resolve_paths_from': str(tmp_path), 'lambdas': {'fn': {'name': 'n', 'source_dir': '~nosuchuser/code'}}}
+    )
+    root = PipelineConfig.model_validate({'resolve_paths_from': '~nosuchuser/code'})
+
+    rows = pipeline_value_faults('a', leaf, on_disk=True) + pipeline_value_faults('b', root, on_disk=True)
+
+    assert {row.fault for row in rows} == {ConfigFault.UNRESOLVABLE_HOME}
+    assert [row.path for row in rows] == [None, None]
+    # Shown rather than swallowed: the characters are the finding, so both rows quote them.
+    assert all(row.shown == repr('~nosuchuser/code') for row in rows)
+
+
+def test_a_declared_resource_scopes_a_pipeline_that_holds_none_of_that_kind():
+    """The scope vocabulary is what dectl declares, not what one file happens to contain.
+
+    Read off the emitted rows it is a function of the config, so `glue` raised on a pipeline
+    holding no glue job — a Python traceback, in a tool whose every other refusal goes through
+    `error()`. No door reaches it today only because the command tree carries a resource the
+    config declares; whoever adds a door for a new kind inherits it."""
+    bare = PipelineConfig.model_validate({'buckets': {'raw': 'sales-raw'}})
+
+    assert declared_resource_names() >= {'glue', 'lambda', 'sfn', 's3', 'iceberg', 'monitor', 'pipeline'}
+    for resource in declared_resource_names():
+        assert pipeline_value_faults('p', bare, on_disk=False, resource=resource) == []
+
+    with pytest.raises(ValueError, match='no resource named'):
+        pipeline_value_faults('p', bare, on_disk=False, resource='nosuchkind')

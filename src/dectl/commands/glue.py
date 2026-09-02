@@ -1,5 +1,7 @@
 import time
+from pathlib import Path
 from typing import Annotated
+from typing import NamedTuple
 
 import boto3
 import typer
@@ -7,7 +9,11 @@ from rich.table import Table
 
 from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
+from dectl.config import PipelineConfig
+from dectl.config import pipeline_value_faults
+from dectl.config import resolve_from_root
 from dectl.env import render_env_model
+from dectl.env import substitute_env
 from dectl.logs import tail_glue_run
 from dectl.output import console
 from dectl.output import emit_json
@@ -15,6 +21,9 @@ from dectl.output import error
 from dectl.output import info
 from dectl.output import success
 from dectl.prompt import confirm_or_exit
+from dectl.values import join_key
+from dectl.values import join_uri
+from dectl.values import refuse_unusable_values
 
 RUN_STATE_COLORS = {'SUCCEEDED': 'green', 'FAILED': 'red', 'STOPPED': 'red', 'TIMEOUT': 'red', 'RUNNING': 'cyan'}
 
@@ -26,12 +35,109 @@ FAILED_RUN_STATES = TERMINAL_RUN_STATES - {'SUCCEEDED'}
 READ_ONLY_KEYS = ('Name', 'CreatedOn', 'LastModifiedOn', 'ProfileName', 'AllocatedCapacity')
 
 
-def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig) -> None:
+def script_uri(glue_job: GlueJobConfig, script: str) -> str:
+    """Where one script of a rendered job lands.
+
+    The job's three operands handed to `join_uri` as they are. Every one of them arrives
+    substituted, because the job did — so this renders nothing, and a caller holding a raw job
+    gets raw operands rather than a mix. `ScriptLocation`, `--extra-py-files` and the upload
+    all reach the destination through here, which is what stops any two of them naming
+    different objects."""
+    return join_uri(glue_job.script_bucket, glue_job.script_prefix, script)
+
+
+class ResolvedScript(NamedTuple):
+    """One script of a job, as the deploy needs it: the S3-side name and the file on disk.
+
+    `name` is substituted, because every other consumer of a script name is — `declared_paths`
+    substitutes, and the verb holds a `render_env_model`'d job whose `scripts` are rendered
+    already. A pair carrying the raw string beside the resolved path is two renderings of one
+    file, and nothing at a call site can see which it is holding."""
+
+    name: str
+    path: Path
+
+
+def configured_uris(glue_job: GlueJobConfig) -> str:
+    """Where this job's scripts are destined, spelled exactly as the config spells them.
+
+    `{env}` is deliberately left standing. This feeds the per-alias help panel, which is a
+    `help=` argument evaluated while the command tree is built — before `--env` is parsed — so
+    substituting would print the default environment's name under `--env prod`, which is a
+    confident wrong answer where the template is an obviously unresolved one."""
+    return ' · '.join(join_uri(glue_job.script_bucket, glue_job.script_prefix, script) for script in glue_job.scripts)
+
+
+def resolve_scripts(pipeline_name: str, pipeline: PipelineConfig, alias: str) -> list[ResolvedScript]:
+    """Every script of one job as a substituted name and a file on disk, or exit naming what is wrong.
+
+    Run before anything is uploaded and before the definition diff, so `deploy` and `deploy
+    --plan` refuse the same configs. A `--plan` that could not see a missing script would report
+    a clean definition on a config whose real deploy exits, which is the one question `--plan` is
+    run to answer.
+
+    The faults come from `pipeline_value_faults`, scoped by argument, so this door and `config
+    validate` report one failure the same way rather than each describing it its own. Scoping
+    by argument rather than by filtering the result is what keeps the root fault: a checkout
+    that is not there explains every missing script under it, and ten lines naming ten files
+    name the cause in none of them."""
+    refuse_unusable_values(
+        pipeline_value_faults(pipeline_name, pipeline, on_disk=True, resource=GlueJobConfig.RESOURCE, alias=alias),
+        exit_code=1,
+    )
+    job = pipeline.glue_jobs[alias]
+    # One substitution, at the boundary: the name and the path are the same rendering of
+    # one script, so nothing downstream can hold two spellings of it.
+    names = [substitute_env(script) for script in job.scripts]
+    return [ResolvedScript(name, resolve_from_root(pipeline, name)) for name in names]
+
+
+def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: list[ResolvedScript]) -> None:
+    """Upload each resolved script under the key its config string spells.
+
+    Every path is checked before the first byte goes anywhere: a partial upload leaves the job's
+    scripts split across two revisions, and the run that follows mixes them. The caller normally
+    checked them too, and repeating it here is what keeps that promise a property of this
+    function rather than of whoever calls it.
+
+    The set uploaded has to be the set the definition names, and taking `sources` from the
+    caller makes that breakable: a set omitting `scripts[0]` whose every path exists uploads
+    cleanly while `build_job_update` emits a `ScriptLocation` nothing wrote, which is what
+    `script_uri` exists to prevent.
+
+    `glue_job` arrives rendered and nothing here renders it again. Both sides of the comparison
+    are then one substitution deep — `ResolvedScript.name` and the job's own `scripts` — and
+    the destination is the one `build_job_update` names. Rendering here as well was live: an
+    environment whose own name carries the token wrote the object under a twice-substituted
+    bucket while `ScriptLocation` named the once-substituted one, and a script name carrying
+    the token failed the comparison below against itself."""
+    named = {source.name for source in sources}
+    defined = set(glue_job.scripts)
+    if named != defined:
+        error(f'{glue_job.name}: asked to upload {sorted(named)}, but the job definition names {sorted(defined)}')
+        raise typer.Exit(1)
+
+    missing = [source.path for source in sources if not source.path.is_file()]
+    if missing:
+        # Not the shared diagnosis, and deliberately worded so it does not read as one: the
+        # caller already reported every unusable path by its config key, so reaching here means
+        # a file that was present when the deploy started is not present now.
+        for path in missing:
+            error(f'script disappeared after the deploy checked it: {path}')
+        raise typer.Exit(1)
+
     s3 = session.client('s3')
-    for script in glue_job.scripts:
-        key = f'{glue_job.script_prefix}/{script}'
-        s3.upload_file(Filename=script, Bucket=glue_job.script_bucket, Key=key)
-        success(f'uploaded {script} -> s3://{glue_job.script_bucket}/{key}')
+    for source in sources:
+        # The key through `join_key` and the report through `script_uri`, so this call and
+        # `ScriptLocation` agree by construction. Joining the prefix here by hand would make
+        # them two renderings of one key, and the object then lands where the job definition
+        # does not name.
+        s3.upload_file(
+            Filename=str(source.path),
+            Bucket=glue_job.script_bucket,
+            Key=join_key(glue_job.script_prefix, source.name),
+        )
+        success(f'uploaded {source.path} -> {script_uri(glue_job, source.name)}')
 
 
 def build_job_update(existing: dict, glue_job: GlueJobConfig) -> dict:
@@ -57,8 +163,7 @@ def build_job_update(existing: dict, glue_job: GlueJobConfig) -> dict:
     job_update['Role'] = glue_job.role
 
     command = job_update.get('Command', {})
-    script_key = f'{glue_job.script_prefix}/{glue_job.scripts[0]}'
-    command['ScriptLocation'] = f's3://{glue_job.script_bucket}/{script_key}'
+    command['ScriptLocation'] = script_uri(glue_job, glue_job.scripts[0])
     job_update['Command'] = command
 
     if glue_job.connections is None:
@@ -77,8 +182,7 @@ def build_job_update(existing: dict, glue_job: GlueJobConfig) -> dict:
     default_args = dict(existing.get('DefaultArguments', {}))
     default_args['--JOB_NAME'] = glue_job.name
     if len(glue_job.scripts) > 1:
-        extra_files = ','.join(f's3://{glue_job.script_bucket}/{glue_job.script_prefix}/{s}' for s in glue_job.scripts[1:])
-        default_args['--extra-py-files'] = extra_files
+        default_args['--extra-py-files'] = ','.join(script_uri(glue_job, s) for s in glue_job.scripts[1:])
     for key, value in glue_job.arguments.items():
         arg_key = key if key.startswith('--') else f'--{key}'
         default_args[arg_key] = value
@@ -131,13 +235,18 @@ def render_job_changes(job_name: str, changes: list[tuple[str, str, str]]) -> No
     console.print(table)
 
 
-def update_glue_job(session: boto3.Session, glue_job: GlueJobConfig, assume_yes: bool = False, plan: bool = False) -> None:
-    """Apply dectl's managed fields to the Glue job definition, after showing what would change.
+def plan_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig, assume_yes: bool = False, plan: bool = False) -> dict | None:
+    """Everything about a definition update that can refuse: build it, show it, confirm it.
 
     Terraform owns these jobs once a pipeline is established, so an UpdateJob that silently
     rewrites Role/Connections/DefaultArguments is how dectl's config drifts from the real
-    definition. When nothing dectl manages differs, skip the call entirely — the steady state
-    is then a pure code push with no drift surface at all."""
+    definition. When nothing dectl manages differs, None comes back and the caller skips the
+    call entirely — the steady state is then a pure code push with no drift surface at all.
+
+    Everything that can refuse lives here rather than beside the apply, so a caller gets the
+    refusals out of the way before it writes anything. `build_job_update` exits on a
+    max_capacity Glue would reject, and the confirmation can be declined; either landing after a
+    script upload leaves ScriptLocation pointing at code the user was then told not to deploy."""
     glue = session.client('glue')
     existing = glue.get_job(JobName=glue_job.name)['Job']
     job_update = build_job_update(existing, glue_job)
@@ -145,16 +254,19 @@ def update_glue_job(session: boto3.Session, glue_job: GlueJobConfig, assume_yes:
     changes = job_definition_changes(existing, job_update)
     if not changes:
         info(f'{glue_job.name}: job definition unchanged')
-        return
+        return None
 
     render_job_changes(glue_job.name, changes)
 
     if plan:
-        return
+        return None
     if not assume_yes:
         confirm_or_exit('apply these job definition changes?')
+    return job_update
 
-    glue.update_job(JobName=glue_job.name, JobUpdate=job_update)
+
+def apply_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig, job_update: dict) -> None:
+    session.client('glue').update_job(JobName=glue_job.name, JobUpdate=job_update)
     success(f'updated job {glue_job.name}')
 
 
@@ -236,16 +348,25 @@ def job_run_to_row(run: dict) -> list[str]:
     ]
 
 
-def make_glue_job_app(pipeline_name: str, alias: str, job_config: GlueJobConfig, config: DectlConfig) -> typer.Typer:
+def make_glue_job_app(
+    pipeline_name: str, alias: str, job_config: GlueJobConfig, pipeline: PipelineConfig, config: DectlConfig
+) -> typer.Typer:
     """Build the per-job sub-app: `dectl PIPELINE glue <alias> <verb>`.
 
     Verbs close over this job's config and resolve {env} at call time (never at import), so the
-    active --env is respected. The sub-app help doubles as an info panel for the job."""
+    active --env is respected. The sub-app help doubles as an info panel for the job.
+
+    The panel is a third renderer of the destination the other two agree on, so it goes through
+    `join_uri` like they do. It shows the config as written, `{env}` and all, and names the
+    command that resolves it — the panel is built before `--env` is parsed, so a resolved name
+    here would be the default environment's under any other."""
+    destinations = configured_uris(job_config) or 'no scripts configured'
     job_app = typer.Typer(
         no_args_is_help=True,
         help=(
             f'Glue job [bold]{alias}[/bold] → {job_config.name}\n\n'
-            f'Scripts: {", ".join(job_config.scripts)} · bucket: s3://{job_config.script_bucket}/{job_config.script_prefix}/'
+            f'Scripts upload to: {destinations}\n\n'
+            f'As configured. Run "dectl {pipeline_name} list" for the active environment.'
         ),
     )
 
@@ -272,10 +393,15 @@ def make_glue_job_app(pipeline_name: str, alias: str, job_config: GlueJobConfig,
         from dectl.session import make_session
 
         job = resolved()
+        # Resolve and check before anything reaches AWS, so --plan refuses what deploy refuses.
+        sources = resolve_scripts(pipeline_name, pipeline, alias)
         session = make_session(config)
-        if not plan:
-            upload_scripts(session, job)
-        update_glue_job(session, job, assume_yes=yes, plan=plan)
+        job_update = plan_glue_job_update(session, job, assume_yes=yes, plan=plan)
+        if plan:
+            return
+        upload_scripts(session, job, sources)
+        if job_update is not None:
+            apply_glue_job_update(session, job, job_update)
 
     @job_app.command(epilog=f'Example:\n\ndectl {pipeline_name} glue {alias} run --follow')
     def run(
@@ -360,7 +486,7 @@ def make_glue_job_app(pipeline_name: str, alias: str, job_config: GlueJobConfig,
     return job_app
 
 
-def make_glue_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Typer:
+def make_glue_app(pipeline_name: str, pipeline: PipelineConfig, config: DectlConfig) -> typer.Typer:
     glue_jobs = pipeline.glue_jobs
     alias_list = ', '.join(glue_jobs.keys()) or '(none configured)'
 
@@ -370,7 +496,7 @@ def make_glue_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Ty
     )
     for alias, job_config in glue_jobs.items():
         glue_app.add_typer(
-            make_glue_job_app(pipeline_name, alias, job_config, config),
+            make_glue_job_app(pipeline_name, alias, job_config, pipeline, config),
             name=alias,
             rich_help_panel='Jobs',
         )

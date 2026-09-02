@@ -1,18 +1,31 @@
+import io
 import json
+import zipfile
 from datetime import datetime
+from types import SimpleNamespace
 
+import pytest
+import typer
 from botocore.exceptions import ClientError
 from botocore.exceptions import ReadTimeoutError
-from typer.testing import CliRunner
 
 from dectl.commands.lambda_ import make_lambda_app
+from dectl.commands.lambda_ import zip_lambda
 from dectl.config import DectlConfig
+from dectl.config import PipelineConfig
+from dectl.config import declared_paths
+from dectl.config import pipeline_value_faults
+from dectl.config import resolve_from_root
+from dectl.env import active_environment
+from dectl.env import substitute_env
 from dectl.invoke import DURABLE_SYNC_CAP_SECONDS
 from dectl.invoke import EVENT_ACK_TIMEOUT_SECONDS
 from dectl.invoke import INVOKE_TIMEOUT_MARGIN_SECONDS
 from dectl.invoke import timed_out_message
+from dectl.values import ValueSite
+from tests.conftest import RefusalRunner
 
-runner = CliRunner()
+runner = RefusalRunner()
 
 # Executions are keyed by the resolved version, never the alias — an alias name never appears in
 # a durable execution ARN.
@@ -444,3 +457,195 @@ def test_durable_logs_scope_to_the_resolved_execution(monkeypatch):
     assert logs_client.calls[0]['filterPattern'] == f'"{DURABLE_ARN}"'
     assert logs_client.calls[0]['logGroupName'] == '/aws/lambda/fn'
     assert logs_client.calls[0]['endTime'] > logs_client.calls[0]['startTime']
+
+
+def test_zip_holds_the_resolved_directorys_files_at_the_archive_root(tmp_path):
+    source = tmp_path / 'checkout' / 'modules' / 'code'
+    source.mkdir(parents=True)
+    (source / 'handler.py').write_text('def handler(event, context): pass')
+    (source / 'vendor').mkdir()
+    (source / 'vendor' / 'lib.py').write_text('x = 1')
+    pipeline = PipelineConfig.model_validate(
+        {'resolve_paths_from': str(tmp_path / 'checkout'), 'lambdas': {'fn': {'name': 'n', 'source_dir': 'modules/code'}}}
+    )
+
+    zip_path = zip_lambda(resolve_from_root(pipeline, pipeline.lambdas['fn'].source_dir))
+
+    with zipfile.ZipFile(zip_path) as archive:
+        assert sorted(archive.namelist()) == ['handler.py', 'vendor/lib.py']
+
+
+class RecordingLambdaClient:
+    """Enough of the Lambda API for a deploy, recording what it was sent."""
+
+    def __init__(self) -> None:
+        self.code: bytes | None = None
+        self.published: list[str] = []
+        self.aliases: list[tuple[str, str]] = []
+
+    def update_function_code(self, FunctionName, ZipFile):
+        self.code = ZipFile
+
+    def get_waiter(self, name):
+        # Real botocore raises `ValueError: Waiter does not exist` for a name it does not know,
+        # so a fake handing back a waiter for anything lets a wrong name ship green. `deploy
+        # --publish` passes the version-suffixed one, which is exactly where a typo would live.
+        if name != 'function_updated_v2':
+            raise ValueError(f'Waiter does not exist: {name}')
+        return SimpleNamespace(wait=lambda **kwargs: None)
+
+    def publish_version(self, FunctionName):
+        self.published.append(FunctionName)
+        return {'Version': '7'}
+
+    def update_alias(self, FunctionName, Name, FunctionVersion):
+        self.aliases.append((Name, FunctionVersion))
+
+
+def deploy_app(monkeypatch, tmp_path, client, source_dir: str = 'code'):
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '1'},
+            'pipelines': {
+                'proj': {
+                    'resolve_paths_from': str(tmp_path),
+                    'lambdas': {'notifier': {'name': 'salesdata-{env}-notifier', 'source_dir': source_dir, 'live_alias': 'live'}},
+                }
+            },
+        }
+    )
+    monkeypatch.setattr('dectl.session.make_session', lambda _config: FakeSession(client))
+    return make_lambda_app('proj', config.pipelines['proj'], config)
+
+
+def test_lambda_deploy_publishes_the_zip_and_moves_the_alias(monkeypatch, tmp_path):
+    # The write path, end to end. Replacing `resolve_from_root(...)` with `Path(fn.source_dir)`
+    # left the whole suite green, and that mutation restores the pre-branch behaviour of the
+    # feature's headline case: the deploy reading from wherever it was invoked.
+    (tmp_path / 'code').mkdir()
+    (tmp_path / 'code' / 'handler.py').write_text('def handler(event, context): pass')
+    client = RecordingLambdaClient()
+    app = deploy_app(monkeypatch, tmp_path, client)
+
+    result = runner.invoke(app, ['notifier', 'deploy', '--publish'], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    with zipfile.ZipFile(io.BytesIO(client.code)) as archive:
+        assert archive.namelist() == ['handler.py']
+    assert client.published == ['salesdata-dev-notifier']
+    assert client.aliases == [('live', '7')]
+
+
+def test_lambda_deploy_refuses_a_missing_source_and_writes_nothing(monkeypatch, tmp_path):
+    # A refusal dectl chose, not an exception reaching the runner: CliRunner reports 1 for both,
+    # so `exit_code == 1` beside `code is None` would be satisfied by any crash before the write.
+    client = RecordingLambdaClient()
+    app = deploy_app(monkeypatch, tmp_path, client, source_dir='modules/absent')
+
+    result = runner.invoke(app, ['notifier', 'deploy'])
+
+    assert isinstance(result.exception, SystemExit)
+    assert result.exit_code == 1
+    assert client.code is None
+
+
+def test_lambda_deploy_reports_the_config_fault_before_building_a_session(monkeypatch, tmp_path):
+    # A session is built from the AWS profile, and botocore reports a missing one as a
+    # traceback naming the profile. Ordering the session first meant a box missing the checkout
+    # was told about its profile instead, and the machine missing one is usually missing both.
+    # The fake refuses to be built for the same reason the real one does, because a fake that
+    # hands back a session cannot show which of the two the door reached first.
+    def refuse(_config):
+        raise RuntimeError('ProfileNotFound: the config profile (no-such-profile) could not be found')
+
+    monkeypatch.setattr('dectl.session.make_session', refuse)
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '1'},
+            'pipelines': {
+                'proj': {
+                    'resolve_paths_from': str(tmp_path / 'absent-checkout'),
+                    'lambdas': {'notifier': {'name': 'n', 'source_dir': 'code'}},
+                }
+            },
+        }
+    )
+    app = make_lambda_app('proj', config.pipelines['proj'], config)
+
+    result = runner.invoke(app, ['notifier', 'deploy'])
+
+    assert isinstance(result.exception, SystemExit)
+    assert result.exit_code == 1
+
+
+def test_the_lambda_door_names_the_same_site_config_validate_does(tmp_path):
+    # Which pipeline, which alias, which config key — asserted on the row rather than on the
+    # sentence it renders to. A bare path cannot say which `notifier` it meant when several
+    # pipelines carry one.
+    pipeline = PipelineConfig.model_validate(
+        {'resolve_paths_from': str(tmp_path), 'lambdas': {'notifier': {'name': 'n', 'source_dir': 'modules/absent'}}}
+    )
+
+    faults = pipeline_value_faults('proj', pipeline, on_disk=True, resource='lambda', alias='notifier')
+
+    assert [(f.pipeline, f.site) for f in faults] == [('proj', ValueSite('lambda', 'notifier', 'source_dir'))]
+
+
+def test_pycache_is_left_out_of_the_zip(tmp_path):
+    source = tmp_path / 'code'
+    (source / '__pycache__').mkdir(parents=True)
+    (source / 'handler.py').write_text('x')
+    (source / '__pycache__' / 'handler.cpython-313.pyc').write_text('bytecode')
+
+    zip_path = zip_lambda(source)
+
+    with zipfile.ZipFile(zip_path) as archive:
+        assert archive.namelist() == ['handler.py']
+
+
+def test_zipping_a_missing_directory_exits_rather_than_shipping_an_empty_archive(tmp_path):
+    with pytest.raises(typer.Exit) as exit_info:
+        zip_lambda(tmp_path / 'not-here')
+
+    assert exit_info.value.exit_code == 1
+
+
+def test_zipping_a_file_exits_rather_than_shipping_an_empty_archive(tmp_path):
+    # rglob on a file yields nothing, so a source_dir pointing at a file would upload a valid
+    # but empty archive and replace the function's code with nothing.
+    handler = tmp_path / 'handler.py'
+    handler.write_text('x')
+
+    with pytest.raises(typer.Exit) as exit_info:
+        zip_lambda(handler)
+
+    assert exit_info.value.exit_code == 1
+
+
+def test_the_lambda_deploy_resolves_the_path_config_validate_checked(monkeypatch, tmp_path):
+    # `resolve_from_root` substitutes `{env}` itself, so it takes the raw config value. Handing
+    # it an already-rendered field substitutes twice, and the deploy then zips a directory the
+    # walk never checked.
+    #
+    # The two agree for every environment name that does not itself contain the token, which is
+    # why an ordinary name cannot show the difference. The property is that they agree for any
+    # name, so the one used here is a name that tells them apart.
+    monkeypatch.setattr(active_environment, 'name', 'a{env}b')
+    source = tmp_path / 'code' / 'a{env}b'
+    source.mkdir(parents=True)
+    (source / 'handler.py').write_text('def handler(event, context): pass')
+
+    pipeline = PipelineConfig.model_validate(
+        {'resolve_paths_from': str(tmp_path), 'lambdas': {'fn': {'name': 'n', 'source_dir': 'code/{env}'}}}
+    )
+
+    # The walk substitutes once and resolves what it substituted.
+    walked = [p.value for p in declared_paths(pipeline) if p.site.field == 'source_dir']
+    assert walked == ['code/a{env}b']
+    assert resolve_from_root(pipeline, walked[0]) == source
+    assert pipeline_value_faults('p', pipeline, on_disk=True) == []
+
+    # The deploy verb substitutes the field it reads, and lands on the same directory. Passing
+    # the raw value here, or the rendered one to a resolver that substitutes again, gives
+    # `code/aa{env}bb` — a directory the walk never checked and the deploy would have zipped.
+    assert resolve_from_root(pipeline, substitute_env(pipeline.lambdas['fn'].source_dir)) == source

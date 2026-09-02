@@ -293,7 +293,8 @@ resolved path.
 dectl config init        # write a starter config (fails if one already exists)
 dectl config example     # print a full example of every option, for side-by-side reference
 dectl config edit        # open it in $VISUAL / $EDITOR (seeds one from the template if missing)
-dectl config validate    # check it parses and matches the schema
+dectl config validate    # check it parses, matches the schema, and its paths are usable
+                         # add --json for {outcome, unusable_values}
 dectl config show        # resolved pipelines with alias -> AWS name mapping
 dectl config path        # print the config file path
 ```
@@ -302,3 +303,73 @@ Unknown keys are rejected, so `config validate` catches a typo like `step_functi
 instead of silently ignoring it. `config example` prints to stdout (highlighted in a
 terminal, plain when redirected), so you can display the full reference in one pane
 while editing the real config in another.
+
+### Running from anywhere: `resolve_paths_from`
+
+Every read talks to AWS and needs no local file, so a read runs from any directory.
+Deploys are the exception: a Glue job's `scripts` and a Lambda's `source_dir` are paths,
+and without `resolve_paths_from` they resolve from the directory you happen to be standing
+in.
+
+Give a pipeline a `resolve_paths_from` and they resolve from that instead:
+
+```yaml
+pipelines:
+  salesdata:
+    resolve_paths_from: ~/code/salesdata
+    lambdas:
+      notifier:
+        name: salesdata-{env}-notifier
+        source_dir: modules/lambda/notifier/code
+```
+
+`dectl salesdata lambda notifier deploy` now zips `~/code/salesdata/modules/lambda/notifier/code`
+from wherever you run it. With several pipelines each naming their own directory, one
+config drives every checkout's deploys and you never change directory to do it.
+
+The value must be absolute or start with `~`. A relative one would resolve against the
+working directory, which is the dependency the key removes, so it fails validation. A
+`{env}` token in it is substituted like any other name.
+
+A `source_dir` may be absolute and sit outside that directory — it is zipped and uploaded
+as bytes, so nothing else depends on where it came from. A glue `scripts` entry may not:
+its S3 key is built from the string you write, and S3 stores that string as given. So a
+script and its `script_prefix`, the two halves of that key, are each written as plain
+relative segments — `jobs/copy.py`. Anything else spells one file two ways: the key carries
+the `..`, the `./` or the doubled separator literally, so a second machine writing
+`jobs/copy.py` for the same script writes a different object, and a lifecycle rule or
+Terraform data source keyed on `scripts/` sees neither. `config validate` and the deploy
+both refuse it. The config still loads either way,
+which is what keeps the rest of the CLI available to tell you.
+
+A glue job that declares no scripts is refused for the same reason: a Glue job is defined
+by a `ScriptLocation`, and there is none to build. A lambda `source_dir` that exists and
+holds nothing is refused too — it zips to a valid empty archive, which replaces the
+function's code with nothing.
+
+Bucket names are checked the same way, on any machine. A `script_bucket` and every entry
+under `buckets` has to be a name S3 accepts, and the check reads the name the active
+environment resolves to, since that is the one that reaches S3. The rule has more arms than
+are worth reading here, and `dectl config validate` prints all of them beside the name it
+refused — reserved affixes included, which is where a name that looks fine is rejected.
+
+Omit `resolve_paths_from` and nothing changes: paths resolve from the working directory,
+and a deploy has to run from the checkout.
+
+`config validate` checks a pipeline that names `resolve_paths_from` all the way down — the
+directory, every script, every `source_dir` — and says of each one whether it is absent or
+present with the wrong type, since those have opposite fixes. For a pipeline that names
+none it still checks how the glue keys are written and whether the bucket names are ones S3
+accepts, both answerable on any machine; only whether a file is present needs a directory
+to look in.
+
+An absent directory is reported on its own. Every path beneath it would carry the same one
+cause, and ten lines each naming a file name that cause in none of them.
+
+`config show` prints the resolved directory for every pipeline, with `~` expanded and
+`{env}` substituted, and marks the ones falling back to the working directory. It prints
+the resolved path of every declared path beneath it, named by the config key it came from,
+so the file a deploy would send is on the page rather than inferred. `config show --json`
+and `list --json` carry the same under `resolve_paths_from` and a `paths` block per
+resource. `validate --json` emits an object with `outcome` and `unusable_values`, so a
+caller can tell a clean config from one that could not be read at all.

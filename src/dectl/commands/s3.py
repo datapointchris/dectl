@@ -8,10 +8,16 @@ from typing import Annotated
 import typer
 
 from dectl.config import DectlConfig
+from dectl.config import PipelineConfig
 from dectl.env import substitute_env
 from dectl.env import warn_if_environment_had_no_effect
 from dectl.output import error
 from dectl.output import success
+from dectl.values import UnusableValue
+from dectl.values import ValueSite
+from dectl.values import bucket_fault
+from dectl.values import bucket_uri
+from dectl.values import refuse_unusable_values
 
 # Where mounted buckets land. A short, top-level path under $HOME so a mounted bucket is
 # easy to cd into (~/buckets/PIPELINE/ALIAS); the pipeline segment namespaces buckets
@@ -28,6 +34,34 @@ def shell_variable_name(prefix: str, alias: str) -> str:
     return re.sub(r'[^a-z0-9_]', '_', f'{prefix}_{alias}'.lower())
 
 
+def usable_bucket(pipeline_name: str, alias: str, template: str) -> str:
+    """This bucket's name for the active environment, or exit naming what is wrong with it.
+
+    Run at every verb that hands the name to something outside dectl, not only at `config
+    validate`. A name S3 cannot address is refused where nobody is acting on it and accepted
+    where somebody is: `s3 export` is documented for `eval "$(...)"`, so the name lands in the
+    caller's shell, and `mount` passes it to `mount-s3`, whose message names neither the config
+    key nor the pipeline.
+
+    The refusal goes to stderr and takes the exit code with it, so a caller evaluating stdout
+    evaluates nothing rather than a broken assignment.
+
+    Built as an `UnusableValue` and handed to the shared exit, rather than composed here. The
+    label, the wording, the quoting of the written value and the remedy line are then the ones
+    `config validate` prints for the same config — a door that composes its own agrees with
+    the other on the day it is written and on no day after. The site is what `declared_names`
+    files a bucket under, `FIELD_RESOURCE` included, so renaming that collection moves both."""
+    resolved = substitute_env(template)
+    fault = bucket_fault(resolved)
+    if fault:
+        site = ValueSite(PipelineConfig.site_resource('buckets'), alias, 'buckets')
+        refuse_unusable_values(
+            [UnusableValue(pipeline=pipeline_name, site=site, path=None, fault=fault, configured=resolved)],
+            exit_code=1,
+        )
+    return resolved
+
+
 def require_linux(pipeline_name: str) -> None:
     if platform.system() != 'Linux':
         error(f's3 mount is Linux-only (needs mount-s3 / FUSE). On {platform.system()}, use "dectl {pipeline_name} s3 export".')
@@ -41,19 +75,19 @@ def make_s3_bucket_app(pipeline_name: str, alias: str, bucket_template: str, con
     because it spans every bucket and has no single alias."""
     bucket_app = typer.Typer(
         no_args_is_help=True,
-        help=f'Bucket [bold]{alias}[/bold] → s3://{bucket_template}',
+        help=f'Bucket [bold]{alias}[/bold] → {bucket_uri(bucket_template)}',
     )
 
     def resolved_bucket() -> str:
         warn_if_environment_had_no_effect(bucket_template)
-        return substitute_env(bucket_template)
+        return usable_bucket(pipeline_name, alias, bucket_template)
 
     @bucket_app.command(epilog=f'Example:\n\naws s3 cp "$(dectl {pipeline_name} s3 {alias} uri)/file.txt" .')
     def uri() -> None:
         """Print this bucket's bare s3:// URI (no markup), for use in $(...) and scripts."""
         # Bare print(), not the rich console: the output is meant for command substitution,
         # so it must carry no markup or ANSI escapes.
-        print(f's3://{resolved_bucket()}')
+        print(bucket_uri(resolved_bucket()))
 
     @bucket_app.command(epilog=f'Example:\n\ndectl {pipeline_name} s3 {alias} mount')
     def mount() -> None:
@@ -82,7 +116,7 @@ def make_s3_bucket_app(pipeline_name: str, alias: str, bucket_template: str, con
         if result.returncode != 0:
             error(result.stderr.strip() or 'mount-s3 failed')
             raise typer.Exit(1)
-        success(f'mounted s3://{bucket} at {mountpoint}')
+        success(f'mounted {bucket_uri(bucket)} at {mountpoint}')
 
     @bucket_app.command(epilog=f'Example:\n\ndectl {pipeline_name} s3 {alias} unmount')
     def unmount() -> None:
@@ -145,8 +179,11 @@ def make_s3_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Type
         # free of markup and ANSI escapes. Bucket names are DNS-safe, so single-quoting suffices.
         var_prefix = prefix if prefix is not None else pipeline_name
         warn_if_environment_had_no_effect(list(buckets.values()))
-        for alias, bucket in buckets.items():
-            print(f"export {shell_variable_name(var_prefix, alias)}='s3://{substitute_env(bucket)}'")
+        # Every bucket is checked before the first line is printed, so a refusal cannot leave
+        # the caller's shell holding half the assignments.
+        usable = {alias: usable_bucket(pipeline_name, alias, bucket) for alias, bucket in buckets.items()}
+        for alias, bucket in usable.items():
+            print(f"export {shell_variable_name(var_prefix, alias)}='{bucket_uri(bucket)}'")
 
     for alias, bucket_template in buckets.items():
         s3_app.add_typer(

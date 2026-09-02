@@ -321,11 +321,10 @@ def tail_glue_run(logs_client, run_id: str, started_at: int, follow: bool = True
     that are each load-bearing:
 
     * `logStreamNamePrefix=<run id>` picks out this run's streams without naming them, so nothing
-      waits for a stream to be created. The previous approach polled describe_log_streams for the
-      output stream and then, sequentially, for the error stream — and a job that never writes to
-      stderr has no error stream to find, so it burned a 120-second timeout in silence. Pinning
-      the stream list up front also meant a traceback landing in an error stream created later in
-      the run was never shown at all.
+      waits for a stream to be created. Polling describe_log_streams instead costs a job that
+      never writes to stderr its whole timeout in silence, because no error stream exists for it
+      to wait on; and it pins the stream list, so a traceback landing in an error stream created
+      later in the run is never shown at all.
     * `started_at` bounds the scan. Filtering by prefix alone is *not* enough: filter_log_events
       scans forward from startTime, and left unset that is the start of the group's retention.
       Against a group holding every Glue run in the account it pages through months of other
