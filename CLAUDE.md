@@ -114,10 +114,20 @@ which the docstrings do not state.
   — and every one of those reads as success. `test_every_string_field_is_classified` makes a new
   field a decision rather than a default: it is in one of the three, or named in
   `UNCHECKED_FIELDS` with the reason.
-- **Declaring is the whole edit.** Checking, resolution, the env-guard exclusion, the `paths`
-  block in `--json` and the printed row all come from the declaration. Nothing needs adding to
-  `pipeline_to_dict` or `render_pipeline` — `configuration.md` § "Every tool prints its resolved
-  config" is why: a row is guaranteed by something that runs, not by remembering to add one.
+- **Every consumer of a declaration reads `declaring_members`, which is the one walk.** It
+  yields the pipeline itself and then each resource, so the three member shapes — held in a
+  dict, held as a bare field, declared on the pipeline — reach every consumer or none. A
+  consumer that traverses for itself reaches a narrower set, and the failure is silent in both
+  directions: a value nothing enumerates is a value nothing checks, and nothing checked reports
+  no fault. `test_every_declaration_consumer_sees_every_member_shape` is what holds it.
+- **Adding a path field to a resource that already has a section is the whole edit.** Checking,
+  resolution, the env-guard exclusion, the `paths` block in `--json` and the printed row all
+  come from the declaration, so nothing needs adding to `pipeline_to_dict` or `render_pipeline`.
+  A row guaranteed by something that runs is a row nobody has to remember.
+  **A new resource *kind* is more than that** — its `--json` and human sections carry per-kind
+  AWS fields and are written out, so it needs both renderers, `resource_types`, and the pipeline
+  loop in `main.py`. `test_every_resolved_path_reaches_both_renderers` is what makes a kind with
+  declared paths and no section a red test rather than a missing row.
 - **A new `ConfigFault` needs a `FAULT_WORDING` entry, a decision about `SPELLING_FAULTS`, and
   a line in `recovery_lines`.** The first two fail in opposite directions: a missing wording
   raises where a reader needs the answer, and a missing `SPELLING_FAULTS` entry silently reports
@@ -126,6 +136,9 @@ which the docstrings do not state.
 - **`join_uri` joins three strings and all three are guarded.** `key_fault` covers the prefix
   and the script, `bucket_fault` covers the bucket. A guard over some operands of a composed
   value and not the rest is the defect this whole surface keeps producing.
+- **`values.s3_uri` is the only place `s3://…` is spelled.** `join_uri`, `script_uri`, the
+  upload's own report and the per-alias help panel all reach it. A second spelling is a second
+  rendering of one location, and it drifts from the object the deploy actually wrote.
 - **Every value naming a file or directory goes through `resolve_from_root(pipeline, value)`,
   never `Path(value)`** — missing it reintroduces the dependency on where dectl was invoked,
   silently. `pipeline_root` is the fallback half: no `resolve_paths_from` means `Path.cwd()`.

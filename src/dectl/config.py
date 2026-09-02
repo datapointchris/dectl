@@ -328,7 +328,7 @@ def resource_members(pipeline: PipelineConfig) -> list[tuple[str, str, ResourceM
     A resource kind added to `PipelineConfig` is enumerated here without this being edited, so
     the enumerations below cannot be missing one. A resource held by alias contributes its
     alias; one held as a bare field — `monitor` is the shape — contributes an empty alias, and
-    requiring a `dict` left any declaration on such a field inert with nothing going red.
+    a walk requiring a `dict` leaves any declaration on such a field inert, with nothing going red.
 
     `buckets` is a plain `dict[str, str]` and holds no model, so it is not reached here. The
     pipeline itself declares it, and `declaring_members` is what puts the pipeline in the
@@ -349,11 +349,9 @@ def declaring_members(pipeline: PipelineConfig) -> list[tuple[str, str, Resource
     the scope guard all read this, so a member shape reaches every consumer or none of them.
     Each consumer filters by the declaration it cares about and by nothing else.
 
-    Walking separately is what this replaces. Four enumerations each had their own traversal
-    and three were wrong for a shape the config already allows: a declaration on the pipeline
-    was invisible to two of them, and a member held as a bare field was misindexed by a third.
-    None of those went red, because a consumer that never sees a value reports no fault for
-    it."""
+    A consumer that traverses for itself reaches a narrower set, and every way of being wrong
+    about it is silent: a declaration the walk does not yield is a value nothing checks, and
+    nothing checked reports no fault."""
     return [('', '', pipeline), *resource_members(pipeline)]
 
 
@@ -401,9 +399,9 @@ def declared_keys(pipeline: PipelineConfig) -> list[DeclaredKey]:
     """Every configured string a glue S3 key is built from.
 
     `script_key` joins two of them — the prefix and the script — so both are subject to the
-    same spelling rules, and checking only the operand a bug was found in leaves the other
-    silent. A prefix names nothing on disk, so it is a key and not a path; a script is both,
-    and appears here and in `declared_paths`."""
+    same spelling rules, and checking one operand and not the other leaves the second silent.
+    A prefix names nothing on disk, so it is a key and not a path; a script is both, and
+    appears here and in `declared_paths`."""
     keys = []
     for site, member, field in declared_values(pipeline, 'KEY_FIELDS'):
         for value in as_values(getattr(member, field)):
@@ -512,9 +510,9 @@ def pipeline_value_faults(
         """Which (site, value) pairs already carry a fault, so nothing reports one twice.
 
         Read at each point a new fault class is about to be added, because what counts as
-        already-refused grows as the run goes on. Spelling it inline at each of those points
-        made the two reads look independent, and a fault class added between them would have
-        produced a duplicate row rather than an error."""
+        already-refused grows as the run goes on. Spelled inline at each of those points the
+        reads look independent, and a fault class added between two of them produces a
+        duplicate row rather than an error."""
         return {(problem.site, problem.configured) for problem in found}
 
     # Machine-independent, so these run whatever `on_disk` says and whatever the root turns out
@@ -630,7 +628,7 @@ def config_error_outcome(exc: yaml.YAMLError | ValidationError) -> str:
     """Which of the two load failures this is, as `validate --json` publishes it.
 
     The same discriminator the headline reads, so the machine reader and the human reader are
-    told apart the same way. Folding both into one outcome left the `--json` caller — the one
+    told apart the same way. Folding both into one outcome leaves the `--json` caller — the one
     who cannot see the stderr sentence — unable to tell a file YAML could not parse from one
     that parsed and named the wrong keys, and those have different fixes."""
     return 'invalid_yaml' if isinstance(exc, yaml.YAMLError) else 'invalid_schema'

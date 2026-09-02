@@ -10,6 +10,7 @@ from dectl.env import aws_names_of
 from dectl.env import substitute_env
 from dectl.env import warn_if_environment_had_no_effect
 from dectl.output import info
+from dectl.values import s3_uri
 
 
 def resource_types(pipeline: PipelineConfig) -> list[str]:
@@ -40,7 +41,7 @@ def aws_names_only(pipeline: PipelineConfig) -> dict[str, Any]:
     A resource held as a bare field rather than by alias — `monitor` is the shape — replaces its
     collection instead of being filed under an alias inside it. Filing it under the empty alias
     leaves the unfiltered original beside the filtered copy, and the guard reads the original,
-    so a `{env}` in a local path goes on silencing the warning it was meant to raise."""
+    so a `{env}` in a local path goes on silencing the warning it exists to raise."""
     dumped = aws_names_of(pipeline)
     for collection, alias, member in resource_members(pipeline):
         if alias:
@@ -53,11 +54,15 @@ def aws_names_only(pipeline: PipelineConfig) -> dict[str, Any]:
 def resolved_paths(pipeline: PipelineConfig) -> dict[tuple[str, str], dict[str, list[str]]]:
     """Every declared path of this pipeline, resolved, keyed by resource and alias then field.
 
-    Both renderers read this rather than walking the resource dicts themselves, so a field added
-    to a model's `PATH_FIELDS` is resolved *and displayed* without either of them being edited.
-    Keying the field as well is what makes the display derived — `configuration.md` § "Every
-    tool prints its resolved config": a row is guaranteed by something that runs, not by
-    remembering to add one.
+    Both renderers read this rather than walking the resource dicts themselves, so a path field
+    added to a model already in their sections is resolved *and displayed* without either of
+    them being edited. Keying the field as well is what makes that row derived: it is guaranteed
+    by something that runs rather than by someone remembering to add one.
+
+    A resource kind neither renderer has a section for is resolved here and displayed by
+    neither, because the sections carry per-kind AWS fields and cannot be generated from this.
+    `test_every_resolved_path_reaches_both_renderers` is what makes that a red test rather than
+    a silently missing row.
 
     The outer key is the pair rather than a `resource/alias` string, so nothing rebuilds what a
     `ValueSite` holds and an alias carrying a slash cannot collide with a different resource."""
@@ -146,7 +151,7 @@ def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
 
     for alias, job in pipeline.glue_jobs.items():
         info(f'  glue/{alias}: {substitute_env(job.name)}')
-        info(f'    bucket: s3://{substitute_env(job.script_bucket)}/{substitute_env(job.script_prefix)}/')
+        info(f'    bucket: {s3_uri(substitute_env(job.script_bucket), substitute_env(job.script_prefix) + "/")}')
         print_paths('glue', alias)
     for alias, fn in pipeline.lambdas.items():
         # Worth calling out inline: a durable function carries a different set of verbs.

@@ -22,6 +22,7 @@ from dectl.output import info
 from dectl.output import success
 from dectl.prompt import confirm_or_exit
 from dectl.values import refuse_unusable_values
+from dectl.values import s3_uri
 
 RUN_STATE_COLORS = {'SUCCEEDED': 'green', 'FAILED': 'red', 'STOPPED': 'red', 'TIMEOUT': 'red', 'RUNNING': 'cyan'}
 
@@ -36,10 +37,10 @@ READ_ONLY_KEYS = ('Name', 'CreatedOn', 'LastModifiedOn', 'ProfileName', 'Allocat
 def join_uri(bucket: str, prefix: str, script: str) -> str:
     """The S3 URI of one script, from the three strings it is built out of.
 
-    The one place the shape is written. `script_uri` passes substituted operands and the
-    per-alias help panel passes raw ones, so the two cannot spell the destination differently —
-    and a change to the shape reaches both."""
-    return f's3://{bucket}/{prefix}/{script}'
+    The key's two halves joined as `script_key` joins them, handed to `s3_uri` for the shape.
+    The per-alias help panel reaches this with raw operands, because it is built before `--env`
+    is parsed; every other caller goes through `script_uri` with substituted ones."""
+    return s3_uri(bucket, f'{prefix}/{script}')
 
 
 def script_key(glue_job: GlueJobConfig, script: str) -> str:
@@ -54,7 +55,7 @@ def script_key(glue_job: GlueJobConfig, script: str) -> str:
 def script_uri(glue_job: GlueJobConfig, script: str) -> str:
     """Where one script lands, built from `script_key` so `ScriptLocation` cannot name a
     different object from the one the upload wrote."""
-    return f's3://{substitute_env(glue_job.script_bucket)}/{script_key(glue_job, script)}'
+    return s3_uri(substitute_env(glue_job.script_bucket), script_key(glue_job, script))
 
 
 class ResolvedScript(NamedTuple):
@@ -129,9 +130,12 @@ def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: lis
     s3 = session.client('s3')
     bucket = substitute_env(glue_job.script_bucket)
     for source in sources:
-        key = script_key(glue_job, source.name)
-        s3.upload_file(Filename=str(source.path), Bucket=bucket, Key=key)
-        success(f'uploaded {source.path} -> s3://{bucket}/{key}')
+        # Reported through `script_uri` rather than rebuilt from the two operands beside it.
+        # Spelling the shape here as well makes this line and `ScriptLocation` two independent
+        # renderings of one URI, and a change to the shape then has this report a destination
+        # the job definition does not name.
+        s3.upload_file(Filename=str(source.path), Bucket=bucket, Key=script_key(glue_job, source.name))
+        success(f'uploaded {source.path} -> {script_uri(glue_job, source.name)}')
 
 
 def build_job_update(existing: dict, glue_job: GlueJobConfig) -> dict:

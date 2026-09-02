@@ -15,6 +15,7 @@ from dectl.env import render_env_model
 from dectl.pipeline_view import aws_names_only
 from dectl.pipeline_view import pipeline_to_dict
 from dectl.pipeline_view import render_pipeline
+from dectl.pipeline_view import resolved_paths
 from dectl.pipeline_view import resource_types
 
 
@@ -310,3 +311,33 @@ def test_a_root_token_does_not_silence_the_no_effect_warning(monkeypatch, capsys
     pipeline_to_dict('salesdata', config.pipelines['salesdata'])
 
     assert active_environment.warned_about_missing_placeholder
+
+
+def test_every_resolved_path_reaches_both_renderers():
+    # `resolved_paths` is driven by the declaration and both renderers look rows up in it by
+    # resource and alias. Their sections carry per-kind AWS fields, so they are written out
+    # rather than generated, and a resource kind without one is resolved and then displayed by
+    # neither. That is a missing row and nothing else goes red for it, so it goes red here.
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '1'},
+            'pipelines': {
+                'salesdata': {
+                    'resolve_paths_from': '/srv/salesdata',
+                    'glue_jobs': {'copy': {'name': 'j', 'script_bucket': 'b', 'scripts': ['c.py'], 'role': 'r'}},
+                    'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}},
+                    'step_functions': {'flow': {'name': 'm'}},
+                    'iceberg_tables': {'events': {'database': 'd', 'table': 't'}},
+                    'buckets': {'raw': 'sales-raw'},
+                }
+            },
+        }
+    )
+    pipeline = config.pipelines['salesdata']
+    published = pipeline_to_dict('salesdata', pipeline)
+
+    for (resource, alias), fields in resolved_paths(pipeline).items():
+        section = published.get(resource)
+        assert section is not None, f'{resource} has resolved paths and no section in --json'
+        assert alias in section, f'{resource}/{alias} has resolved paths and no row in --json'
+        assert section[alias]['paths'] == fields

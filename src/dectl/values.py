@@ -94,6 +94,17 @@ FAULT_WORDING = {
     ConfigFault.NOT_A_BUCKET_NAME: 'is not a name S3 will accept for a bucket',
 }
 
+
+def s3_uri(bucket: str, key: str) -> str:
+    """How an S3 location is spelled, from the bucket and the key.
+
+    The one place the shape is written. Four callers name a location — the upload's own report,
+    `ScriptLocation`, `--extra-py-files` and the per-alias help panel — and each spelling it out
+    is a rendering that can drift from the object the deploy actually wrote. They pass different
+    operands on purpose: the help panel is built before `--env` is parsed and passes raw ones."""
+    return f's3://{bucket}/{key}'
+
+
 # The form each spelling-checked value has to take, said once per kind. An error naming what is
 # wrong without naming what is right leaves the reader to guess, and these are the faults where
 # `config show` cannot help: it prints the resolved path, which has the malformation normalised

@@ -101,7 +101,7 @@ def aws_names_of(model: BaseModel) -> dict[str, Any]:
 
     `local_only_fields` is the subtraction that matters: a glue `scripts` entry is a path *and*
     the second operand of the S3 key, so `--env` changing it changes the object written and the
-    `ScriptLocation` naming it. Dropping every `PATH_FIELDS` member instead made the guard say
+    `ScriptLocation` naming it. Dropping every `PATH_FIELDS` member instead makes the guard say
     `--env` changed nothing about a job where it changes the file S3 holds."""
     if not isinstance(model, DeclaresValues):
         return model.model_dump()
