@@ -22,6 +22,7 @@ from dectl.config import PipelineConfig
 from dectl.config import config_value_faults
 from dectl.config import pipeline_value_faults
 from dectl.env import active_environment
+from dectl.env import render_env_model
 from dectl.values import ConfigFault
 from dectl.values import ValueSite
 from dectl.values import bucket_fault
@@ -398,7 +399,9 @@ def test_the_upload_and_the_job_definition_name_one_object(tmp_path, monkeypatch
     (tmp_path / 'jobs' / 'prod').mkdir(parents=True)
     (tmp_path / 'jobs' / 'prod' / 'copy.py').write_text('x')
     pipeline = glue_pipeline(str(tmp_path), ['jobs/{env}/copy.py'])
-    job = pipeline.glue_jobs['j']
+    # Rendered, as `deploy` hands it to both: `script_key` takes operands the caller has already
+    # substituted, so a raw job here would test a shape the verb never produces.
+    job = render_env_model(pipeline.glue_jobs['j'])
     s3 = FakeS3Client()
 
     upload_scripts(FakeS3Session(s3), job, resolve_scripts('proj', pipeline, 'j'))
@@ -414,7 +417,7 @@ def test_extra_py_files_name_the_same_objects_the_upload_wrote(tmp_path, monkeyp
     for leaf in ('main.py', 'util.py'):
         (tmp_path / 'prod' / leaf).write_text('x')
     pipeline = glue_pipeline(str(tmp_path), ['{env}/main.py', '{env}/util.py'])
-    job = pipeline.glue_jobs['j']
+    job = render_env_model(pipeline.glue_jobs['j'])
     s3 = FakeS3Client()
 
     upload_scripts(FakeS3Session(s3), job, resolve_scripts('proj', pipeline, 'j'))

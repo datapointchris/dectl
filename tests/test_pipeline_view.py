@@ -437,6 +437,7 @@ def test_the_deploy_and_both_renderers_name_one_destination():
 
     published = pipeline_to_dict('salesdata', config.pipelines['salesdata'])['glue']['copy']
 
-    assert script_uri(job, 'c-{env}.py') == 's3://b-dev/p-dev/c-dev.py'
+    rendered = render_env_model(job)
+    assert script_uri(rendered, rendered.scripts[0]) == 's3://b-dev/p-dev/c-dev.py'
     assert published['script_uris'] == ['s3://b-dev/p-dev/c-dev.py']
     assert '{env}' not in published['script_uris'][0]

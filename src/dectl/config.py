@@ -389,8 +389,13 @@ def script_key(glue_job: GlueJobConfig, script: str) -> str:
     The one place this is built. The upload, `ScriptLocation`, `--extra-py-files` and both
     renderers read it, and any two of them disagreeing means Glue fetches an object nothing
     wrote — or `config show` reports a destination the deploy does not write. Both halves are
-    substituted, because a `{env}` surviving into a key names an object that cannot exist."""
-    return join_key(substitute_env(glue_job.script_prefix), substitute_env(script))
+    substituted, because a `{env}` surviving into a key names an object that cannot exist.
+
+    Both operands arrive substituted, as `resolve_from_root`'s do. Substituting here instead
+    would render a value a caller may already have rendered, and the branch would then show two
+    conventions at once — whoever adds the next builder copies whichever one they opened, and
+    the double form is correct only while `substitute_env` stays idempotent."""
+    return join_key(glue_job.script_prefix, script)
 
 
 def declared_keys(pipeline: PipelineConfig) -> list[DeclaredKey]:

@@ -147,6 +147,12 @@ def make_lambda_function_app(
         """
         from dectl.session import make_session
 
+        # Before the refusal, because it is what raises the env-effect warning. A `--env` that
+        # changed no AWS name is exactly what a reader needs to know about a deploy, and a
+        # refusal that exits first means the one door acting on the wrong environment says
+        # nothing about it. The glue door orders it the same way.
+        fn = resolved()
+
         # Named the way `config validate` names it — which pipeline, which alias, which config
         # key — rather than as a bare path. `zip_lambda` refuses the same directory a moment
         # later and can only say the path, because the config key does not reach it.
@@ -164,7 +170,6 @@ def make_lambda_function_app(
         # rendered, so the deploy resolves exactly the directory the walk checked.
         source = resolve_from_root(pipeline, substitute_env(fn_config.source_dir))
 
-        fn = resolved()
         session = make_session(config)
         client = session.client('lambda')
         zip_path = zip_lambda(source)

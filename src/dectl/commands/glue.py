@@ -48,7 +48,7 @@ def join_uri(bucket: str, prefix: str, script: str) -> str:
 def script_uri(glue_job: GlueJobConfig, script: str) -> str:
     """Where one script lands, built from `script_key` so `ScriptLocation` cannot name a
     different object from the one the upload wrote."""
-    return s3_uri(substitute_env(glue_job.script_bucket), script_key(glue_job, script))
+    return s3_uri(glue_job.script_bucket, script_key(glue_job, script))
 
 
 class ResolvedScript(NamedTuple):

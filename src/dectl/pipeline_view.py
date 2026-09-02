@@ -1,6 +1,7 @@
 from typing import Any
 
 from dectl.config import ROOT_SITE
+from dectl.config import GlueJobConfig
 from dectl.config import PipelineConfig
 from dectl.config import declared_paths
 from dectl.config import pipeline_root
@@ -8,6 +9,7 @@ from dectl.config import resolve_from_root
 from dectl.config import resource_members
 from dectl.config import script_key
 from dectl.env import aws_names_of
+from dectl.env import render_env_model
 from dectl.env import substitute_env
 from dectl.env import warn_if_environment_had_no_effect
 from dectl.output import info
@@ -28,6 +30,17 @@ def resource_types(pipeline: PipelineConfig) -> list[str]:
     if pipeline.iceberg_tables:
         types.append('iceberg')
     return types
+
+
+def script_uris(job: GlueJobConfig) -> list[str]:
+    """Where every script of one job lands, for a reader rather than for a deploy.
+
+    The job is rendered once and the rendered fields are read, because `script_key` takes
+    operands a caller has already substituted. Both renderers show the same destination the
+    deploy writes, which is the point: two of the faults `config validate` reports are about
+    this composed value and no command rendered it."""
+    rendered = render_env_model(job)
+    return [s3_uri(rendered.script_bucket, script_key(rendered, script)) for script in rendered.scripts]
 
 
 def aws_names_only(pipeline: PipelineConfig) -> dict[str, Any]:
@@ -101,7 +114,7 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
                 # The composed destination, beside the two strings it is built from. Two of the
                 # faults `config validate` reports are about this value, and a reader refused
                 # over one otherwise has to join two fields by hand to see what was refused.
-                'script_uris': [s3_uri(substitute_env(job.script_bucket), script_key(job, script)) for script in job.scripts],
+                'script_uris': script_uris(job),
                 'paths': resolved.get(('glue', alias), {}),
             }
             for alias, job in pipeline.glue_jobs.items()
@@ -156,8 +169,8 @@ def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
 
     for alias, job in pipeline.glue_jobs.items():
         info(f'  glue/{alias}: {substitute_env(job.name)}')
-        for script in job.scripts:
-            info(f'    deploys to: {s3_uri(substitute_env(job.script_bucket), script_key(job, script))}')
+        for uri in script_uris(job):
+            info(f'    deploys to: {uri}')
         print_paths('glue', alias)
     for alias, fn in pipeline.lambdas.items():
         # Worth calling out inline: a durable function carries a different set of verbs.
