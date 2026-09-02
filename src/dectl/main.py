@@ -1,3 +1,5 @@
+import importlib.metadata
+import json
 from itertools import starmap
 from typing import Annotated
 from typing import Any
@@ -270,6 +272,38 @@ def reference() -> None:
 UPDATE_CONFIG = Config(tool='dectl', owner='datapointchris')
 
 
+def installed_commit() -> str | None:
+    """The git commit dectl was installed from, when it was installed from a ref.
+
+    uv records the resolved commit in `direct_url.json` for any git install, a pinned
+    tag included, which is how the fleet installs everything. A wheel from an index
+    carries no such file and gets None, so one implementation covers both."""
+    try:
+        text = importlib.metadata.distribution('dectl').read_text('direct_url.json')
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    if not text:
+        return None
+    return json.loads(text).get('vcs_info', {}).get('commit_id')
+
+
+def version_callback(asked: bool) -> None:
+    """`dectl --version`, in the one line every CLI here answers it with.
+
+    Eager, so it answers before the root callback resolves an environment or a
+    config — a tool that cannot say what it is because its config is unreadable
+    is the case this is most often reached for."""
+    if not asked:
+        return
+    try:
+        version = importlib.metadata.version('dectl')
+    except importlib.metadata.PackageNotFoundError:
+        version = 'unknown'
+    commit = installed_commit()
+    print(f'dectl {version}{f" @ {commit[:8]}" if commit else ""}')
+    raise typer.Exit()
+
+
 @app.command(rich_help_panel='Global commands')
 def update(
     check_only: Annotated[bool, typer.Option('--check', help='Report whether an update is available without installing it')] = False,
@@ -303,6 +337,10 @@ def main(
         bool,
         typer.Option('--no-input', help='Never prompt; fail naming the flag that would have answered.'),
     ] = False,
+    version: Annotated[
+        bool | None,
+        typer.Option('--version', callback=version_callback, is_eager=True, help='Show the installed version and exit.'),
+    ] = None,
 ) -> None:
     """[bold]dectl[/bold] — data engineering control for AWS pipelines.
 

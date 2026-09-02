@@ -130,6 +130,38 @@ def missing_config(monkeypatch):
     monkeypatch.setattr(dectl.main, 'CONFIG_ERROR', None)
 
 
+def test_version_is_one_line_naming_the_tool(monkeypatch):
+    monkeypatch.setattr(dectl.main.importlib.metadata, 'version', lambda _: '9.9.9')
+    monkeypatch.setattr(dectl.main, 'installed_commit', lambda: None)
+
+    result = runner.invoke(app, ['--version'])
+
+    assert result.exit_code == 0
+    assert result.stdout.splitlines() == ['dectl 9.9.9']
+
+
+def test_version_carries_the_commit_when_installed_from_a_ref(monkeypatch):
+    monkeypatch.setattr(dectl.main.importlib.metadata, 'version', lambda _: '9.9.9')
+    monkeypatch.setattr(dectl.main, 'installed_commit', lambda: 'abcdef1234567890')
+
+    result = runner.invoke(app, ['--version'])
+
+    assert result.stdout.splitlines() == ['dectl 9.9.9 @ abcdef12']
+
+
+def test_version_answers_a_config_that_does_not_load(invalid_config, monkeypatch):
+    # The reason the option is eager. A tool that cannot say which build it is because its
+    # config is unreadable is the case a version is most often asked for.
+    monkeypatch.setattr(dectl.main.importlib.metadata, 'version', lambda _: '9.9.9')
+    monkeypatch.setattr(dectl.main, 'installed_commit', lambda: None)
+
+    result = runner.invoke(app, ['--version'])
+
+    assert result.exit_code == 0
+    assert result.stdout.splitlines() == ['dectl 9.9.9']
+    assert 'does not match the expected schema' not in result.stderr
+
+
 def test_list_reports_the_validation_error_not_a_missing_config(invalid_config):
     # The config exists. Reporting it as absent points the reader at `config init`, which
     # refuses because the file it would write is already there.
