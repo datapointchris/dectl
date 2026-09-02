@@ -293,18 +293,22 @@ def pipeline_root(pipeline: PipelineConfig) -> Path:
     return expand_home(substitute_env(pipeline.resolve_paths_from))
 
 
-def resolve_from_root(pipeline: PipelineConfig, configured_path: str) -> Path:
-    """One of a pipeline's configured paths, as an absolute path.
+def resolve_from_root(pipeline: PipelineConfig, substituted_path: str) -> Path:
+    """One of a pipeline's paths, as an absolute path, from a value already substituted.
 
-    Substitution is applied to both halves and is idempotent, so a caller passing an already
-    rendered value gets the same answer as one passing the raw config string.
+    The `{env}` token is replaced by the caller, not here. Substituting in both places is a
+    double substitution, and it agrees with a single one for every environment name that does
+    not itself contain the token — so it is correct by a property of the value rather than by
+    anything the code holds, and the two doors resolve different directories where it does not.
+    `declared_paths` substitutes for the walk and both renderers; the deploy verbs substitute
+    the field they read. The root's own token is resolved by `pipeline_root`.
 
     An entry that is already absolute is returned unchanged, which is what `Path.__truediv__`
     does with an absolute right-hand side. A `source_dir` may therefore sit outside the root. A
     glue `scripts` entry may not — `key_fault` refuses that, and `pipeline_value_faults` runs it
     from `config validate` and from the deploy, because the S3 key is built from the configured
     string rather than from the resolved path."""
-    return pipeline_root(pipeline) / expand_home(substitute_env(configured_path))
+    return pipeline_root(pipeline) / expand_home(substituted_path)
 
 
 def as_values(configured: str | list[str]) -> list[str]:

@@ -14,8 +14,11 @@ from dectl.commands.lambda_ import make_lambda_app
 from dectl.commands.lambda_ import zip_lambda
 from dectl.config import DectlConfig
 from dectl.config import PipelineConfig
+from dectl.config import declared_paths
 from dectl.config import pipeline_value_faults
 from dectl.config import resolve_from_root
+from dectl.env import active_environment
+from dectl.env import substitute_env
 from dectl.invoke import DURABLE_SYNC_CAP_SECONDS
 from dectl.invoke import EVENT_ACK_TIMEOUT_SECONDS
 from dectl.invoke import INVOKE_TIMEOUT_MARGIN_SECONDS
@@ -617,3 +620,32 @@ def test_zipping_a_file_exits_rather_than_shipping_an_empty_archive(tmp_path):
         zip_lambda(handler)
 
     assert exit_info.value.exit_code == 1
+
+
+def test_the_lambda_deploy_resolves_the_path_config_validate_checked(monkeypatch, tmp_path):
+    # `resolve_from_root` substitutes `{env}` itself, so it takes the raw config value. Handing
+    # it an already-rendered field substitutes twice, and the deploy then zips a directory the
+    # walk never checked.
+    #
+    # The two agree for every environment name that does not itself contain the token, which is
+    # why an ordinary name cannot show the difference. The property is that they agree for any
+    # name, so the one used here is a name that tells them apart.
+    monkeypatch.setattr(active_environment, 'name', 'a{env}b')
+    source = tmp_path / 'code' / 'a{env}b'
+    source.mkdir(parents=True)
+    (source / 'handler.py').write_text('def handler(event, context): pass')
+
+    pipeline = PipelineConfig.model_validate(
+        {'resolve_paths_from': str(tmp_path), 'lambdas': {'fn': {'name': 'n', 'source_dir': 'code/{env}'}}}
+    )
+
+    # The walk substitutes once and resolves what it substituted.
+    walked = [p.value for p in declared_paths(pipeline) if p.site.field == 'source_dir']
+    assert walked == ['code/a{env}b']
+    assert resolve_from_root(pipeline, walked[0]) == source
+    assert pipeline_value_faults('p', pipeline, on_disk=True) == []
+
+    # The deploy verb substitutes the field it reads, and lands on the same directory. Passing
+    # the raw value here, or the rendered one to a resolver that substitutes again, gives
+    # `code/aa{env}bb` — a directory the walk never checked and the deploy would have zipped.
+    assert resolve_from_root(pipeline, substitute_env(pipeline.lambdas['fn'].source_dir)) == source

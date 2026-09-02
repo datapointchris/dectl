@@ -96,7 +96,9 @@ def resolve_scripts(pipeline_name: str, pipeline: PipelineConfig, alias: str) ->
     name the cause in none of them."""
     refuse_unusable_values(pipeline_value_faults(pipeline_name, pipeline, on_disk=True, resource=GlueJobConfig.RESOURCE, alias=alias))
     job = pipeline.glue_jobs[alias]
-    return [ResolvedScript(substitute_env(script), resolve_from_root(pipeline, script)) for script in job.scripts]
+    # One substitution, at the boundary: the name and the path are the same rendering of
+    # one script, so nothing downstream can hold two spellings of it.
+    return [ResolvedScript(name, resolve_from_root(pipeline, name)) for name in (substitute_env(s) for s in job.scripts)]
 
 
 def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: list[ResolvedScript]) -> None:

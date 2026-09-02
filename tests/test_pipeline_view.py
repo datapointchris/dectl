@@ -341,3 +341,20 @@ def test_every_resolved_path_reaches_both_renderers():
         assert section is not None, f'{resource} has resolved paths and no section in --json'
         assert alias in section, f'{resource}/{alias} has resolved paths and no row in --json'
         assert section[alias]['paths'] == fields
+
+
+def test_a_bare_field_member_replaces_its_collection_in_the_env_guard_dump():
+    # `monitor` is held as a bare field, so it has no alias to be filed under. Filing it under
+    # the empty one leaves the unfiltered original beside the filtered copy, and the env-effect
+    # guard reads the original — a `{env}` in a local path goes on silencing the warning.
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '1'},
+            'pipelines': {'salesdata': {'monitor': {'lambdas': ['a'], 'step_functions': ['b']}}},
+        }
+    )
+
+    dumped = aws_names_only(config.pipelines['salesdata'])['monitor']
+
+    assert '' not in dumped
+    assert dumped == {'lambdas': ['a'], 'step_functions': ['b']}

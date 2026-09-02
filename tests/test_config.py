@@ -35,6 +35,7 @@ from dectl.config import pipeline_value_faults
 from dectl.config import resolve_from_root
 from dectl.env import render_env_model
 from dectl.env import set_active_environment
+from dectl.env import substitute_env
 from dectl.values import FAULT_WORDING
 from dectl.values import SPELLING_FAULTS
 from dectl.values import ConfigFault
@@ -633,12 +634,14 @@ def test_every_config_load_failure_is_one_the_callers_catch():
 
 
 def test_the_env_token_is_substituted_into_the_root():
-    # A token left literal in the root while source_dir substitutes gives a half-resolved join,
-    # which is neither what the config says nor what --env asked for.
+    # A token left literal in the root while the path beneath it substitutes gives a
+    # half-resolved join, which is neither what the config says nor what --env asked for. The
+    # root's own token is `pipeline_root`'s to resolve; the value joined onto it arrives already
+    # substituted, so both halves are the same rendering.
     set_active_environment('prod', '--env')
     try:
         pipeline = pipeline_rooted_at('/srv/{env}/salesdata')
-        assert resolve_from_root(pipeline, 'modules/{env}/code') == Path('/srv/prod/salesdata/modules/prod/code')
+        assert resolve_from_root(pipeline, substitute_env('modules/{env}/code')) == Path('/srv/prod/salesdata/modules/prod/code')
     finally:
         set_active_environment('dev', 'default')
 
@@ -702,3 +705,23 @@ def test_a_substituted_value_that_fails_validation_exits_rather_than_raising():
         assert exit_info.value.exit_code == 1
     finally:
         set_active_environment('dev', 'default')
+
+
+def test_a_relative_path_is_not_an_escape_when_no_anchor_is_declared(tmp_path):
+    # Without `resolve_paths_from` the root is the working directory and `../shared/code` is an
+    # ordinary path that has always been followed. Enforcing the anchor where none is declared
+    # refuses a config that deploys, which is the one direction this check must not fail in.
+    pipeline = PipelineConfig.model_validate({'lambdas': {'fn': {'name': 'n', 'source_dir': '../shared/code'}}})
+
+    assert pipeline_value_faults('p', pipeline, on_disk=False) == []
+
+
+def test_the_anchor_is_enforced_once_a_pipeline_declares_one(tmp_path):
+    # The other half, so the pair pins the gate rather than the arm: the same value under a
+    # declared anchor is refused, and a test asserting only the first would pass with the check
+    # deleted outright.
+    pipeline = PipelineConfig.model_validate(
+        {'resolve_paths_from': str(tmp_path), 'lambdas': {'fn': {'name': 'n', 'source_dir': '../shared/code'}}}
+    )
+
+    assert [f.fault for f in pipeline_value_faults('p', pipeline, on_disk=False)] == [ConfigFault.ESCAPES_ROOT]

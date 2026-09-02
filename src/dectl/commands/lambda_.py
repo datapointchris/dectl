@@ -28,6 +28,7 @@ from dectl.durable import resolve_execution
 from dectl.durable import sweep_executions
 from dectl.durable import tail_durable_history
 from dectl.env import render_env_model
+from dectl.env import substitute_env
 from dectl.logs import DURABLE_OPERATION_ID_KEYS
 from dectl.logs import tail_lambda_logs
 from dectl.output import console
@@ -156,10 +157,9 @@ def make_lambda_function_app(
         # one this door can explain.
         refuse_unusable_values(pipeline_value_faults(pipeline_name, pipeline, on_disk=True, resource=LambdaConfig.RESOURCE, alias=alias))
 
-        # The raw config value, as the walk and the glue deploy both read it.
-        # `resolve_from_root` substitutes, so handing it an already-rendered field substitutes
-        # twice and resolves somewhere `config validate` never checked.
-        source = resolve_from_root(pipeline, fn_config.source_dir)
+        # Substituted once, here. `resolve_from_root` takes a value the caller has already
+        # rendered, so the deploy resolves exactly the directory the walk checked.
+        source = resolve_from_root(pipeline, substitute_env(fn_config.source_dir))
 
         fn = resolved()
         session = make_session(config)
