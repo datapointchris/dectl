@@ -88,6 +88,7 @@ SPELLING_FAULTS = frozenset(
         ConfigFault.KEY_ESCAPES_ROOT,
         ConfigFault.NOT_A_BUCKET_NAME,
         ConfigFault.NOT_A_ROOTED_PATH,
+        ConfigFault.UNRESOLVABLE_HOME,
     }
 )
 
@@ -172,6 +173,13 @@ BUCKET_FORM = (
     'an S3 bucket name is 3-63 characters of lowercase letters, digits, dots and hyphens, '
     'starts and ends with a letter or digit, holds no doubled dot, and is not an IP address; '
     'it does not begin xn--, sthree- or amzn-s3-demo-, or end -s3alias, --ol-s3 or --x-s3'
+)
+# Said for a `~` that names nobody. The likeliest cause is a missing slash, so the form spells
+# both shapes out: `config show` cannot help here either, because the value resolves to nothing
+# and the row it prints is the literal joined under the anchor.
+HOME_FORM = (
+    'a ~-rooted path is written ~/x for your own home, or ~user/x for a named account. '
+    '~x is neither, and names a user rather than a directory'
 )
 
 
@@ -470,6 +478,8 @@ def recovery_lines(problems: list[UnusableValue]) -> list[str]:
         lines.append(ROOT_FORM)
     if ConfigFault.NOT_A_BUCKET_NAME in faults:
         lines.append(BUCKET_FORM)
+    if ConfigFault.UNRESOLVABLE_HOME in faults:
+        lines.append(HOME_FORM)
     if faults & SPELLING_FAULTS:
         # A form says what the value has to look like and no more. Every other fault names a
         # command, so a spelling-only run would be the one that names none.

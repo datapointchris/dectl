@@ -1,3 +1,5 @@
+import json
+
 import pytest
 import typer
 from pydantic import ValidationError
@@ -5,6 +7,7 @@ from pydantic import ValidationError
 import dectl.main
 from dectl.commands.config_cmd import config_app
 from dectl.config import DectlConfig
+from dectl.config import Defaults
 from dectl.main import REFERENCE_GLOBAL
 from dectl.main import app
 from tests.conftest import RefusalRunner
@@ -183,3 +186,27 @@ def test_the_bare_banner_carries_the_whole_diagnostic(invalid_config):
     # Not 'Usage: dectl': rich styles the two words differently, so an escape sequence sits
     # between them wherever colour is on, and the phrase is only contiguous without it.
     assert 'Usage:' in result.stdout
+
+
+def test_env_json_carries_every_default_the_human_view_shows(monkeypatch):
+    """`config show` prints four resolved defaults and no machine door carried any of them.
+
+    `aws_profile` is the one that decides which AWS account a deploy reaches. Derived from
+    `Defaults.model_fields`, so a field added to the model reaches this document without an
+    edit — the same derivation the human rows use, which is what keeps the two level."""
+    config = DectlConfig.model_validate({'defaults': {'account_id': '123456789012', 'aws_profile': 'data-eng'}, 'pipelines': {}})
+    monkeypatch.setattr(dectl.main, 'CONFIG_ERROR', None)
+    monkeypatch.setattr(dectl.main, 'cfg', config)
+
+    result = runner.invoke(dectl.main.app, ['--env', 'prod', 'env', '--json'])
+
+    assert result.exit_code == 0
+    published = json.loads(result.stdout)
+    assert published == {
+        'environment': 'prod',
+        'source': '--env',
+        'account_id': '123456789012',
+        'region': 'us-east-2',
+        'aws_profile': 'data-eng',
+    }
+    assert set(Defaults.model_fields) - {'environment'} <= set(published)

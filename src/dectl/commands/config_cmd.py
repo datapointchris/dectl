@@ -18,6 +18,7 @@ from dectl.config import config_value_faults
 from dectl.config import init_config
 from dectl.config import load_config
 from dectl.config import report_config_error
+from dectl.env import describe_active_environment
 from dectl.output import console
 from dectl.output import emit_json
 from dectl.output import error
@@ -76,7 +77,14 @@ def config_show(
     # Derived from the model rather than listed, so a field added to `Defaults` prints without
     # this being edited. `aws_profile` is the one that decides which AWS account every deploy
     # below reaches, and a reader could not see it resolved anywhere.
+    #
+    # `environment` is the exception and is the active one, not the file's. Every name printed
+    # below is substituted for the active environment, so the file's value beside them says
+    # `dev` under `--env prod` and four lines above `sales-prod-raw`.
     for field in Defaults.model_fields:
+        if field == 'environment':
+            console.print(f'  {field}: {describe_active_environment()}')
+            continue
         console.print(f'  {field}: {getattr(cfg.defaults, field) or "(unset)"}')
     console.print()
     for name, pipeline in cfg.pipelines.items():

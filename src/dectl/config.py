@@ -601,9 +601,15 @@ def pipeline_value_faults(
         if declared.site != ROOT_SITE:
             continue
         root = pipeline_root(pipeline)
-        on_disk_fault = home_fault(declared.value) or path_fault(root, declared.expects)
-        if on_disk_fault:
-            return [*problems, row(ROOT_SITE, root, on_disk_fault, declared.value)]
+        # Asked before `path_fault`, and reported with no path, as the leaf rows report it. A
+        # `~` naming nobody resolves to nothing at either site, and one row publishing the
+        # literal string in the `path` key gives a `--json` consumer branching on `path is None`
+        # two answers to one `fault` value. The written form is what the reader needs anyway:
+        # the missing slash is the finding, and `shown` reaches it through `SPELLING_FAULTS`.
+        if fault := home_fault(declared.value):
+            return [*problems, row(ROOT_SITE, None, fault, declared.value)]
+        if fault := path_fault(root, declared.expects):
+            return [*problems, row(ROOT_SITE, root, fault, declared.value)]
 
     # A value whose spelling is already refused is not also reported as missing. Resolution
     # would place `./copy.py` somewhere real and `jobs//copy.py` somewhere else, and a second

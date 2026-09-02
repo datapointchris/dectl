@@ -790,6 +790,10 @@ SPELLING = frozenset(
         # A root that is not rooted resolves against the working directory, so there is no
         # meaningful path to report — the remedy is the form the value has to take.
         ConfigFault.NOT_A_ROOTED_PATH,
+        # A `~` naming nobody resolves to nothing, so the row carries the written value. The
+        # likeliest cause is a missing slash, which is a fact about the characters and is
+        # invisible in a resolved path — `config show` renders it joined under the anchor.
+        ConfigFault.UNRESOLVABLE_HOME,
     }
 )
 ON_DISK = frozenset(
@@ -799,7 +803,6 @@ ON_DISK = frozenset(
         ConfigFault.EXPECTED_FILE,
         ConfigFault.EMPTY_DIRECTORY,
         ConfigFault.DECLARES_NOTHING,
-        ConfigFault.UNRESOLVABLE_HOME,
         ConfigFault.ESCAPES_ROOT,
     }
 )
@@ -992,3 +995,23 @@ def test_every_value_the_root_check_refuses_is_named_by_its_remedy():
     for value, phrase in [('code/salesdata', 'relative'), ('', 'blank'), ('{env}/salesdata', '{env}')]:
         assert root_fault(value) is ConfigFault.NOT_A_ROOTED_PATH
         assert phrase in ROOT_FORM, f'ROOT_FORM does not name why {value!r} is refused'
+
+
+def test_one_fault_value_publishes_one_row_shape(tmp_path):
+    """A `~` naming nobody resolves to nothing at either site, so both rows say so.
+
+    The root row published the configured string in the `path` key while every leaf row
+    published null, which gives a `--json` consumer branching on `path is None` two answers to
+    one `fault`. The leaf row named no value at all, so the missing slash the fault exists to
+    point at was on screen nowhere."""
+    leaf = PipelineConfig.model_validate(
+        {'resolve_paths_from': str(tmp_path), 'lambdas': {'fn': {'name': 'n', 'source_dir': '~nosuchuser/code'}}}
+    )
+    root = PipelineConfig.model_validate({'resolve_paths_from': '~nosuchuser/code'})
+
+    rows = pipeline_value_faults('a', leaf, on_disk=True) + pipeline_value_faults('b', root, on_disk=True)
+
+    assert {row.fault for row in rows} == {ConfigFault.UNRESOLVABLE_HOME}
+    assert [row.path for row in rows] == [None, None]
+    # Shown rather than swallowed: the characters are the finding, so both rows quote them.
+    assert all(row.shown == repr('~nosuchuser/code') for row in rows)

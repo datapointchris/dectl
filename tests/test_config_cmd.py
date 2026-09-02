@@ -5,7 +5,9 @@ import pytest
 
 from dectl.commands.config_cmd import config_app
 from dectl.config import TEMPLATE_CONFIG
+from dectl.env import set_active_environment
 from tests.conftest import RefusalRunner
+from tests.conftest import unwrapped
 
 runner = RefusalRunner()
 
@@ -489,3 +491,39 @@ def test_validate_leaves_a_pipeline_without_a_declared_root_alone(monkeypatch, t
     result = runner.invoke(config_app, ['validate'])
 
     assert result.exit_code == 0
+
+
+SHOW_CONFIG = (
+    'defaults:\n'
+    '  account_id: "123456789012"\n'
+    '  environment: dev\n'
+    'pipelines:\n'
+    '  p:\n'
+    '    resolve_paths_from: ""\n'
+    '    buckets:\n'
+    '      raw: sales-{env}-raw\n'
+)
+
+
+def test_show_names_the_active_environment_not_the_configured_one(monkeypatch, tmp_path):
+    # Every name below the row is substituted for the active environment, so the file's value
+    # beside them reads `dev` four lines above `sales-prod-raw` — and `dectl env` says `prod`.
+    point_at(monkeypatch, tmp_path, SHOW_CONFIG)
+    set_active_environment('prod', '--env')
+
+    result = runner.invoke(config_app, ['show'])
+
+    assert result.exit_code == 0
+    assert 'environment: prod (from --env)' in unwrapped(result.stdout)
+
+
+def test_show_calls_an_empty_root_declared_because_the_json_door_does(monkeypatch, tmp_path):
+    # Truthiness calls `resolve_paths_from: ""` unset while `pipeline_to_dict` publishes
+    # `declared: true` for it. Two renderers disagreeing about one fact leaves the human one
+    # telling the reader to add a key their file already has.
+    point_at(monkeypatch, tmp_path, SHOW_CONFIG)
+
+    result = runner.invoke(config_app, ['show'])
+
+    assert result.exit_code == 0
+    assert 'resolve_paths_from is unset' not in unwrapped(result.stdout)

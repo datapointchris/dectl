@@ -158,7 +158,11 @@ def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
     resolved = resolved_paths(pipeline)
     types = resource_types(pipeline)
     info(f'[bold]{name}[/bold] ({", ".join(types) or "none configured"})')
-    source = '' if pipeline.resolve_paths_from else ' (working directory — resolve_paths_from is unset)'
+    # `is not None`, matching `pipeline_to_dict`'s `declared`. Truthiness calls an empty string
+    # unset, and the two renderers then disagree about one fact — with the human one sending a
+    # reader to add a key their file already has.
+    declared = pipeline.resolve_paths_from is not None
+    source = '' if declared else ' (working directory — resolve_paths_from is unset)'
     info(f'  resolve_paths_from: {pipeline_root(pipeline)}{source}')
 
     def print_paths(resource: str, alias: str) -> None:
