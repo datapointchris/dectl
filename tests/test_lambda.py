@@ -546,6 +546,35 @@ def test_lambda_deploy_refuses_a_missing_source_and_writes_nothing(monkeypatch, 
     assert client.code is None
 
 
+def test_lambda_deploy_reports_the_config_fault_before_building_a_session(monkeypatch, tmp_path):
+    # A session is built from the AWS profile, and botocore reports a missing one as a
+    # traceback naming the profile. Ordering the session first meant a box missing the checkout
+    # was told about its profile instead, and the machine missing one is usually missing both.
+    # The fake refuses to be built for the same reason the real one does, because a fake that
+    # hands back a session cannot show which of the two the door reached first.
+    def refuse(_config):
+        raise RuntimeError('ProfileNotFound: the config profile (no-such-profile) could not be found')
+
+    monkeypatch.setattr('dectl.session.make_session', refuse)
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '1'},
+            'pipelines': {
+                'proj': {
+                    'resolve_paths_from': str(tmp_path / 'absent-checkout'),
+                    'lambdas': {'notifier': {'name': 'n', 'source_dir': 'code'}},
+                }
+            },
+        }
+    )
+    app = make_lambda_app('proj', config.pipelines['proj'], config)
+
+    result = runner.invoke(app, ['notifier', 'deploy'])
+
+    assert isinstance(result.exception, SystemExit)
+    assert result.exit_code == 1
+
+
 def test_the_lambda_door_names_the_same_site_config_validate_does(tmp_path):
     # Which pipeline, which alias, which config key — asserted on the row rather than on the
     # sentence it renders to. A bare path cannot say which `notifier` it meant when several

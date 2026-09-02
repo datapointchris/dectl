@@ -146,18 +146,24 @@ def make_lambda_function_app(
         """
         from dectl.session import make_session
 
-        fn = resolved()
-        session = make_session(config)
-        client = session.client('lambda')
-
         # Named the way `config validate` names it — which pipeline, which alias, which config
         # key — rather than as a bare path. `zip_lambda` refuses the same directory a moment
         # later and can only say the path, because the config key does not reach it.
         #
-        # Both refusals run before the first line of output, so nothing announces work that
-        # then does not happen.
-        refuse_unusable_values(pipeline_path_faults(pipeline_name, pipeline, on_disk=True, resource='lambda', alias=alias))
-        source = resolve_from_root(pipeline, fn.source_dir)
+        # Ahead of the session, because building one reads the AWS profile and a missing profile
+        # is reported by botocore as a traceback. The machine most likely to be missing the
+        # checkout is the one most likely to be missing the profile, and the config fault is the
+        # one this door can explain.
+        refuse_unusable_values(pipeline_path_faults(pipeline_name, pipeline, on_disk=True, resource=LambdaConfig.RESOURCE, alias=alias))
+
+        # The raw config value, as the walk and the glue deploy both read it.
+        # `resolve_from_root` substitutes, so handing it an already-rendered field substitutes
+        # twice and resolves somewhere `config validate` never checked.
+        source = resolve_from_root(pipeline, fn_config.source_dir)
+
+        fn = resolved()
+        session = make_session(config)
+        client = session.client('lambda')
         zip_path = zip_lambda(source)
         info(f'zipped {source}')
 

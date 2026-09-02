@@ -443,23 +443,31 @@ def test_the_root_is_absent_by_default():
 @pytest.mark.parametrize(
     ('source_dir', 'faults'),
     [
+        # Relative and climbing out: the anchor is enforced for every value anchored to it, not
+        # only the ones a key check reaches for another reason. A lambda builds no S3 key, so
+        # `key_fault` never runs on a `source_dir` and only this arm covers it.
         ('..', [ConfigFault.ESCAPES_ROOT]),
+        # Caught as an escape rather than as `absent`, so which traversals are refused does not
+        # depend on whether an intermediate directory happens to exist.
         ('code/../..', [ConfigFault.ESCAPES_ROOT]),
         ('modules/../code', [ConfigFault.ESCAPES_ROOT]),
         ('code', []),
+        # The fourth branch `resolve_from_root` takes. `Path('')` is `.` and `/` drops it, so an
+        # empty value resolves to the anchor itself and the deploy uploads the whole checkout.
+        ('', [ConfigFault.DECLARES_NOTHING]),
+        # Absolute and `~`-rooted values resolve to themselves, so they never claimed the anchor
+        # and the escape arm exempts them. A `source_dir` is documented as free to sit anywhere.
+        ('ABSOLUTE', []),
+        ('~nosuchuser-fixture/code', [ConfigFault.UNRESOLVABLE_HOME]),
     ],
 )
-def test_a_source_dir_climbing_out_of_the_root_is_refused(tmp_path, source_dir, faults):
-    # `..` uploaded the parent of the declared root as the function's code — a sibling checkout
-    # and the root's own .git inside the archive — while `config validate` reported it clean.
-    # ESCAPES_ROOT is named for the anchor and was reachable only through key_fault, which a
-    # lambda never runs because it builds no S3 key: the anchor was enforced for the field that
-    # also needed a well-spelled key and unenforced for the field that only needed the anchor.
-    #
-    # `code/../..` would otherwise be caught only as `absent`, which makes the set of
-    # traversals refused depend on whether an intermediate directory happens to exist.
+def test_every_shape_a_source_dir_can_take_is_judged(tmp_path, source_dir, faults):
+    # One row per branch `resolve_from_root` takes — relative, empty, absolute, `~`-rooted —
+    # because a fixture carrying four spellings of one branch reads as coverage of all of them.
     (tmp_path / 'code').mkdir()
     (tmp_path / 'code' / 'handler.py').write_text('x')
+    if source_dir == 'ABSOLUTE':
+        source_dir = str(tmp_path / 'code')
     pipeline = PipelineConfig.model_validate(
         {'resolve_paths_from': str(tmp_path), 'lambdas': {'fn': {'name': 'n', 'source_dir': source_dir}}}
     )

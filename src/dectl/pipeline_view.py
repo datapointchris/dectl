@@ -35,10 +35,18 @@ def aws_names_only(pipeline: PipelineConfig) -> dict[str, Any]:
     local path satisfies `contains_env_placeholder` without naming anything in AWS, so leaving
     one in silences the warning for a pipeline whose bucket and job names all hardcode an
     environment. `env.aws_names_of` answers the same question one level down, for the resource a
-    verb resolves, and both read the model's own declaration — the pipeline's root included."""
+    verb resolves, and both read the model's own declaration — the pipeline's root included.
+
+    A resource held as a bare field rather than by alias — `monitor` is the shape — replaces its
+    collection instead of being filed under an alias inside it. Filing it under the empty alias
+    leaves the unfiltered original beside the filtered copy, and the guard reads the original,
+    so a `{env}` in a local path goes on silencing the warning it was meant to raise."""
     dumped = aws_names_of(pipeline)
     for collection, alias, member in resource_members(pipeline):
-        dumped[collection][alias] = aws_names_of(member)
+        if alias:
+            dumped[collection][alias] = aws_names_of(member)
+        else:
+            dumped[collection] = aws_names_of(member)
     return dumped
 
 
