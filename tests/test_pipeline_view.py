@@ -13,6 +13,7 @@ from dectl.config import LambdaConfig
 from dectl.config import StepFunctionConfig
 from dectl.config import declared_paths
 from dectl.config import pipeline_root
+from dectl.config import script_key
 from dectl.env import active_environment
 from dectl.env import render_env_model
 from dectl.pipeline_view import aws_names_only
@@ -20,6 +21,7 @@ from dectl.pipeline_view import pipeline_to_dict
 from dectl.pipeline_view import render_pipeline
 from dectl.pipeline_view import resolved_paths
 from dectl.pipeline_view import resource_types
+from dectl.pipeline_view import script_uris
 from dectl.values import PathKind
 
 
@@ -441,3 +443,33 @@ def test_the_deploy_and_both_renderers_name_one_destination():
     assert script_uri(rendered, rendered.scripts[0]) == 's3://b-dev/p-dev/c-dev.py'
     assert published['script_uris'] == ['s3://b-dev/p-dev/c-dev.py']
     assert '{env}' not in published['script_uris'][0]
+
+
+def test_a_script_key_substitutes_exactly_once(monkeypatch):
+    # `script_key` takes operands the caller has rendered. Substituting them again agrees with
+    # substituting once for every environment name that does not itself contain the token, so
+    # the two conventions are indistinguishable on ordinary input — which is what let the branch
+    # carry both. The name used here is one that tells them apart.
+    monkeypatch.setattr(active_environment, 'name', 'a{env}b')
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '1'},
+            'pipelines': {
+                'salesdata': {
+                    'glue_jobs': {
+                        'copy': {
+                            'name': 'j',
+                            'script_bucket': 'b',
+                            'script_prefix': 'p-{env}',
+                            'scripts': ['c.py'],
+                            'role': 'r',
+                        }
+                    }
+                }
+            },
+        }
+    )
+    job = config.pipelines['salesdata'].glue_jobs['copy']
+
+    assert script_key(render_env_model(job), 'c.py') == 'p-a{env}b/c.py'
+    assert script_uris(job) == ['s3://b/p-a{env}b/c.py']
