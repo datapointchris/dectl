@@ -335,8 +335,11 @@ A `source_dir` may be absolute and sit outside that directory — it is zipped a
 as bytes, so nothing else depends on where it came from. A glue `scripts` entry may not:
 its S3 key is built from the string you write, and S3 stores that string as given. So a
 script and its `script_prefix`, the two halves of that key, are each written as plain
-relative segments — `jobs/copy.py`. Anything else names an object nothing will look for,
-and `config validate` and the deploy both refuse it. The config still loads either way,
+relative segments — `jobs/copy.py`. Anything else spells one file two ways: the key carries
+the `..`, the `./` or the doubled separator literally, so a second machine writing
+`jobs/copy.py` for the same script writes a different object, and a lifecycle rule or
+Terraform data source keyed on `scripts/` sees neither. `config validate` and the deploy
+both refuse it. The config still loads either way,
 which is what keeps the rest of the CLI available to tell you.
 
 A glue job that declares no scripts is refused for the same reason: a Glue job is defined
