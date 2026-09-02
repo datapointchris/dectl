@@ -9,6 +9,7 @@ from dectl.commands.glue import GlueRunWatcher
 from dectl.commands.glue import ResolvedScript
 from dectl.commands.glue import apply_glue_job_update
 from dectl.commands.glue import build_job_update
+from dectl.commands.glue import configured_uris
 from dectl.commands.glue import follow_glue_run
 from dectl.commands.glue import job_definition_changes
 from dectl.commands.glue import make_glue_app
@@ -23,6 +24,7 @@ from dectl.config import config_value_faults
 from dectl.config import pipeline_value_faults
 from dectl.env import active_environment
 from dectl.env import render_env_model
+from dectl.pipeline_view import script_uris
 from dectl.values import ConfigFault
 from dectl.values import ValueSite
 from dectl.values import bucket_fault
@@ -399,8 +401,8 @@ def test_the_upload_and_the_job_definition_name_one_object(tmp_path, monkeypatch
     (tmp_path / 'jobs' / 'prod').mkdir(parents=True)
     (tmp_path / 'jobs' / 'prod' / 'copy.py').write_text('x')
     pipeline = glue_pipeline(str(tmp_path), ['jobs/{env}/copy.py'])
-    # Rendered, as `deploy` hands it to both: `script_key` takes operands the caller has already
-    # substituted, so a raw job here would test a shape the verb never produces.
+    # Rendered, as `deploy` hands it to both: `script_uri` and the upload take a job whose
+    # operands are substituted, so a raw job here would test a shape the verb never produces.
     job = render_env_model(pipeline.glue_jobs['j'])
     s3 = FakeS3Client()
 
@@ -464,7 +466,7 @@ def test_a_key_that_s3_would_store_literally_is_refused(tmp_path, written, expec
     ],
 )
 def test_a_script_prefix_is_refused_for_every_shape_a_script_is(tmp_path, written, expected):
-    # The prefix is the other operand of the concatenation script_key performs, so every shape
+    # The prefix is the other operand of the concatenation join_key performs, so every shape
     # refused in a script lands in the key identically when it is written in the prefix. The
     # parametrize is the same list as the script one for that reason: a guard covering one
     # operand of a join is the fault this pair exists to keep closed.
@@ -594,7 +596,7 @@ def test_a_key_fault_reports_the_string_as_written(tmp_path):
 @pytest.mark.parametrize('written', ['.', ''])
 def test_a_prefix_that_normalises_to_itself_is_still_refused(tmp_path, written):
     # The round trip against PurePosixPath agreed with itself on these two: `str(PurePosixPath('.'))`
-    # is `'.'`, so a bare dot passed the comparison while script_key built `s3://b/./jobs/copy.py`.
+    # is `'.'`, so a bare dot passed the comparison while join_uri built `s3://b/./jobs/copy.py`.
     (tmp_path / 'copy.py').write_text('x')
     pipeline = PipelineConfig.model_validate(
         {
@@ -686,6 +688,57 @@ def test_one_missing_script_resolves_none_of_them(tmp_path):
         resolve_scripts('proj', pipeline, 'j')
 
     assert exit_info.value.exit_code == 1
+
+
+def test_every_site_composing_a_script_destination_substitutes_exactly_once(tmp_path, monkeypatch):
+    """The upload, both job-definition fields, the renderers' row and the help panel, together.
+
+    Substituting twice agrees with substituting once for every environment name that does not
+    itself carry the token, so the two conventions are indistinguishable on ordinary input.
+    `a{env}b` tells them apart, and driving one site with it leaves the others free to disagree
+    — which is what happened: a test pinned the key and the renderers while `upload_scripts`,
+    the site that writes, rendered a job the caller had rendered.
+
+    The bucket is held by identity rather than by discrimination, and the reason is a limit
+    worth knowing before trusting the name. Telling one substitution from two needs an
+    environment whose own name carries the token, and every spelling of a `{env}`-bearing
+    bucket under such a name carries a brace — which `bucket_fault` refuses, so `config
+    validate` exits before any deploy reaches here. No valid config can double-substitute a
+    bucket. What is left to hold is that the upload sends the job's own field rather than
+    anything derived from it, and that is what the first assertion says."""
+    monkeypatch.setattr(active_environment, 'name', 'a{env}b')
+    (tmp_path / 'p-a{env}b').mkdir()
+    for leaf in ('main-a{env}b.py', 'util-a{env}b.py'):
+        (tmp_path / 'p-a{env}b' / leaf).write_text('x')
+    pipeline = PipelineConfig.model_validate(
+        {
+            'resolve_paths_from': str(tmp_path),
+            'glue_jobs': {
+                'j': {
+                    'name': 'my-job',
+                    'script_bucket': 'salesdata-scripts',
+                    'script_prefix': 'k-{env}',
+                    'scripts': ['p-{env}/main-{env}.py', 'p-{env}/util-{env}.py'],
+                    'role': 'r',
+                }
+            },
+        }
+    )
+    job = render_env_model(pipeline.glue_jobs['j'])
+    s3 = FakeS3Client()
+
+    upload_scripts(FakeS3Session(s3), job, resolve_scripts('proj', pipeline, 'j'))
+    definition = build_job_update({'Name': 'my-job'}, job)
+
+    once = 'p-a{env}b/main-a{env}b.py'
+    assert s3.uploads[0][1] == job.script_bucket
+    assert s3.uploads[0][2] == f'k-a{{env}}b/{once}'
+    assert definition['Command']['ScriptLocation'] == f's3://salesdata-scripts/k-a{{env}}b/{once}'
+    assert definition['DefaultArguments']['--extra-py-files'] == f's3://{s3.uploads[1][1]}/{s3.uploads[1][2]}'
+    assert script_uris(pipeline.glue_jobs['j'])[0] == f's3://salesdata-scripts/k-a{{env}}b/{once}'
+    # The help panel is the one site that renders nothing, because it is built before `--env`
+    # is parsed. Its operands are raw, so the token stands rather than being resolved wrongly.
+    assert configured_uris(pipeline.glue_jobs['j']).startswith('s3://salesdata-scripts/k-{env}/p-{env}/main-{env}.py')
 
 
 def test_upload_scripts_refuses_a_partial_set_handed_to_it_directly(tmp_path):

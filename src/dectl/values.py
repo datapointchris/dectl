@@ -139,6 +139,18 @@ def s3_uri(bucket: str, key: str) -> str:
     return f's3://{bucket}/{key}'
 
 
+def join_uri(bucket: str, prefix: str, name: str) -> str:
+    """Where one prefixed object lands, from the three strings it is composed of.
+
+    The one composition. A destination is three operands and two shapes, and a caller that
+    reaches `join_key` and `s3_uri` in sequence has written the second shape itself — so the
+    two spellings agree until one of them changes. Every caller passes three operands rendered
+    the same number of times, which is what `substitute_env` not being idempotent costs: the
+    per-alias help panel passes three raw, the deploy passes three substituted, and a caller
+    mixing them names an object nothing wrote."""
+    return s3_uri(bucket, join_key(prefix, name))
+
+
 # The form each spelling-checked value has to take, said once per kind. An error naming what is
 # wrong without naming what is right leaves the reader to guess, and these are the faults where
 # `config show` cannot help: it prints the resolved path, which has the malformation normalised

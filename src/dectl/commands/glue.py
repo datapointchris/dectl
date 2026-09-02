@@ -12,7 +12,6 @@ from dectl.config import GlueJobConfig
 from dectl.config import PipelineConfig
 from dectl.config import pipeline_value_faults
 from dectl.config import resolve_from_root
-from dectl.config import script_key
 from dectl.env import render_env_model
 from dectl.env import substitute_env
 from dectl.logs import tail_glue_run
@@ -23,8 +22,8 @@ from dectl.output import info
 from dectl.output import success
 from dectl.prompt import confirm_or_exit
 from dectl.values import join_key
+from dectl.values import join_uri
 from dectl.values import refuse_unusable_values
-from dectl.values import s3_uri
 
 RUN_STATE_COLORS = {'SUCCEEDED': 'green', 'FAILED': 'red', 'STOPPED': 'red', 'TIMEOUT': 'red', 'RUNNING': 'cyan'}
 
@@ -36,28 +35,24 @@ FAILED_RUN_STATES = TERMINAL_RUN_STATES - {'SUCCEEDED'}
 READ_ONLY_KEYS = ('Name', 'CreatedOn', 'LastModifiedOn', 'ProfileName', 'AllocatedCapacity')
 
 
-def join_uri(bucket: str, prefix: str, script: str) -> str:
-    """The S3 URI of one script, from the three strings it is built out of.
-
-    The key's two halves joined as `script_key` joins them, handed to `s3_uri` for the shape.
-    The per-alias help panel reaches this with raw operands, because it is built before `--env`
-    is parsed; every other caller goes through `script_uri` with substituted ones."""
-    return s3_uri(bucket, join_key(prefix, script))
-
-
 def script_uri(glue_job: GlueJobConfig, script: str) -> str:
-    """Where one script lands, built from `script_key` so `ScriptLocation` cannot name a
-    different object from the one the upload wrote."""
-    return s3_uri(glue_job.script_bucket, script_key(glue_job, script))
+    """Where one script of a rendered job lands.
+
+    The job's three operands handed to `join_uri` as they are. Every one of them arrives
+    substituted, because the job did — so this renders nothing, and a caller holding a raw job
+    gets raw operands rather than a mix. `ScriptLocation`, `--extra-py-files` and the upload
+    all reach the destination through here, which is what stops any two of them naming
+    different objects."""
+    return join_uri(glue_job.script_bucket, glue_job.script_prefix, script)
 
 
 class ResolvedScript(NamedTuple):
     """One script of a job, as the deploy needs it: the S3-side name and the file on disk.
 
-    `name` is substituted, because every other consumer of a script name is — `script_key`
-    substitutes both halves of the key it builds, `declared_paths` substitutes, and the verb
-    holds a `render_env_model`'d job. A pair carrying the raw string beside the resolved path
-    is two renderings of one file, and nothing at a call site can see which it is holding."""
+    `name` is substituted, because every other consumer of a script name is — `declared_paths`
+    substitutes, and the verb holds a `render_env_model`'d job whose `scripts` are rendered
+    already. A pair carrying the raw string beside the resolved path is two renderings of one
+    file, and nothing at a call site can see which it is holding."""
 
     name: str
     path: Path
@@ -108,11 +103,16 @@ def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: lis
     The set uploaded has to be the set the definition names, and taking `sources` from the
     caller makes that breakable: a set omitting `scripts[0]` whose every path exists uploads
     cleanly while `build_job_update` emits a `ScriptLocation` nothing wrote, which is what
-    `script_key` exists to prevent. Both sides of that comparison are substituted names —
-    `ResolvedScript.name` and a `render_env_model`'d job — because comparing a raw config
-    string to a rendered one presents two spellings of one file as two files."""
+    `script_uri` exists to prevent.
+
+    `glue_job` arrives rendered and nothing here renders it again. Both sides of the comparison
+    are then one substitution deep — `ResolvedScript.name` and the job's own `scripts` — and
+    the destination is the one `build_job_update` names. Rendering here as well was live: an
+    environment whose own name carries the token wrote the object under a twice-substituted
+    bucket while `ScriptLocation` named the once-substituted one, and a script name carrying
+    the token failed the comparison below against itself."""
     named = {source.name for source in sources}
-    defined = {substitute_env(script) for script in glue_job.scripts}
+    defined = set(glue_job.scripts)
     if named != defined:
         error(f'{glue_job.name}: asked to upload {sorted(named)}, but the job definition names {sorted(defined)}')
         raise typer.Exit(1)
@@ -127,13 +127,16 @@ def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: lis
         raise typer.Exit(1)
 
     s3 = session.client('s3')
-    bucket = substitute_env(glue_job.script_bucket)
     for source in sources:
-        # Reported through `script_uri` rather than rebuilt from the two operands beside it.
-        # Spelling the shape here as well makes this line and `ScriptLocation` two independent
-        # renderings of one URI, and a change to the shape then has this report a destination
-        # the job definition does not name.
-        s3.upload_file(Filename=str(source.path), Bucket=bucket, Key=script_key(glue_job, source.name))
+        # The key through `join_key` and the report through `script_uri`, so this call and
+        # `ScriptLocation` agree by construction. Joining the prefix here by hand would make
+        # them two renderings of one key, and the object then lands where the job definition
+        # does not name.
+        s3.upload_file(
+            Filename=str(source.path),
+            Bucket=glue_job.script_bucket,
+            Key=join_key(glue_job.script_prefix, source.name),
+        )
         success(f'uploaded {source.path} -> {script_uri(glue_job, source.name)}')
 
 

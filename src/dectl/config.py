@@ -23,7 +23,6 @@ from dectl.values import ValueSite
 from dectl.values import bucket_fault
 from dectl.values import expand_home
 from dectl.values import home_fault
-from dectl.values import join_key
 from dectl.values import key_fault
 from dectl.values import leaves_root
 from dectl.values import normalised
@@ -151,7 +150,7 @@ class JenkinsJobConfig(StrictModel):
 class GlueJobConfig(ResourceModel):
     RESOURCE: ClassVar[str] = 'glue'
     PATH_FIELDS: ClassVar[Mapping[str, PathKind]] = {'scripts': PathKind.FILE}
-    # Both operands of the concatenation `script_key` performs. Checking only the one a bug was
+    # Both operands of the concatenation `join_key` performs. Checking only the one a bug was
     # found in leaves every shape it refuses passing silently in the other.
     KEY_FIELDS: ClassVar[frozenset[str]] = frozenset({'script_prefix', 'scripts'})
     # The third operand `join_uri` joins, and the one with no local meaning at all.
@@ -394,25 +393,10 @@ def declared_paths(pipeline: PipelineConfig) -> list[DeclaredPath]:
     return paths
 
 
-def script_key(glue_job: GlueJobConfig, script: str) -> str:
-    """The S3 key one script is uploaded to, and named by in the job definition.
-
-    The one place this is built. The upload, `ScriptLocation`, `--extra-py-files` and both
-    renderers read it, and any two of them disagreeing means Glue fetches an object nothing
-    wrote — or `config show` reports a destination the deploy does not write. Both halves are
-    substituted, because a `{env}` surviving into a key names an object that cannot exist.
-
-    Both operands arrive substituted, as `resolve_from_root`'s do. Substituting here instead
-    would render a value a caller may already have rendered, and the branch would then show two
-    conventions at once — whoever adds the next builder copies whichever one they opened, and
-    the double form is correct only while `substitute_env` stays idempotent."""
-    return join_key(glue_job.script_prefix, script)
-
-
 def declared_keys(pipeline: PipelineConfig) -> list[DeclaredKey]:
     """Every configured string a glue S3 key is built from.
 
-    `script_key` joins two of them — the prefix and the script — so both are subject to the
+    `join_key` joins two of them — the prefix and the script — so both are subject to the
     same spelling rules, and checking one operand and not the other leaves the second silent.
     A prefix names nothing on disk, so it is a key and not a path; a script is both, and
     appears here and in `declared_paths`."""

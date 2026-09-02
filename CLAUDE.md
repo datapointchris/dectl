@@ -142,9 +142,11 @@ which the docstrings do not state.
 - **`join_uri` joins three strings and all three are guarded.** `key_fault` covers the prefix
   and the script, `bucket_fault` covers the bucket. A guard over some operands of a composed
   value and not the rest is the defect this whole surface keeps producing.
-- **`values.s3_uri` is the only place `s3://…` is spelled.** `join_uri`, `script_uri`, the
-  upload's own report and the per-alias help panel all reach it. A second spelling is a second
-  rendering of one location, and it drifts from the object the deploy actually wrote.
+- **An `s3://` URI is constructed in `values.py` and nowhere else, and the check is a command
+  rather than this sentence.** `rg -n "f's3://" src/` returns two rows, both definitions —
+  `bucket_uri` and `s3_uri`. A third row is a second rendering of one location, and it drifts
+  from the object the deploy wrote. Reading one is a separate question: `iceberg.py` takes a
+  URI Glue hands it apart with `parse_s3_uri`, which constructs nothing.
 - **Every value naming a file or directory goes through `resolve_from_root(pipeline, value)`,
   never `Path(value)`** — missing it reintroduces the dependency on where dectl was invoked,
   silently. `pipeline_root` is the fallback half: no `resolve_paths_from` means `Path.cwd()`.
@@ -162,8 +164,22 @@ which the docstrings do not state.
   is that boundary for a glue deploy. A record pairing a raw config string with a resolved path
   presents two spellings of one file as two files, and no call site can see which it holds.
 
-`script_key` is the one place a glue S3 key is built; `script_uri` and the upload both reach it.
-`join_uri` is the URI shape beneath it, shared with the per-alias help panel.
+`join_uri` composes a script's destination out of its three operands. `rg -n 'join_key\(|join_uri\(' src/`
+names every composer, and there are four beyond the definitions: `script_uri` for the deploy,
+`script_uris` for both renderers, `configured_uris` for the per-alias help panel, and the upload,
+which needs the key alone because `upload_file` takes the bucket separately.
+
+**Each of the three operands is substituted exactly once, and which caller does it varies.**
+`script_uri` and the upload render nothing and are handed a rendered job. `configured_uris`
+renders nothing and is handed a raw one, because the help panel is built before `--env` is
+parsed, so its `{env}` is left standing rather than resolved to the wrong environment.
+`script_uris` renders its own three operands, because a renderer must not reach `render_env_model`
+— that also asks the env guard, at a narrower scope than the caller already asked it at.
+
+A caller mixing those conventions names an object nothing wrote, and only when the environment's
+own name carries the token: every other name makes `substitute_env` idempotent and the two
+spellings identical. `test_every_site_composing_a_script_destination_substitutes_exactly_once`
+drives all four with a name that tells them apart.
 
 `deploy` runs everything that can refuse before it writes anything — `resolve_scripts`, then
 `plan_glue_job_update`, then the upload, then `apply_glue_job_update`. `build_job_update` exits

@@ -10,18 +10,18 @@ from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
 from dectl.config import IcebergTableConfig
 from dectl.config import LambdaConfig
+from dectl.config import PipelineConfig
 from dectl.config import StepFunctionConfig
 from dectl.config import declared_paths
 from dectl.config import pipeline_root
-from dectl.config import script_key
 from dectl.env import active_environment
 from dectl.env import render_env_model
+from dectl.env import set_active_environment
 from dectl.pipeline_view import aws_names_only
 from dectl.pipeline_view import pipeline_to_dict
 from dectl.pipeline_view import render_pipeline
 from dectl.pipeline_view import resolved_paths
 from dectl.pipeline_view import resource_types
-from dectl.pipeline_view import script_uris
 from dectl.values import PathKind
 
 
@@ -445,31 +445,22 @@ def test_the_deploy_and_both_renderers_name_one_destination():
     assert '{env}' not in published['script_uris'][0]
 
 
-def test_a_script_key_substitutes_exactly_once(monkeypatch):
-    # `script_key` takes operands the caller has rendered. Substituting them again agrees with
-    # substituting once for every environment name that does not itself contain the token, so
-    # the two conventions are indistinguishable on ordinary input — which is what let the branch
-    # carry both. The name used here is one that tells them apart.
-    monkeypatch.setattr(active_environment, 'name', 'a{env}b')
-    config = DectlConfig.model_validate(
+@pytest.mark.parametrize('render', [render_pipeline, lambda name, pipeline: pipeline_to_dict(name, pipeline)])
+def test_a_renderer_asks_the_env_guard_once_for_the_whole_pipeline(render, capsys):
+    """A hardcoded glue job beside a `{env}` bucket is not an env that changed nothing.
+
+    The guard's subject is the invocation, and the pipeline is what the reader pointed at.
+    Asking it again per glue job answers the same question against a narrower population, so it
+    fired directly above two names `--env` had just resolved — a false claim, suggesting the
+    command already running, landing mid-listing. Both renderers ask once, at the top."""
+    set_active_environment('prod', '--env')
+    pipeline = PipelineConfig.model_validate(
         {
-            'defaults': {'account_id': '1'},
-            'pipelines': {
-                'salesdata': {
-                    'glue_jobs': {
-                        'copy': {
-                            'name': 'j',
-                            'script_bucket': 'b',
-                            'script_prefix': 'p-{env}',
-                            'scripts': ['c.py'],
-                            'role': 'r',
-                        }
-                    }
-                }
-            },
+            'buckets': {'raw': 'sales-{env}-raw'},
+            'glue_jobs': {'legacy': {'name': 'sales-shared-copy', 'script_bucket': 'sales-scripts', 'scripts': ['c.py'], 'role': 'r'}},
         }
     )
-    job = config.pipelines['salesdata'].glue_jobs['copy']
 
-    assert script_key(render_env_model(job), 'c.py') == 'p-a{env}b/c.py'
-    assert script_uris(job) == ['s3://b/p-a{env}b/c.py']
+    render('salesdata', pipeline)
+
+    assert 'changed nothing' not in capsys.readouterr().err

@@ -7,13 +7,11 @@ from dectl.config import declared_paths
 from dectl.config import pipeline_root
 from dectl.config import resolve_from_root
 from dectl.config import resource_members
-from dectl.config import script_key
 from dectl.env import aws_names_of
-from dectl.env import render_env_model
 from dectl.env import substitute_env
 from dectl.env import warn_if_environment_had_no_effect
 from dectl.output import info
-from dectl.values import s3_uri
+from dectl.values import join_uri
 
 
 def resource_types(pipeline: PipelineConfig) -> list[str]:
@@ -35,12 +33,18 @@ def resource_types(pipeline: PipelineConfig) -> list[str]:
 def script_uris(job: GlueJobConfig) -> list[str]:
     """Where every script of one job lands, for a reader rather than for a deploy.
 
-    The job is rendered once and the rendered fields are read, because `script_key` takes
-    operands a caller has already substituted. Both renderers show the same destination the
-    deploy writes, which is the point: two of the faults `config validate` reports are about
-    this composed value and no command rendered it."""
-    rendered = render_env_model(job)
-    return [s3_uri(rendered.script_bucket, script_key(rendered, script)) for script in rendered.scripts]
+    Three operands substituted, exactly as every neighbouring row in both renderers substitutes
+    the name beside it. Both renderers then show the destination the deploy writes, which is the
+    point: two of the faults `config validate` reports are about this composed value and no
+    command rendered it.
+
+    `render_env_model` is deliberately not what does the substituting. It also asks the env
+    guard, and a renderer that asks it once per glue job answers a question its caller already
+    answered for the whole pipeline — with a narrower population, so a hardcoded job beside a
+    `{env}` bucket warned that `--env` changed nothing directly above two names it changed."""
+    bucket = substitute_env(job.script_bucket)
+    prefix = substitute_env(job.script_prefix)
+    return [join_uri(bucket, prefix, substitute_env(script)) for script in job.scripts]
 
 
 def aws_names_only(pipeline: PipelineConfig) -> dict[str, Any]:
