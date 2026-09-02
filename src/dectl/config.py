@@ -21,10 +21,11 @@ from dectl.values import PathKind
 from dectl.values import UnusableValue
 from dectl.values import ValueSite
 from dectl.values import bucket_fault
-from dectl.values import escapes_root
 from dectl.values import expand_home
 from dectl.values import home_fault
 from dectl.values import key_fault
+from dectl.values import leaves_root
+from dectl.values import normalised
 from dectl.values import path_fault
 from dectl.values import root_fault
 
@@ -286,7 +287,11 @@ def resolve_from_root(pipeline: PipelineConfig, substituted_path: str) -> Path:
     glue `scripts` entry may not — `key_fault` refuses that, and `pipeline_value_faults` runs it
     from `config validate` and from the deploy, because the S3 key is built from the configured
     string rather than from the resolved path."""
-    return pipeline_root(pipeline) / expand_home(substituted_path)
+    # Normalised, so what comes back is where the value lands rather than how it was written.
+    # `modules/../code` names the same directory as `code`, and an unnormalised join asks the
+    # filesystem about a `modules/` that need not exist — reporting the path absent when the
+    # directory it names is right there.
+    return normalised(pipeline_root(pipeline) / expand_home(substituted_path))
 
 
 def as_values(configured: str | list[str]) -> list[str]:
@@ -547,14 +552,17 @@ def pipeline_value_faults(
     # is machine-independent and is checked whether or not this pipeline names a root.
     if pipeline.resolve_paths_from:
         already = refused_values(problems)
+        root = pipeline_root(pipeline)
         for declared in declared_paths(pipeline):
             anchored = not declared.value.startswith('~') and not PurePosixPath(declared.value).is_absolute()
-            if not anchored or not escapes_root(declared.value) or not in_scope(declared.site):
+            if not anchored or not in_scope(declared.site):
                 continue
-            if (declared.site, declared.value) not in already:
-                # Carrying where it lands, because that is the answer: a reader who cannot see
-                # the directory outside the root cannot tell a typo from a deliberate `..`.
-                problems.append(row(declared.site, resolve_from_root(pipeline, declared.value), ConfigFault.ESCAPES_ROOT, declared.value))
+            landed = resolve_from_root(pipeline, declared.value)
+            if not leaves_root(root, landed) or (declared.site, declared.value) in already:
+                continue
+            # Carrying where it lands, because that is the answer: a reader who cannot see the
+            # directory outside the root cannot tell a typo from a deliberate `..`.
+            problems.append(row(declared.site, landed, ConfigFault.ESCAPES_ROOT, declared.value))
     if not on_disk:
         return problems
 

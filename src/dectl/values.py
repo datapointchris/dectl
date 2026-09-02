@@ -15,6 +15,7 @@ only one of the three somewhere to be declared.
 Nothing here knows what a pipeline is. The models and the walk over them are `config.py`'s.
 """
 
+import os
 import re
 from collections.abc import Mapping
 from enum import StrEnum
@@ -291,14 +292,27 @@ def home_fault(configured: str) -> ConfigFault | None:
 DIRECTORY_KINDS = frozenset({PathKind.DIRECTORY, PathKind.NON_EMPTY_DIRECTORY})
 
 
+# Directory names that are never part of a function's code, matched anywhere below the source.
+# `__pycache__` is build output; `.git` is repository metadata whose config carries a credential
+# helper line on an https remote, and a `source_dir` of `.` resolves to the checkout that holds
+# it.
+NEVER_DEPLOYED = frozenset({'__pycache__', '.git'})
+
+
 def is_deployable(source: Path, found: Path) -> bool:
     """Whether one entry under `source` is a file a deploy would send.
 
     Exclusions are tested against the path *below* `source`, never the absolute one. Reading the
     whole path puts every directory above the checkout into the question, so a source under
     anything named `__pycache__` — a scratch tree, a container mount — reports as holding
-    nothing to deploy, and `config validate` calls a directory with a handler in it empty."""
-    return found.is_file() and '__pycache__' not in found.relative_to(source).parts
+    nothing to deploy, and `config validate` calls a directory with a handler in it empty.
+
+    `.git` is excluded because it can never be function code and because of what is in it. On an
+    https remote its config carries a credential helper line, and a `source_dir` naming the
+    checkout root — `.` resolves to exactly that — would upload it as the function's own bytes.
+    Excluding it here rather than refusing that one spelling also covers the submodule case,
+    where a `.git` sits below a source directory that is otherwise ordinary."""
+    return found.is_file() and not NEVER_DEPLOYED.intersection(found.relative_to(source).parts)
 
 
 def deployable_files(source: Path) -> list[Path]:
@@ -315,14 +329,33 @@ def has_deployable_files(source: Path) -> bool:
     return any(is_deployable(source, found) for found in source.rglob('*'))
 
 
-def escapes_root(configured: str) -> bool:
-    """Whether this value climbs out of the directory it resolves from.
+def holds_traversal(configured: str) -> bool:
+    """Whether this value is written with a `..` segment.
 
-    A `..` segment is the whole of it for a value already known to be relative. A leading `~`
-    or an absolute path leave the root as well, but they are legal for a value nothing derives
-    a key from — a lambda `source_dir` may sit anywhere — so the caller decides which arms
-    apply. `key_fault` runs all three; the path walk runs this one over relative values."""
+    A lexical question, and the right one for an S3 key: S3 stores the string as written, so a
+    key holding `..` names an object with `..` in its name whatever any resolver would make of
+    it. `key_fault` is the caller. A path is a different question — see `leaves_root`, which
+    resolves first, because `sub/../code` holds a traversal and stays inside the root."""
     return '..' in configured.split('/')
+
+
+def normalised(path: Path) -> Path:
+    """A path with `.` and `..` collapsed, without touching the filesystem.
+
+    `Path.resolve()` would answer the same question and also follow symlinks and require the
+    path to be reachable, neither of which is wanted for a value that names something that may
+    not be checked out yet."""
+    return Path(os.path.normpath(path))
+
+
+def leaves_root(root: Path, resolved: Path) -> bool:
+    """Whether a path anchored to `root` lands outside it once `.` and `..` are collapsed.
+
+    Decided by where the value resolves rather than by how it is spelled. `sub/../code` holds a
+    traversal and lands under the root, so refusing it names a fault its own resolved path
+    disproves and prints a remedy describing what the config already does. `../shared/code`
+    holds the same traversal and genuinely leaves."""
+    return not normalised(resolved).is_relative_to(normalised(root))
 
 
 def path_fault(path: Path, expects: PathKind) -> ConfigFault | None:
@@ -376,7 +409,7 @@ def key_fault(configured: str) -> ConfigFault | None:
     disappears with it. A config carrying a malformed key still loads, `config validate` names
     it and the deploy refuses it, so the diagnosis reaches the reader without the CLI that
     delivers it going away."""
-    if configured.startswith('~') or PurePosixPath(configured).is_absolute() or escapes_root(configured):
+    if configured.startswith('~') or PurePosixPath(configured).is_absolute() or holds_traversal(configured):
         return ConfigFault.KEY_ESCAPES_ROOT
     if not all(segment and segment != '.' for segment in configured.split('/')):
         return ConfigFault.NOT_A_CLEAN_KEY

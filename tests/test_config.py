@@ -511,14 +511,15 @@ def test_the_root_is_absent_by_default():
 @pytest.mark.parametrize(
     ('source_dir', 'faults'),
     [
-        # Relative and climbing out: the anchor is enforced for every value anchored to it, not
-        # only the ones a key check reaches for another reason. A lambda builds no S3 key, so
-        # `key_fault` never runs on a `source_dir` and only this arm covers it.
+        # Relative and landing outside: the anchor is enforced for every value anchored to it,
+        # not only the ones a key check reaches for another reason. A lambda builds no S3 key,
+        # so `key_fault` never runs on a `source_dir` and only this arm covers it.
         ('..', [ConfigFault.ESCAPES_ROOT]),
-        # Caught as an escape rather than as `absent`, so which traversals are refused does not
-        # depend on whether an intermediate directory happens to exist.
+        # Judged by where it lands rather than by how it is written, so a traversal that stays
+        # inside the root is not refused for leaving it — the row's own resolved path would
+        # disprove the fault name, and the remedy would describe what the config already does.
         ('code/../..', [ConfigFault.ESCAPES_ROOT]),
-        ('modules/../code', [ConfigFault.ESCAPES_ROOT]),
+        ('modules/../code', []),
         ('code', []),
         # The fourth branch `resolve_from_root` takes. `Path('')` is `.` and `/` drops it, so an
         # empty value resolves to the anchor itself and the deploy uploads the whole checkout.
@@ -737,3 +738,47 @@ def test_the_anchor_is_enforced_once_a_pipeline_declares_one(tmp_path):
     )
 
     assert [f.fault for f in pipeline_value_faults('p', pipeline, on_disk=False)] == [ConfigFault.ESCAPES_ROOT]
+
+
+def test_a_traversal_that_lands_inside_the_root_is_not_an_escape(tmp_path):
+    # Decided by where the value lands, not by how it is written. Judged lexically, this is
+    # refused for leaving a directory it never leaves — and the row's own resolved path would
+    # have shown it under the root, so the evidence disproved the fault name.
+    (tmp_path / 'code').mkdir()
+    (tmp_path / 'code' / 'handler.py').write_text('x')
+    pipeline = PipelineConfig.model_validate(
+        {'resolve_paths_from': str(tmp_path), 'lambdas': {'fn': {'name': 'n', 'source_dir': 'modules/../code'}}}
+    )
+
+    assert pipeline_value_faults('p', pipeline, on_disk=True) == []
+    assert resolve_from_root(pipeline, 'modules/../code') == tmp_path / 'code'
+
+
+def test_an_escape_reports_where_it_lands_rather_than_how_it_was_written(tmp_path):
+    root = tmp_path / 'anchor'
+    root.mkdir()
+    pipeline = PipelineConfig.model_validate(
+        {'resolve_paths_from': str(root), 'lambdas': {'fn': {'name': 'n', 'source_dir': '../shared/code'}}}
+    )
+
+    [fault] = pipeline_value_faults('p', pipeline, on_disk=False)
+
+    assert fault.fault is ConfigFault.ESCAPES_ROOT
+    # The directory outside the root, not the join that spells the way there. A reader who
+    # cannot see where it lands cannot tell a typo from a deliberate `..`.
+    assert fault.path == tmp_path / 'shared' / 'code'
+    assert '..' not in str(fault.path)
+
+
+def test_a_source_dir_naming_the_checkout_does_not_ship_its_git_directory(tmp_path):
+    # `.` resolves to the anchor, and on an https remote `.git/config` carries a credential
+    # helper line. Excluded by name wherever it sits below the source, so a submodule's `.git`
+    # under an otherwise ordinary source directory is covered by the same rule.
+    (tmp_path / '.git').mkdir()
+    (tmp_path / '.git' / 'config').write_text('[credential]\n  helper = store\n')
+    (tmp_path / 'code').mkdir()
+    (tmp_path / 'code' / 'handler.py').write_text('x')
+
+    shipped = {str(found.relative_to(tmp_path)) for found in deployable_files(tmp_path)}
+
+    assert shipped == {'code/handler.py'}
