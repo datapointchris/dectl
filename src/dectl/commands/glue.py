@@ -21,6 +21,7 @@ from dectl.output import error
 from dectl.output import info
 from dectl.output import success
 from dectl.prompt import confirm_or_exit
+from dectl.values import join_key
 from dectl.values import refuse_unusable_values
 from dectl.values import s3_uri
 
@@ -40,7 +41,7 @@ def join_uri(bucket: str, prefix: str, script: str) -> str:
     The key's two halves joined as `script_key` joins them, handed to `s3_uri` for the shape.
     The per-alias help panel reaches this with raw operands, because it is built before `--env`
     is parsed; every other caller goes through `script_uri` with substituted ones."""
-    return s3_uri(bucket, f'{prefix}/{script}')
+    return s3_uri(bucket, join_key(prefix, script))
 
 
 def script_key(glue_job: GlueJobConfig, script: str) -> str:
@@ -49,7 +50,7 @@ def script_key(glue_job: GlueJobConfig, script: str) -> str:
     The one place this is built. The upload, `ScriptLocation` and `--extra-py-files` all read it,
     and any two of them disagreeing means Glue fetches an object nothing wrote. Both halves are
     substituted, because a `{env}` surviving into a key names an object that cannot exist."""
-    return f'{substitute_env(glue_job.script_prefix)}/{substitute_env(script)}'
+    return join_key(substitute_env(glue_job.script_prefix), substitute_env(script))
 
 
 def script_uri(glue_job: GlueJobConfig, script: str) -> str:

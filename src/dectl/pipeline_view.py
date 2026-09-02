@@ -10,6 +10,7 @@ from dectl.env import aws_names_of
 from dectl.env import substitute_env
 from dectl.env import warn_if_environment_had_no_effect
 from dectl.output import info
+from dectl.values import join_key
 from dectl.values import s3_uri
 
 
@@ -97,6 +98,13 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
                 'script_bucket': substitute_env(job.script_bucket),
                 'script_prefix': substitute_env(job.script_prefix),
                 'scripts': [substitute_env(script) for script in job.scripts],
+                # The composed destination, beside the two strings it is built from. Two of the
+                # faults `config validate` reports are about this value, and a reader refused
+                # over one otherwise has to join two fields by hand to see what was refused.
+                'script_uris': [
+                    s3_uri(substitute_env(job.script_bucket), join_key(substitute_env(job.script_prefix), substitute_env(script)))
+                    for script in job.scripts
+                ],
                 'paths': resolved.get(('glue', alias), {}),
             }
             for alias, job in pipeline.glue_jobs.items()
@@ -151,7 +159,9 @@ def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
 
     for alias, job in pipeline.glue_jobs.items():
         info(f'  glue/{alias}: {substitute_env(job.name)}')
-        info(f'    bucket: {s3_uri(substitute_env(job.script_bucket), substitute_env(job.script_prefix) + "/")}')
+        for script in job.scripts:
+            key = join_key(substitute_env(job.script_prefix), substitute_env(script))
+            info(f'    deploys to: {s3_uri(substitute_env(job.script_bucket), key)}')
         print_paths('glue', alias)
     for alias, fn in pipeline.lambdas.items():
         # Worth calling out inline: a durable function carries a different set of verbs.

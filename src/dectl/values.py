@@ -95,13 +95,23 @@ FAULT_WORDING = {
 }
 
 
+def join_key(prefix: str, name: str) -> str:
+    """The two halves of an S3 key, joined as written.
+
+    Joined rather than normalised: S3 stores `a//b` and `a/./b` as themselves, which is why
+    `key_fault` reads the raw string. Both operands reach this already substituted, or both raw
+    for the help panel that runs before `--env` is parsed."""
+    return f'{prefix}/{name}'
+
+
 def s3_uri(bucket: str, key: str) -> str:
     """How an S3 location is spelled, from the bucket and the key.
 
-    The one place the shape is written. Four callers name a location — the upload's own report,
-    `ScriptLocation`, `--extra-py-files` and the per-alias help panel — and each spelling it out
-    is a rendering that can drift from the object the deploy actually wrote. They pass different
-    operands on purpose: the help panel is built before `--env` is parsed and passes raw ones."""
+    The one place the shape is written. Five callers name a location — the upload's own report,
+    `ScriptLocation`, `--extra-py-files`, the per-alias help panel and `config show` — and each
+    spelling it out is a rendering that can drift from the object the deploy actually wrote.
+    They pass different operands on purpose: the help panel is built before `--env` is parsed
+    and passes raw ones."""
     return f's3://{bucket}/{key}'
 
 
