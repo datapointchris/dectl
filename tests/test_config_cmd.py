@@ -407,7 +407,7 @@ def test_validate_checks_key_shape_even_without_a_declared_root(monkeypatch, tmp
     result = runner.invoke(config_app, ['validate', '--json'])
 
     assert result.exit_code == 1
-    assert [p['fault'] for p in json.loads(result.stdout)['unusable_values']] == ['escapes_root']
+    assert [p['fault'] for p in json.loads(result.stdout)['unusable_values']] == ['key_escapes_root']
 
 
 def test_a_malformed_key_leaves_the_rest_of_the_cli_working(monkeypatch, tmp_path):

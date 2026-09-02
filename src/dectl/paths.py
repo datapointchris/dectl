@@ -64,13 +64,18 @@ class ConfigFault(StrEnum):
     UNRESOLVABLE_HOME = 'unresolvable_home'
     NOT_A_CLEAN_KEY = 'not_a_clean_key'
     ESCAPES_ROOT = 'escapes_root'
+    KEY_ESCAPES_ROOT = 'key_escapes_root'
     NOT_A_BUCKET_NAME = 'not_a_bucket_name'
 
 
 # The faults about how a value is spelled rather than about what this machine holds. They are
 # reported against the configured string: resolution normalises away the very thing a key fault
 # names, and a bucket name resolves to nothing at all.
-SPELLING_FAULTS = frozenset({ConfigFault.NOT_A_CLEAN_KEY, ConfigFault.ESCAPES_ROOT, ConfigFault.NOT_A_BUCKET_NAME})
+#
+# `ESCAPES_ROOT` is deliberately absent. A path that climbs out of the anchor resolves to a real
+# directory, and where it lands is the answer — so its row carries the resolved path and its
+# reader is sent to `config show`, which is the command that prints it.
+SPELLING_FAULTS = frozenset({ConfigFault.NOT_A_CLEAN_KEY, ConfigFault.KEY_ESCAPES_ROOT, ConfigFault.NOT_A_BUCKET_NAME})
 
 # Every member gets a sentence, and a missing one raises at the moment a reader needs the
 # answer. `test_every_fault_has_a_sentence` is what keeps the mapping total; `SPELLING_FAULTS`
@@ -84,7 +89,8 @@ FAULT_WORDING = {
     ConfigFault.DECLARES_NOTHING: 'names nothing to deploy',
     ConfigFault.UNRESOLVABLE_HOME: 'names a home directory this machine cannot resolve',
     ConfigFault.NOT_A_CLEAN_KEY: 'is not written as a plain relative path, and the S3 key is built from it',
-    ConfigFault.ESCAPES_ROOT: 'climbs out of the directory paths resolve from, and the S3 key is built from it',
+    ConfigFault.ESCAPES_ROOT: 'climbs out of the directory paths resolve from',
+    ConfigFault.KEY_ESCAPES_ROOT: 'climbs out of the directory paths resolve from, and the S3 key is built from it',
     ConfigFault.NOT_A_BUCKET_NAME: 'is not a name S3 will accept for a bucket',
 }
 
@@ -93,6 +99,13 @@ FAULT_WORDING = {
 # `config show` cannot help: it prints the resolved path, which has the malformation normalised
 # out of it, and it shows a bucket name back exactly as written.
 KEY_FORM = 'an S3 key is written as plain relative segments: jobs/copy.py, never ./x, ../x, ~/x, /x, a//b or a trailing /'
+# Said for a value anchored to `resolve_paths_from` that leaves it. `~/x` and `/x` are legal
+# here and refused by `KEY_FORM`, so the two cannot share a line: a `source_dir` told to use the
+# key form is told to avoid the one spelling that fixes it.
+ANCHOR_FORM = (
+    'a path anchored to resolve_paths_from stays inside it: name a directory below the root, '
+    'or write an absolute or ~-rooted path, which resolves on its own and is not anchored'
+)
 BUCKET_FORM = (
     'an S3 bucket name is 3-63 characters of lowercase letters, digits, dots and hyphens, '
     'starts and ends with a letter or digit, holds no doubled dot, and is not an IP address'
@@ -242,9 +255,14 @@ def home_fault(configured: str) -> ConfigFault | None:
 DIRECTORY_KINDS = frozenset({PathKind.DIRECTORY, PathKind.NON_EMPTY_DIRECTORY})
 
 
-def is_deployable(found: Path) -> bool:
-    """Whether one entry under a source directory is a file a deploy would send."""
-    return found.is_file() and '__pycache__' not in found.parts
+def is_deployable(source: Path, found: Path) -> bool:
+    """Whether one entry under `source` is a file a deploy would send.
+
+    Exclusions are tested against the path *below* `source`, never the absolute one. Reading the
+    whole path puts every directory above the checkout into the question, so a source under
+    anything named `__pycache__` — a scratch tree, a container mount — reports as holding
+    nothing to deploy, and `config validate` calls a directory with a handler in it empty."""
+    return found.is_file() and '__pycache__' not in found.relative_to(source).parts
 
 
 def deployable_files(source: Path) -> list[Path]:
@@ -253,12 +271,12 @@ def deployable_files(source: Path) -> list[Path]:
     `zip_lambda` needs the list. `path_fault` needs only whether there is one, which is
     `has_deployable_files` — building and sorting a whole tree to answer yes or no costs 70ms
     on a 7,000-file source against 0.4ms, and `config validate` reads a config file."""
-    return sorted(found for found in source.rglob('*') if is_deployable(found))
+    return sorted(found for found in source.rglob('*') if is_deployable(source, found))
 
 
 def has_deployable_files(source: Path) -> bool:
     """Whether `source` holds anything a deploy would send, stopping at the first one."""
-    return any(is_deployable(found) for found in source.rglob('*'))
+    return any(is_deployable(source, found) for found in source.rglob('*'))
 
 
 def escapes_root(configured: str) -> bool:
@@ -305,7 +323,7 @@ def key_fault(configured: str) -> ConfigFault | None:
     it and the deploy refuses it, so the diagnosis reaches the reader without the CLI that
     delivers it going away."""
     if configured.startswith('~') or PurePosixPath(configured).is_absolute() or escapes_root(configured):
-        return ConfigFault.ESCAPES_ROOT
+        return ConfigFault.KEY_ESCAPES_ROOT
     if not all(segment and segment != '.' for segment in configured.split('/')):
         return ConfigFault.NOT_A_CLEAN_KEY
     return None
@@ -319,11 +337,18 @@ def recovery_lines(problems: list[UnusableValue]) -> list[str]:
     renders a malformed key as a correct-looking one, and it shows a bucket name back exactly as
     written. Naming the form the value has to take is the answer to those; `config show` is the
     answer to a file that is not where the config says. A run carrying more than one kind gets a
-    line for each, because dropping any of them sends those rows nowhere."""
+    line for each, because dropping any of them sends those rows nowhere.
+
+    Climbing out of the anchor gets its own line rather than the key one. The two subjects want
+    opposite things: an S3 key may not be `~/x` or `/x`, and those are exactly the spellings that
+    fix an anchored directory, so one line for both tells half its readers to avoid their own
+    remedy."""
     faults = {problem.fault for problem in problems}
     lines = []
-    if faults & {ConfigFault.NOT_A_CLEAN_KEY, ConfigFault.ESCAPES_ROOT}:
+    if faults & {ConfigFault.NOT_A_CLEAN_KEY, ConfigFault.KEY_ESCAPES_ROOT}:
         lines.append(KEY_FORM)
+    if ConfigFault.ESCAPES_ROOT in faults:
+        lines.append(ANCHOR_FORM)
     if ConfigFault.NOT_A_BUCKET_NAME in faults:
         lines.append(BUCKET_FORM)
     if faults & SPELLING_FAULTS:

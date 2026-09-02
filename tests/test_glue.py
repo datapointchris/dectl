@@ -431,9 +431,9 @@ def test_extra_py_files_name_the_same_objects_the_upload_wrote(tmp_path, monkeyp
 @pytest.mark.parametrize(
     ('written', 'expected'),
     [
-        ('/srv/shared/handler.py', ConfigFault.ESCAPES_ROOT),
-        ('../sibling/util.py', ConfigFault.ESCAPES_ROOT),
-        ('~/shared/lib.py', ConfigFault.ESCAPES_ROOT),
+        ('/srv/shared/handler.py', ConfigFault.KEY_ESCAPES_ROOT),
+        ('../sibling/util.py', ConfigFault.KEY_ESCAPES_ROOT),
+        ('~/shared/lib.py', ConfigFault.KEY_ESCAPES_ROOT),
         ('./copy.py', ConfigFault.NOT_A_CLEAN_KEY),
         ('jobs//copy.py', ConfigFault.NOT_A_CLEAN_KEY),
         ('jobs/./copy.py', ConfigFault.NOT_A_CLEAN_KEY),
@@ -445,8 +445,10 @@ def test_a_key_that_s3_would_store_literally_is_refused(tmp_path, written, expec
     # publishes the name, so an assertion satisfied by either value pins neither — an
     # unreachable NOT_A_CLEAN_KEY would satisfy it for every input here.
     #
-    # A leading ~ is ESCAPES_ROOT rather than a spelling fault: it resolves through $HOME, which
-    # is the same dependence on where the deploy ran that `resolve_paths_from` exists to remove.
+    # A leading ~ is KEY_ESCAPES_ROOT rather than a spelling fault: it resolves through $HOME,
+    # which is the same dependence on where the deploy ran that `resolve_paths_from` removes.
+    # The key-specific member is what carries the S3-key sentence; a `source_dir` leaving the
+    # anchor gets ESCAPES_ROOT, whose remedy allows the `~/x` this one refuses.
     pipeline = glue_pipeline(str(tmp_path), [written])
 
     assert [f.fault for f in pipeline_path_faults('proj', pipeline, on_disk=True)] == [expected]
@@ -455,9 +457,9 @@ def test_a_key_that_s3_would_store_literally_is_refused(tmp_path, written, expec
 @pytest.mark.parametrize(
     ('written', 'expected'),
     [
-        ('/scripts', ConfigFault.ESCAPES_ROOT),
-        ('../scripts', ConfigFault.ESCAPES_ROOT),
-        ('~/scripts', ConfigFault.ESCAPES_ROOT),
+        ('/scripts', ConfigFault.KEY_ESCAPES_ROOT),
+        ('../scripts', ConfigFault.KEY_ESCAPES_ROOT),
+        ('~/scripts', ConfigFault.KEY_ESCAPES_ROOT),
         ('./scripts', ConfigFault.NOT_A_CLEAN_KEY),
         ('scripts/', ConfigFault.NOT_A_CLEAN_KEY),
         ('scripts//sub', ConfigFault.NOT_A_CLEAN_KEY),

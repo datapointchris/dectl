@@ -36,6 +36,9 @@ from dectl.env import set_active_environment
 from dectl.paths import FAULT_WORDING
 from dectl.paths import SPELLING_FAULTS
 from dectl.paths import ConfigFault
+from dectl.paths import PathKind
+from dectl.paths import deployable_files
+from dectl.paths import path_fault
 
 
 def test_template_config_is_valid():
@@ -473,6 +476,28 @@ def test_every_shape_a_source_dir_can_take_is_judged(tmp_path, source_dir, fault
     )
 
     assert [f.fault for f in pipeline_path_faults('p', pipeline, on_disk=True)] == faults
+
+
+def test_a_source_under_an_excluded_directory_name_still_holds_its_files(tmp_path):
+    # The exclusion is about what sits inside the source, so it is tested below the source and
+    # never against the absolute path. Reading the whole path puts every directory above the
+    # checkout into the question: a tree that happens to live under one named `__pycache__`
+    # reports every lambda source as holding nothing, and the deploy door refuses a directory
+    # with a handler in it.
+    source = tmp_path / '__pycache__' / 'checkout' / 'code'
+    source.mkdir(parents=True)
+    (source / 'handler.py').write_text('def handler(event, context): pass')
+
+    assert path_fault(source, PathKind.NON_EMPTY_DIRECTORY) is None
+    assert [found.name for found in deployable_files(source)] == ['handler.py']
+
+
+def test_a_pycache_inside_the_source_is_still_excluded(tmp_path):
+    source = tmp_path / 'code'
+    (source / '__pycache__').mkdir(parents=True)
+    (source / '__pycache__' / 'handler.cpython-313.pyc').write_bytes(b'\x00')
+
+    assert path_fault(source, PathKind.NON_EMPTY_DIRECTORY) is ConfigFault.EMPTY_DIRECTORY
 
 
 def test_an_absolute_source_dir_still_sits_where_it_likes(tmp_path):

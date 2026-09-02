@@ -556,7 +556,9 @@ def pipeline_path_faults(
             if not anchored or not escapes_root(declared.value) or not in_scope(declared.site):
                 continue
             if (declared.site, declared.value) not in already:
-                problems.append(row(declared.site, None, ConfigFault.ESCAPES_ROOT, declared.value))
+                # Carrying where it lands, because that is the answer: a reader who cannot see
+                # the directory outside the root cannot tell a typo from a deliberate `..`.
+                problems.append(row(declared.site, resolve_from_root(pipeline, declared.value), ConfigFault.ESCAPES_ROOT, declared.value))
     if not on_disk:
         return problems
 
