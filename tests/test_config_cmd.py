@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from dectl.commands.config_cmd import config_app
@@ -60,7 +61,7 @@ def test_validate_reports_missing_config(monkeypatch, tmp_path):
 
     result = runner.invoke(config_app, ['validate'])
 
-    assert result.exit_code == 1
+    assert result.exit_code == 3
     assert 'no config' in result.stderr
 
 
@@ -72,7 +73,7 @@ def test_validate_reports_unknown_key(monkeypatch, tmp_path):
 
     result = runner.invoke(config_app, ['validate'])
 
-    assert result.exit_code == 1
+    assert result.exit_code == 3
     # The detail is a refusal, not an answer, so it goes to stderr like every other one.
     assert 'glue_jbs' in result.stderr
     assert result.stdout == ''
@@ -225,10 +226,10 @@ def test_validate_json_separates_a_clean_config_from_one_it_could_not_read(monke
     unreadable = runner.invoke(config_app, ['validate', '--json'])
 
     # Both carry an empty list. A caller that has dropped the exit status would otherwise be
-    # told nothing was wrong with a config that was never read.
+    # told nothing was wrong with a config that was never read, so the status separates them too.
     assert clean.exit_code == 0
     assert json.loads(clean.stdout) == {'outcome': 'valid', 'unusable_values': []}
-    assert unreadable.exit_code == 1
+    assert unreadable.exit_code == 3
     assert json.loads(unreadable.stdout)['outcome'] == 'invalid_schema'
 
 
@@ -239,9 +240,43 @@ def test_validate_json_keeps_stdout_parseable_on_a_schema_failure(monkeypatch, t
 
     result = runner.invoke(config_app, ['validate', '--json'])
 
-    assert result.exit_code == 1
+    assert result.exit_code == 3
     assert json.loads(result.stdout) == {'outcome': 'invalid_schema', 'unusable_values': []}
     assert 'pipelines.p.step_function' in result.stderr
+
+
+@pytest.mark.parametrize(
+    ('raw', 'outcome'),
+    [
+        ('pipelines: [oh: dear\n', 'invalid_yaml'),
+        (BAD_CONFIG, 'invalid_schema'),
+    ],
+)
+def test_validate_json_tells_the_two_load_failures_apart(monkeypatch, tmp_path, raw, outcome):
+    # The human path prints "is not valid YAML" or "does not match the expected schema", and the
+    # two have different fixes. The `--json` reader is the one who cannot see that sentence, so
+    # folding both into one outcome left them with the stderr they are not reading.
+    point_at(monkeypatch, tmp_path, raw)
+
+    result = runner.invoke(config_app, ['validate', '--json'])
+
+    assert result.exit_code == 3
+    assert json.loads(result.stdout)['outcome'] == outcome
+
+
+def test_validate_separates_a_config_it_read_from_one_it_could_not(monkeypatch, tmp_path):
+    # 1 is the answer the command was run for: the config was read and names values that cannot
+    # be used. 3 is a config that was never read, which needs a person rather than an edit to a
+    # path. A scheduled run folding them together reports a box with no dectl config as fine.
+    root = tmp_path / 'salesdata'
+    point_at(monkeypatch, tmp_path, config_naming(str(root)))
+    unusable = runner.invoke(config_app, ['validate'])
+
+    (tmp_path / 'config.yaml').unlink()
+    absent = runner.invoke(config_app, ['validate'])
+
+    assert unusable.exit_code == 1
+    assert absent.exit_code == 3
 
 
 def config_naming(root: str, source_dir: str = 'code') -> str:

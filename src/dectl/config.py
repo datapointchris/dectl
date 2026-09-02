@@ -626,6 +626,16 @@ CONFIG_LOAD_ERRORS = (yaml.YAMLError, ValidationError)
 MAX_INPUT_CHARS = 160
 
 
+def config_error_outcome(exc: yaml.YAMLError | ValidationError) -> str:
+    """Which of the two load failures this is, as `validate --json` publishes it.
+
+    The same discriminator the headline reads, so the machine reader and the human reader are
+    told apart the same way. Folding both into one outcome left the `--json` caller — the one
+    who cannot see the stderr sentence — unable to tell a file YAML could not parse from one
+    that parsed and named the wrong keys, and those have different fixes."""
+    return 'invalid_yaml' if isinstance(exc, yaml.YAMLError) else 'invalid_schema'
+
+
 def config_error_headline(exc: yaml.YAMLError | ValidationError) -> str:
     """The one-line summary: which file, and which of the two failures it hit."""
     kind = 'is not valid YAML' if isinstance(exc, yaml.YAMLError) else 'does not match the expected schema'

@@ -12,6 +12,7 @@ from rich.syntax import Syntax
 from dectl.config import CONFIG_LOAD_ERRORS
 from dectl.config import CONFIG_PATH
 from dectl.config import TEMPLATE_CONFIG
+from dectl.config import config_error_outcome
 from dectl.config import config_path_faults
 from dectl.config import init_config
 from dectl.config import load_config
@@ -29,6 +30,13 @@ config_app = typer.Typer(
     no_args_is_help=True,
     help=f'Manage dectl configuration at {CONFIG_PATH}.',
 )
+
+# What `config validate` exits when it could not read the config at all — absent, unparsable, or
+# not matching the schema. Separate from the 1 it exits for a config it read and found values in
+# that cannot be used: that answer is what the command was run for, and this one needs a person.
+# A scheduled run that folds them together reports a box with no dectl config as a box whose
+# config is fine. 2 is not available, because Typer exits 2 on a usage error.
+UNREADABLE_CONFIG_EXIT = 3
 
 
 @config_app.command('init')
@@ -130,22 +138,28 @@ def config_validate(
 
     --json emits an object carrying `outcome` and `unusable_values`. The outcome separates a
     clean config from one that could not be read at all, which an empty list alone folds
-    together — the detail of a schema failure stays on stderr, where it has a renderer.
+    together — the detail of a load failure stays on stderr, where it has a renderer.
+
+    The exit code carries the same split. 0 is a clean config and 1 is a config that was read
+    and names values that cannot be used, which is the answer this command was run to get.
+    Anything that stopped it reading the config at all is 3, so a scheduled run cannot report a
+    box with no dectl config as a box whose config is fine.
     """
 
     def refuse(outcome: str, message: str) -> NoReturn:
-        """Report on stderr, keep stdout parseable, exit 1.
+        """Report on stderr, keep stdout parseable, exit 3.
 
         The document carries the outcome beside the list. A bare `[]` reads the same whether the
         config was clean, unreadable, or absent — so a caller that has dropped the exit status is
-        told nothing was wrong with a config that was never read.
+        told nothing was wrong with a config that was never read. Every caller of this is a
+        config that could not be read, which is the code a person has to act on.
 
         `NoReturn`, because every path through it raises: `-> None` reads as fall-through and
         invites a call site to guard against a return that cannot happen."""
         error(message)
         if as_json:
             emit_json({'outcome': outcome, 'unusable_values': []})
-        raise typer.Exit(1)
+        raise typer.Exit(UNREADABLE_CONFIG_EXIT)
 
     if not CONFIG_PATH.exists():
         refuse('no_config', f'no config found at {CONFIG_PATH} — run "dectl config init" to create one')
@@ -155,8 +169,8 @@ def config_validate(
     except CONFIG_LOAD_ERRORS as exc:
         report_config_error(exc)
         if as_json:
-            emit_json({'outcome': 'invalid_schema', 'unusable_values': []})
-        raise typer.Exit(1) from exc
+            emit_json({'outcome': config_error_outcome(exc), 'unusable_values': []})
+        raise typer.Exit(UNREADABLE_CONFIG_EXIT) from exc
     if config is None:
         refuse('no_config', f'config at {CONFIG_PATH} was removed while it was being read')
 
