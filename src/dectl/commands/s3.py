@@ -8,14 +8,16 @@ from typing import Annotated
 import typer
 
 from dectl.config import DectlConfig
+from dectl.config import PipelineConfig
 from dectl.env import substitute_env
 from dectl.env import warn_if_environment_had_no_effect
 from dectl.output import error
 from dectl.output import success
-from dectl.values import BUCKET_FORM
-from dectl.values import FAULT_WORDING
+from dectl.values import UnusableValue
+from dectl.values import ValueSite
 from dectl.values import bucket_fault
 from dectl.values import bucket_uri
+from dectl.values import refuse_unusable_values
 
 # Where mounted buckets land. A short, top-level path under $HOME so a mounted bucket is
 # easy to cd into (~/buckets/PIPELINE/ALIAS); the pipeline segment namespaces buckets
@@ -42,13 +44,21 @@ def usable_bucket(pipeline_name: str, alias: str, template: str) -> str:
     key nor the pipeline.
 
     The refusal goes to stderr and takes the exit code with it, so a caller evaluating stdout
-    evaluates nothing rather than a broken assignment."""
+    evaluates nothing rather than a broken assignment.
+
+    Built as an `UnusableValue` and handed to the shared exit, rather than composed here. The
+    label, the wording, the quoting of the written value and the remedy line are then the ones
+    `config validate` prints for the same config — a door that composes its own agrees with
+    the other on the day it is written and on no day after. The site is what `declared_names`
+    files a bucket under, `FIELD_RESOURCE` included, so renaming that collection moves both."""
     resolved = substitute_env(template)
     fault = bucket_fault(resolved)
     if fault:
-        error(f'{pipeline_name}: s3/{alias} buckets {FAULT_WORDING[fault]}: {resolved!r}')
-        error(BUCKET_FORM)
-        raise typer.Exit(1)
+        site = ValueSite(PipelineConfig.site_resource('buckets'), alias, 'buckets')
+        refuse_unusable_values(
+            [UnusableValue(pipeline=pipeline_name, site=site, path=None, fault=fault, configured=resolved)],
+            exit_code=1,
+        )
     return resolved
 
 

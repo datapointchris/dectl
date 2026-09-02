@@ -38,6 +38,7 @@ from dectl.output import info
 from dectl.output import success
 from dectl.payloads import read_payload
 from dectl.values import FAULT_WORDING
+from dectl.values import SHOW_RESOLVED
 from dectl.values import PathKind
 from dectl.values import deployable_files
 from dectl.values import path_fault
@@ -66,7 +67,7 @@ def zip_lambda(source: Path) -> Path:
     fault = path_fault(source, PathKind.NON_EMPTY_DIRECTORY)
     if fault:
         error(f'lambda source_dir {FAULT_WORDING[fault]}: {source}')
-        error('run "dectl config show" to see where each configured path resolves')
+        error(SHOW_RESOLVED)
         raise typer.Exit(1)
 
     files = deployable_files(source)

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from dectl.env import substitute_env
 from dectl.output import error
 from dectl.output import stderr_console
+from dectl.values import EDIT_CONFIG
 from dectl.values import ConfigFault
 from dectl.values import DeclaredKey
 from dectl.values import DeclaredName
@@ -710,7 +711,7 @@ def report_config_error(exc: yaml.YAMLError | ValidationError) -> None:
         stderr_console.print(line, markup=False)
     # The headline already named the file, and repeating a long path here wraps across two
     # lines on a narrow terminal, which breaks it mid-token for anyone copying it.
-    stderr_console.print('run "dectl config edit" to fix it')
+    stderr_console.print(EDIT_CONFIG)
 
 
 def init_config() -> Path:

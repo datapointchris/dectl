@@ -6,6 +6,9 @@ import pytest
 from botocore.exceptions import ClientError
 from typer.testing import CliRunner
 
+from dectl.env import DEFAULT_ENV
+from dectl.env import set_active_environment
+
 # Every rendered assertion in this suite is otherwise an assertion about the window the suite was
 # run in. A rich console wraps to the terminal it finds, so `'is not a name S3 will accept' in
 # result.stderr` passes at 80 columns and fails at 40 on output correct at both, and a table
@@ -107,6 +110,31 @@ class FakeCloudWatchLogs:
                 {'Error': {'Code': 'ResourceNotFoundException', 'Message': 'The specified log group does not exist'}},
                 'FilterLogEvents',
             )
+
+
+@pytest.fixture(autouse=True)
+def fresh_environment():
+    """Start every test from the default environment, with the once-per-run warning unspent.
+
+    `active_environment` is process state, so a test that sets `--env` explicitly leaves the
+    next one running under it — and the env-effect guard fires once per process, which makes
+    "did this warn" depend on which tests ran first. Measured: `test_s3.py` passed alone and
+    failed in the suite, on a warning raised by a test in another file."""
+    set_active_environment(DEFAULT_ENV, 'default')
+
+
+def unwrapped(text: str) -> str:
+    """Captured output with the console's wrap collapsed, for comparing it against a source list.
+
+    The width is pinned, so a rendered line is reproducible — but a message longer than the pin
+    still wraps, and the lines it wraps to are not the lines the renderer produced. Comparing a
+    capture against `render_unusable_values`'s own list needs one of the two normalised, and
+    rich breaks at spaces rather than mid-word, so collapsing whitespace recovers the text.
+
+    For comparing whole messages. An `in` check against the collapse can match a phrase spanning
+    two unrelated lines, which is why `test_render_pipeline_prints_alias_to_name_lines` asserts
+    tokens instead."""
+    return ' '.join(text.split())
 
 
 @contextlib.contextmanager

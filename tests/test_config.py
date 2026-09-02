@@ -44,14 +44,21 @@ from dectl.env import render_env_model
 from dectl.env import set_active_environment
 from dectl.env import substitute_env
 from dectl.pipeline_view import aws_names_only
+from dectl.values import ANCHOR_FORM
+from dectl.values import EDIT_CONFIG
 from dectl.values import FAULT_WORDING
+from dectl.values import KEY_FORM
 from dectl.values import ROOT_FORM
+from dectl.values import SHOW_RESOLVED
 from dectl.values import SPELLING_FAULTS
 from dectl.values import ConfigFault
 from dectl.values import DeclaresValues
 from dectl.values import PathKind
+from dectl.values import UnusableValue
+from dectl.values import ValueSite
 from dectl.values import deployable_files
 from dectl.values import path_fault
+from dectl.values import recovery_lines
 from dectl.values import root_fault
 
 
@@ -716,6 +723,59 @@ def test_every_fault_has_a_sentence():
     # FAULT_WORDING is indexed with no default, so a member added without one raises at the
     # moment a reader needs the answer.
     assert set(FAULT_WORDING) == set(ConfigFault)
+
+
+def problem(fault: ConfigFault) -> UnusableValue:
+    return UnusableValue('p', ValueSite('glue', 'j', 'scripts'), None, fault, 'x')
+
+
+def test_a_spelling_fault_is_sent_to_the_form_and_never_to_config_show():
+    # `config show` prints the *resolved* path, with the `./`, the doubled separator and the
+    # trailing slash normalised out — so it renders a malformed key as a correct-looking one and
+    # answers a question the reader did not ask.
+    lines = recovery_lines([problem(ConfigFault.NOT_A_CLEAN_KEY)])
+
+    assert KEY_FORM in lines
+    assert SHOW_RESOLVED not in lines
+
+
+def test_a_spelling_only_run_still_names_a_command():
+    # A form says what the value has to look like and no more. Every other fault names a command,
+    # so this would be the one run that leaves the reader with nothing to do next.
+    assert EDIT_CONFIG in recovery_lines([problem(ConfigFault.NOT_A_BUCKET_NAME)])
+
+
+def test_leaving_the_anchor_gets_its_own_line_rather_than_the_key_one():
+    # The two subjects want opposite things. An S3 key may not be `~/x` or `/x`, and those are
+    # exactly the spellings that fix an anchored directory, so one line for both tells half its
+    # readers to avoid their own remedy.
+    lines = recovery_lines([problem(ConfigFault.ESCAPES_ROOT)])
+
+    assert ANCHOR_FORM in lines
+    assert KEY_FORM not in lines
+
+
+def test_a_run_carrying_two_kinds_of_fault_gets_a_line_for_each():
+    # Dropping either sends those rows nowhere, and the reader fixes the half they were told
+    # about and runs the same command again.
+    lines = recovery_lines([problem(ConfigFault.NOT_A_CLEAN_KEY), problem(ConfigFault.ABSENT)])
+
+    assert KEY_FORM in lines
+    assert EDIT_CONFIG in lines
+    assert SHOW_RESOLVED in lines
+
+
+def test_a_bucket_name_is_checked_on_a_pipeline_that_declares_no_root():
+    # Bucket spelling is a property of the config, not of this machine, so it is answerable with
+    # no anchor and with `on_disk` false. Moving the loop below the `on_disk` gate left the suite
+    # green while this config went from two refusals and exit 3 to `is valid` and exit 0.
+    pipeline = PipelineConfig.model_validate({'buckets': {'raw': 'My_Bad_Bucket', 'curated': 'also..bad'}})
+
+    faults = pipeline_value_faults('p', pipeline, on_disk=False)
+
+    assert {problem.site.field for problem in faults} == {'buckets'}
+    assert {problem.fault for problem in faults} == {ConfigFault.NOT_A_BUCKET_NAME}
+    assert len(faults) == 2
 
 
 # Which side of the spelling line each fault falls on, written out rather than derived. A fault
