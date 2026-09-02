@@ -344,14 +344,21 @@ by a `ScriptLocation`, and there is none to build. A lambda `source_dir` that ex
 holds nothing is refused too — it zips to a valid empty archive, which replaces the
 function's code with nothing.
 
+Bucket names are checked the same way, on any machine. A `script_bucket` and every entry
+under `buckets` has to be a name S3 accepts: 3 to 63 characters of lowercase letters,
+digits, dots and hyphens, starting and ending with a letter or digit, with no doubled dot,
+and not an IP address. The check reads the name the active environment resolves to, since
+that is the one that reaches S3.
+
 Omit `resolve_paths_from` and nothing changes: paths resolve from the working directory,
 and a deploy has to run from the checkout.
 
 `config validate` checks a pipeline that names `resolve_paths_from` all the way down — the
 directory, every script, every `source_dir` — and says of each one whether it is absent or
 present with the wrong type, since those have opposite fixes. For a pipeline that names
-none it still checks how the glue keys are written, which is answerable on any machine; only
-whether a file is present needs a directory to look in.
+none it still checks how the glue keys are written and whether the bucket names are ones S3
+accepts, both answerable on any machine; only whether a file is present needs a directory
+to look in.
 
 An absent directory is reported on its own. Every path beneath it would carry the same one
 cause, and ten lines each naming a file name that cause in none of them.

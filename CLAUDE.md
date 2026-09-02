@@ -106,20 +106,25 @@ file so `config init` stays valid — a test asserts `TEMPLATE_CONFIG` round-tri
 `paths.py`'s module docstring before changing either; these are the constraints a new
 path-bearing resource has to meet, which the docstrings do not state.
 
-- **A resource declares its own path and key fields, on the model.** `ResourceModel.PATH_FIELDS`
-  maps a field to the `PathKind` it must be; `KEY_FIELDS` names the fields a glue S3 key is
-  built from. `declared_paths`, `declared_keys` and `env.aws_names_of` all read them, so a
-  resource declared to two of the three is checked and never excluded from the env-effect guard,
-  or excluded and never checked — and both read as success.
-  `test_every_path_field_on_the_models_is_declared` is what holds it.
+- **A resource declares its own path, key and bucket fields, on the model.**
+  `ResourceModel.PATH_FIELDS` maps a field to the `PathKind` it must be; `KEY_FIELDS` names the
+  fields a glue S3 key is built from; `BUCKET_FIELDS` names the fields that have to be real S3
+  bucket names. `declared_paths`, `declared_keys`, `declared_names` and `env.aws_names_of` all
+  read them, so a field declared to some and not the others is checked one way and not another
+  — and every one of those reads as success.
+  `test_every_path_field_on_the_models_is_declared` is what holds the path half.
 - **Displaying one is a second edit, and only that.** `pipeline_to_dict` and `render_pipeline`
   name a key per resource (`script_paths`, `source_path`), so a new resource's path needs a row
   in each. The checking, the resolution and the env-guard exclusion come free from the
   declaration.
-- **A new `PathFault` needs a `FAULT_WORDING` entry and a decision about `KEY_FAULTS`.** The two
-  fail in opposite directions: a missing wording raises where a reader needs the answer, and a
-  missing `KEY_FAULTS` entry silently reports the resolved path for a fault about the spelling.
+- **A new `ConfigFault` needs a `FAULT_WORDING` entry, a decision about `SPELLING_FAULTS`, and
+  a line in `recovery_lines`.** The first two fail in opposite directions: a missing wording
+  raises where a reader needs the answer, and a missing `SPELLING_FAULTS` entry silently reports
+  the resolved path for a fault about how the value is written.
   `test_every_fault_has_a_sentence` pins the first.
+- **`join_uri` joins three strings and all three are guarded.** `key_fault` covers the prefix
+  and the script, `bucket_fault` covers the bucket. A guard over some operands of a composed
+  value and not the rest is the defect this whole surface keeps producing.
 - **Every value naming a file or directory goes through `resolve_from_root(pipeline, value)`,
   never `Path(value)`** — missing it reintroduces the dependency on where dectl was invoked,
   silently. `pipeline_root` is the fallback half: no `resolve_paths_from` means `Path.cwd()`.
@@ -210,7 +215,7 @@ and an eval'd `s3 export` stay clean.
 | `invoke.py` | The Lambda Invoke domain: how long to wait for one, the client to send it through, and which failures may safely be sent again. Kept out of `session.py` for the reason `durable.py` is kept out of `logs.py` — it is the Lambda API, not the boto3 session. |
 | `output.py` | The two `rich` consoles and the `error`/`success`/`info`/`warn` helpers, plus `emit_json` (bare-print JSON for `--json`) and `format_duration`. Use these, not bare `print`, for anything human-facing. `error` and `warn` write to `stderr_console`; `success` and `info` write to stdout. |
 | `pipeline_view.py` | Shared pipeline rendering — `render_pipeline` (human) and `pipeline_to_dict` (the stable `--json` shape). Used by both `main.py` (`list`) and `config_cmd.py` (`show`); lives outside both to avoid the `main` ↔ `config_cmd` import cycle. |
-| `paths.py` | The path domain: whether a resolved `Path` is usable, whether a configured string can become an S3 key, and how a `~` expands. Knows nothing of pipelines — `config.py` walks the models and builds the records this defines, the same split as `durable.py` beside `commands/lambda_.py`. |
+| `paths.py` | Whether a value the config names outside the program can be what it has to be: a usable `Path`, a string S3 will store as written, a name S3 accepts for a bucket. Three questions, three records, one `ConfigFault` vocabulary reporting all of them. Knows nothing of pipelines — `config.py` walks the models and builds the records this defines, the same split as `durable.py` beside `commands/lambda_.py`. |
 | `payloads.py` | `read_payload` — resolves a `--payload-file` path or `-` (stdin) to a JSON string for `lambda`/`sfn` `run`. |
 | `logs.py` | CloudWatch log tailing (Glue, Lambda, and the multi-group `monitor` stream) plus Step Functions execution-history rendering, including structured-JSON pretty-printing. `LogGroupCursor` is the shared primitive all three tailers poll through. |
 | `durable.py` | The Lambda durable-functions domain: qualifier resolution, execution lookup by name/ARN, and execution-history rendering. Kept out of `logs.py` because it is the Lambda API, not CloudWatch. |

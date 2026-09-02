@@ -19,7 +19,7 @@ from dectl.output import emit_json
 from dectl.output import error
 from dectl.output import info
 from dectl.output import success
-from dectl.paths import refuse_unusable_paths
+from dectl.paths import refuse_unusable_values
 from dectl.prompt import confirm_or_exit
 
 RUN_STATE_COLORS = {'SUCCEEDED': 'green', 'FAILED': 'red', 'STOPPED': 'red', 'TIMEOUT': 'red', 'RUNNING': 'cyan'}
@@ -77,7 +77,7 @@ def resolve_scripts(pipeline_name: str, pipeline: PipelineConfig, alias: str) ->
     by argument rather than by filtering the result is what keeps the root fault: a checkout
     that is not there explains every missing script under it, and ten lines naming ten files
     name the cause in none of them."""
-    refuse_unusable_paths(pipeline_path_faults(pipeline_name, pipeline, on_disk=True, resource='glue', alias=alias))
+    refuse_unusable_values(pipeline_path_faults(pipeline_name, pipeline, on_disk=True, resource='glue', alias=alias))
     job = pipeline.glue_jobs[alias]
     return [(script, resolve_from_root(pipeline, script)) for script in job.scripts]
 

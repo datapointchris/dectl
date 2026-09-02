@@ -39,7 +39,7 @@ from dectl.paths import FAULT_WORDING
 from dectl.paths import PathKind
 from dectl.paths import deployable_files
 from dectl.paths import path_fault
-from dectl.paths import refuse_unusable_paths
+from dectl.paths import refuse_unusable_values
 from dectl.payloads import read_payload
 
 # Widen the CloudWatch window around an execution's recorded start and end. The records are
@@ -156,7 +156,7 @@ def make_lambda_function_app(
         #
         # Both refusals run before the first line of output, so nothing announces work that
         # then does not happen.
-        refuse_unusable_paths(pipeline_path_faults(pipeline_name, pipeline, on_disk=True, resource='lambda', alias=alias))
+        refuse_unusable_values(pipeline_path_faults(pipeline_name, pipeline, on_disk=True, resource='lambda', alias=alias))
         source = resolve_from_root(pipeline, fn.source_dir)
         zip_path = zip_lambda(source)
         info(f'zipped {source}')

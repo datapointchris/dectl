@@ -200,8 +200,8 @@ def test_validate_json_emits_the_unusable_paths_as_objects(monkeypatch, tmp_path
 
     assert result.exit_code == 1
     assert json.loads(result.stdout) == {
-        'outcome': 'unusable_paths',
-        'unusable_paths': [
+        'outcome': 'unusable_values',
+        'unusable_values': [
             {
                 'pipeline': 'salesdata',
                 'resource': 'lambda',
@@ -227,7 +227,7 @@ def test_validate_json_separates_a_clean_config_from_one_it_could_not_read(monke
     # Both carry an empty list. A caller that has dropped the exit status would otherwise be
     # told nothing was wrong with a config that was never read.
     assert clean.exit_code == 0
-    assert json.loads(clean.stdout) == {'outcome': 'valid', 'unusable_paths': []}
+    assert json.loads(clean.stdout) == {'outcome': 'valid', 'unusable_values': []}
     assert unreadable.exit_code == 1
     assert json.loads(unreadable.stdout)['outcome'] == 'invalid_schema'
 
@@ -240,7 +240,7 @@ def test_validate_json_keeps_stdout_parseable_on_a_schema_failure(monkeypatch, t
     result = runner.invoke(config_app, ['validate', '--json'])
 
     assert result.exit_code == 1
-    assert json.loads(result.stdout) == {'outcome': 'invalid_schema', 'unusable_paths': []}
+    assert json.loads(result.stdout) == {'outcome': 'invalid_schema', 'unusable_values': []}
     assert 'pipelines.p.step_function' in result.stderr
 
 
@@ -271,11 +271,11 @@ def deployable(path: Path) -> Path:
 def faults_from(result) -> list[tuple[str, str, str]]:
     """The (resource, field, fault) triples `validate --json` reported.
 
-    Read off the published document rather than off the sentence stderr rendered. `PathFault`
+    Read off the published document rather than off the sentence stderr rendered. `ConfigFault`
     exists so the wording can change without breaking a consumer, and a test matching the
     wording is a consumer of it — it goes red on a reworded message and stays green on a wrong
     fault, which is the pair of failures backwards."""
-    return [(p['resource'], p['field'], p['fault']) for p in json.loads(result.stdout)['unusable_paths']]
+    return [(p['resource'], p['field'], p['fault']) for p in json.loads(result.stdout)['unusable_values']]
 
 
 def test_validate_accepts_a_root_whose_paths_are_all_present(monkeypatch, tmp_path):
@@ -340,7 +340,7 @@ def test_validate_checks_glue_scripts_and_not_only_lambda_sources(monkeypatch, t
         '    glue_jobs:\n'
         '      copy:\n'
         '        name: n\n'
-        '        script_bucket: b\n'
+        '        script_bucket: sales-scripts\n'
         '        role: r\n'
         '        scripts:\n'
         '          - jobs/copy.py\n'
@@ -355,7 +355,7 @@ def test_validate_checks_glue_scripts_and_not_only_lambda_sources(monkeypatch, t
 
     assert result.exit_code == 1
     assert faults_from(result) == [('glue', 'scripts', 'absent')]
-    assert json.loads(result.stdout)['unusable_paths'][0]['path'] == str(root / 'jobs' / 'copy.py')
+    assert json.loads(result.stdout)['unusable_values'][0]['path'] == str(root / 'jobs' / 'copy.py')
 
 
 def test_env_is_substituted_before_a_declared_path_is_checked(monkeypatch, tmp_path):
@@ -397,7 +397,7 @@ def test_validate_checks_key_shape_even_without_a_declared_root(monkeypatch, tmp
         '    glue_jobs:\n'
         '      copy:\n'
         '        name: n\n'
-        '        script_bucket: b\n'
+        '        script_bucket: sales-scripts\n'
         '        role: r\n'
         '        scripts:\n'
         '          - /srv/shared/handler.py\n'
@@ -407,7 +407,7 @@ def test_validate_checks_key_shape_even_without_a_declared_root(monkeypatch, tmp
     result = runner.invoke(config_app, ['validate', '--json'])
 
     assert result.exit_code == 1
-    assert [p['fault'] for p in json.loads(result.stdout)['unusable_paths']] == ['escapes_root']
+    assert [p['fault'] for p in json.loads(result.stdout)['unusable_values']] == ['escapes_root']
 
 
 def test_a_malformed_key_leaves_the_rest_of_the_cli_working(monkeypatch, tmp_path):
@@ -421,7 +421,7 @@ def test_a_malformed_key_leaves_the_rest_of_the_cli_working(monkeypatch, tmp_pat
         '    glue_jobs:\n'
         '      copy:\n'
         '        name: n\n'
-        '        script_bucket: b\n'
+        '        script_bucket: sales-scripts\n'
         '        role: r\n'
         '        scripts:\n'
         '          - /srv/shared/handler.py\n'

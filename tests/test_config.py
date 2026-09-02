@@ -28,8 +28,8 @@ from dectl.config import resolve_from_root
 from dectl.env import render_env_model
 from dectl.env import set_active_environment
 from dectl.paths import FAULT_WORDING
-from dectl.paths import KEY_FAULTS
-from dectl.paths import PathFault
+from dectl.paths import SPELLING_FAULTS
+from dectl.paths import ConfigFault
 
 
 def test_template_config_is_valid():
@@ -109,7 +109,7 @@ def test_glue_job_arguments_parsed_as_dict():
                 'glue_jobs': {
                     'j': {
                         'name': 'j',
-                        'script_bucket': 'b',
+                        'script_bucket': 'sales-scripts',
                         'scripts': ['s.py'],
                         'role': 'r',
                         'arguments': {'FOO': 'bar', 'NUM': '4'},
@@ -345,10 +345,10 @@ def test_every_path_field_on_the_models_is_declared():
     pipeline = PipelineConfig.model_validate(
         {
             'resolve_paths_from': '/srv/salesdata',
-            'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'b', 'scripts': ['x.py'], 'role': 'r'}},
+            'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'sales-scripts', 'scripts': ['x.py'], 'role': 'r'}},
             'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}},
             'step_functions': {'flow': {'name': 'm'}},
-            'buckets': {'raw': 'b'},
+            'buckets': {'raw': 'sales-raw'},
             'iceberg_tables': {'events': {'database': 'd', 'table': 't'}},
         }
     )
@@ -410,11 +410,11 @@ def test_the_root_is_absent_by_default():
 
 def test_every_fault_has_a_sentence():
     # FAULT_WORDING is indexed with no default, so a member added without one raises at the
-    # moment a reader needs the answer. It and KEY_FAULTS are the two per-member properties
+    # moment a reader needs the answer. It and SPELLING_FAULTS are the two per-member properties
     # beside this enum and they fail in opposite directions: a missing wording raises, while a
-    # missing KEY_FAULTS entry silently reports the resolved path for a spelling fault.
-    assert set(FAULT_WORDING) == set(PathFault)
-    assert set(PathFault) >= KEY_FAULTS
+    # missing SPELLING_FAULTS entry silently reports the resolved path for a spelling fault.
+    assert set(FAULT_WORDING) == set(ConfigFault)
+    assert set(ConfigFault) >= SPELLING_FAULTS
 
 
 def rooted_pipeline_naming(tmp_path, source_dir: str) -> PipelineConfig:
@@ -431,7 +431,7 @@ def test_a_home_this_machine_cannot_resolve_is_a_fault_not_a_load_failure(tmp_pa
     # active environment is not known at load; one door answers for both halves.
     faults = pipeline_path_faults('p', pipeline, on_disk=True)
 
-    assert [f.fault for f in faults] == [PathFault.UNRESOLVABLE_HOME]
+    assert [f.fault for f in faults] == [ConfigFault.UNRESOLVABLE_HOME]
 
 
 def test_every_config_load_failure_is_one_the_callers_catch():
@@ -476,7 +476,7 @@ def test_a_templated_home_resolves_to_a_fault_rather_than_a_traceback(tmp_path, 
     finally:
         set_active_environment('dev', 'default')
 
-    assert [(f.site.field, f.fault) for f in faults] == [(field, PathFault.UNRESOLVABLE_HOME)]
+    assert [(f.site.field, f.fault) for f in faults] == [(field, ConfigFault.UNRESOLVABLE_HOME)]
 
 
 def test_resolution_never_raises_so_the_renderers_reach_a_faulty_value():

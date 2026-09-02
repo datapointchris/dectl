@@ -84,7 +84,7 @@ def test_json_carries_the_root_with_its_tilde_already_expanded():
     config = DectlConfig.model_validate(
         {
             'defaults': {'account_id': '1'},
-            'pipelines': {'salesdata': {'resolve_paths_from': '~/code/salesdata', 'buckets': {'raw': 'b'}}},
+            'pipelines': {'salesdata': {'resolve_paths_from': '~/code/salesdata', 'buckets': {'raw': 'sales-raw'}}},
         }
     )
 
@@ -131,7 +131,10 @@ def test_a_glue_job_with_no_scripts_renders_through_both_doors():
         {
             'defaults': {'account_id': '1'},
             'pipelines': {
-                'p': {'resolve_paths_from': '/srv/x', 'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'b', 'scripts': [], 'role': 'r'}}}
+                'p': {
+                    'resolve_paths_from': '/srv/x',
+                    'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'sales-scripts', 'scripts': [], 'role': 'r'}},
+                }
             },
         }
     )
@@ -232,7 +235,9 @@ def test_a_glue_script_token_does_not_silence_the_no_effect_warning(monkeypatch,
             'pipelines': {
                 'salesdata': {
                     'resolve_paths_from': '/srv/salesdata',
-                    'glue_jobs': {'copy': {'name': 'hardcoded-dev', 'script_bucket': 'b', 'scripts': ['jobs/{env}/c.py'], 'role': 'r'}},
+                    'glue_jobs': {
+                        'copy': {'name': 'hardcoded-dev', 'script_bucket': 'sales-scripts', 'scripts': ['jobs/{env}/c.py'], 'role': 'r'}
+                    },
                 }
             },
         }
@@ -247,7 +252,7 @@ def test_a_glue_script_token_does_not_silence_the_no_effect_warning(monkeypatch,
     'resource',
     [
         LambdaConfig(name='hardcoded-dev', source_dir='modules/{env}/code'),
-        GlueJobConfig(name='hardcoded-dev', script_bucket='b', scripts=['jobs/{env}/c.py'], role='r'),
+        GlueJobConfig(name='hardcoded-dev', script_bucket='sales-scripts', scripts=['jobs/{env}/c.py'], role='r'),
     ],
     ids=['lambda', 'glue'],
 )

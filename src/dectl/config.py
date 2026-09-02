@@ -14,12 +14,14 @@ from dectl.env import ENV_PLACEHOLDER
 from dectl.env import substitute_env
 from dectl.output import error
 from dectl.output import stderr_console
+from dectl.paths import ConfigFault
 from dectl.paths import DeclaredKey
+from dectl.paths import DeclaredName
 from dectl.paths import DeclaredPath
-from dectl.paths import PathFault
 from dectl.paths import PathKind
 from dectl.paths import PathSite
-from dectl.paths import UnusablePath
+from dectl.paths import UnusableValue
+from dectl.paths import bucket_fault
 from dectl.paths import expand_home
 from dectl.paths import home_fault
 from dectl.paths import key_fault
@@ -115,17 +117,20 @@ class ResourceModel(StrictModel):
     """One resource a pipeline holds by alias, and which of its fields dectl resolves locally.
 
     `RESOURCE` is the word the CLI, the error text and `validate --json` use for this kind.
-    `PATH_FIELDS` maps each field naming something on this machine to what that has to be, and
-    `KEY_FIELDS` names each field a glue S3 key is built from. A field can be in both — a glue
-    script is uploaded from disk and named by a key built from what was written.
+    `PATH_FIELDS` maps each field naming something on this machine to what that has to be,
+    `KEY_FIELDS` names each field a glue S3 key is built from, and `BUCKET_FIELDS` names each
+    field that has to be a real S3 bucket name. A field can be in more than one — a glue script
+    is uploaded from disk and named by a key built from what was written.
 
-    Three mechanisms read them: `declared_paths`, `declared_keys` and `env.aws_names_of`. A
-    resource declared to two of the three is checked and never excluded from the env-effect
-    guard, or excluded and never checked, and both read as success."""
+    Four mechanisms read them: `declared_paths`, `declared_keys`, `declared_names` and
+    `env.aws_names_of`. A field declared to some and not the others is checked one way and not
+    another, or excluded from the env-effect guard and never checked, and all of those read as
+    success."""
 
     RESOURCE: ClassVar[str] = ''
     PATH_FIELDS: ClassVar[Mapping[str, PathKind]] = {}
     KEY_FIELDS: ClassVar[frozenset[str]] = frozenset()
+    BUCKET_FIELDS: ClassVar[frozenset[str]] = frozenset()
 
 
 class Defaults(StrictModel):
@@ -152,6 +157,8 @@ class GlueJobConfig(ResourceModel):
     # Both operands of the concatenation `script_key` performs. Checking only the one a bug was
     # found in leaves every shape it refuses passing silently in the other.
     KEY_FIELDS: ClassVar[frozenset[str]] = frozenset({'script_prefix', 'scripts'})
+    # The third operand `join_uri` joins, and the one with no local meaning at all.
+    BUCKET_FIELDS: ClassVar[frozenset[str]] = frozenset({'script_bucket'})
 
     name: str
     script_bucket: str
@@ -216,6 +223,9 @@ class PipelineConfig(ResourceModel):
     # word below is what names it in an error and in `validate --json`.
     RESOURCE: ClassVar[str] = 'pipeline'
     PATH_FIELDS: ClassVar[Mapping[str, PathKind]] = {'resolve_paths_from': PathKind.DIRECTORY}
+    # `buckets` is alias -> real bucket name, so each entry is a name to check and the alias is
+    # what names it back to the reader.
+    BUCKET_FIELDS: ClassVar[frozenset[str]] = frozenset({'buckets'})
 
     # Directory holding this pipeline's code. Every relative path in the block below — a lambda's
     # source_dir, a glue job's scripts — resolves against it, so a deploy targets the same files
@@ -300,6 +310,16 @@ def as_values(configured: str | list[str]) -> list[str]:
     return configured if isinstance(configured, list) else [configured]
 
 
+def as_aliased_values(configured: str | list[str] | dict[str, str]) -> list[tuple[str, str]]:
+    """A declared field's values paired with the alias that names each, where it has one.
+
+    `buckets` is a mapping and every other declared field is a string or a list of them, so a
+    bucket row can carry `s3/raw` while a `script_bucket` row carries the job's own alias."""
+    if isinstance(configured, dict):
+        return list(configured.items())
+    return [('', value) for value in as_values(configured)]
+
+
 def resource_members(pipeline: PipelineConfig) -> list[tuple[str, str, ResourceModel]]:
     """Each (collection, alias, resource) the pipeline holds, walked off the model.
 
@@ -354,6 +374,30 @@ def declared_keys(pipeline: PipelineConfig) -> list[DeclaredKey]:
     ]
 
 
+def declared_names(pipeline: PipelineConfig) -> list[DeclaredName]:
+    """Every configured string that has to name a real S3 bucket.
+
+    `script_bucket` is the third operand `join_uri` joins, beside the prefix and the script that
+    `declared_keys` covers. Each `buckets` entry is the same kind of value reached through a
+    different verb — `s3 export`, `s3 ALIAS mount`, `s3 ALIAS uri` — and neither is a path, so
+    neither resolves against anything."""
+    # `s3` rather than `pipeline`: `buckets` holds no model to carry a `RESOURCE`, and `s3` is
+    # the word the CLI, `list` and `config show` already use for that collection. The literal
+    # sits here because there is nowhere else for it, not because the word is in doubt.
+    names = [
+        DeclaredName(PathSite('s3', alias, field), substitute_env(value))
+        for field in sorted(PipelineConfig.BUCKET_FIELDS)
+        for alias, value in as_aliased_values(getattr(pipeline, field))
+    ]
+    names.extend(
+        DeclaredName(PathSite(type(member).RESOURCE, alias, field), substitute_env(value))
+        for _, alias, member in resource_members(pipeline)
+        for field in sorted(type(member).BUCKET_FIELDS)
+        for _, value in as_aliased_values(getattr(member, field))
+    )
+    return names
+
+
 def declares_nothing(pipeline: PipelineConfig, alias: str = '') -> list[tuple[PathSite, str]]:
     """Each glue job that names no script at all, as a site and the pipeline's name for it.
 
@@ -374,8 +418,8 @@ def pipeline_path_faults(
     on_disk: bool,
     resource: str = '',
     alias: str = '',
-) -> list[UnusablePath]:
-    """Every declared path and key of one pipeline that cannot be used, with the reason.
+) -> list[UnusableValue]:
+    """Every declared path, key and bucket name of one pipeline that cannot be used, and why.
 
     Every door calls this — `config validate` over the whole config, a glue deploy over one job,
     a lambda deploy over one function — so a reader gets the same diagnosis whichever one they
@@ -392,17 +436,24 @@ def pipeline_path_faults(
     def in_scope(site: PathSite) -> bool:
         return (not resource or site.resource == resource) and (not alias or site.alias == alias)
 
-    def row(site: PathSite, path: Path | None, fault: PathFault, configured: str) -> UnusablePath:
-        return UnusablePath(pipeline_name, site, path, fault, configured)
+    def row(site: PathSite, path: Path | None, fault: ConfigFault, configured: str) -> UnusableValue:
+        return UnusableValue(pipeline_name, site, path, fault, configured)
 
     # Machine-independent, so these run whatever `on_disk` says and whatever the root turns out
     # to be. Gated on the root, declaring one on a box that never holds the checkout would
     # report less than declaring none.
     problems = [
-        row(site, None, PathFault.DECLARES_NOTHING, configured) for site, configured in declares_nothing(pipeline, alias) if in_scope(site)
+        row(site, None, ConfigFault.DECLARES_NOTHING, configured)
+        for site, configured in declares_nothing(pipeline, alias)
+        if in_scope(site)
     ]
     problems += [
         row(key.site, None, fault, key.value) for key in declared_keys(pipeline) if in_scope(key.site) and (fault := key_fault(key.value))
+    ]
+    problems += [
+        row(name.site, None, fault, name.value)
+        for name in declared_names(pipeline)
+        if in_scope(name.site) and (fault := bucket_fault(name.value))
     ]
     if not on_disk:
         return problems
@@ -436,7 +487,7 @@ def pipeline_path_faults(
     return problems
 
 
-def config_path_faults(config: DectlConfig) -> list[UnusablePath]:
+def config_path_faults(config: DectlConfig) -> list[UnusableValue]:
     """Every declared path and key in the config that this config or machine cannot supply.
 
     A pipeline naming no root is still checked for how its keys are written, which is

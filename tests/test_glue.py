@@ -22,7 +22,8 @@ from dectl.config import PipelineConfig
 from dectl.config import config_path_faults
 from dectl.config import pipeline_path_faults
 from dectl.env import active_environment
-from dectl.paths import PathFault
+from dectl.paths import ConfigFault
+from dectl.paths import bucket_fault
 
 runner = CliRunner()
 
@@ -31,7 +32,9 @@ def test_job_exposes_deploy_run_logs_runs_verbs():
     config = DectlConfig.model_validate(
         {
             'defaults': {'account_id': '123456789012'},
-            'pipelines': {'proj': {'glue_jobs': {'source-copy': {'name': 'j', 'script_bucket': 'b', 'scripts': ['s.py'], 'role': 'r'}}}},
+            'pipelines': {
+                'proj': {'glue_jobs': {'source-copy': {'name': 'j', 'script_bucket': 'sales-scripts', 'scripts': ['s.py'], 'role': 'r'}}}
+            },
         }
     )
     app = make_glue_app('proj', config.pipelines['proj'], config)
@@ -332,10 +335,18 @@ class FakeS3Client:
         filename = kwargs['Filename']
         if not Path(filename).is_file():
             raise FileNotFoundError(filename)
-        # Real S3 answers InvalidBucketName for anything outside this set, so a fake that took
-        # any string would let an unsubstituted `b-{env}` look identical to a substituted one.
+        # Real S3 answers InvalidBucketName for anything outside this, so a fake that took any
+        # string would let an unsubstituted `b-{env}` look identical to a substituted one. Read
+        # off S3's own rule rather than off `paths.bucket_fault`, which is what lets this catch
+        # that check being too permissive — importing its regex would make this pass on whatever
+        # the check gets wrong.
         bucket = kwargs['Bucket']
-        if not re.fullmatch(r'[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]', bucket):
+        refused = (
+            not re.fullmatch(r'[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]', bucket)
+            or '..' in bucket
+            or re.fullmatch(r'\d{1,3}(\.\d{1,3}){3}', bucket)
+        )
+        if refused:
             raise ValueError(f'InvalidBucketName: {bucket}')
         self.uploads.append((filename, bucket, kwargs['Key']))
 
@@ -418,13 +429,13 @@ def test_extra_py_files_name_the_same_objects_the_upload_wrote(tmp_path, monkeyp
 @pytest.mark.parametrize(
     ('written', 'expected'),
     [
-        ('/srv/shared/handler.py', PathFault.ESCAPES_ROOT),
-        ('../sibling/util.py', PathFault.ESCAPES_ROOT),
-        ('~/shared/lib.py', PathFault.ESCAPES_ROOT),
-        ('./copy.py', PathFault.NOT_A_CLEAN_KEY),
-        ('jobs//copy.py', PathFault.NOT_A_CLEAN_KEY),
-        ('jobs/./copy.py', PathFault.NOT_A_CLEAN_KEY),
-        ('copy.py/', PathFault.NOT_A_CLEAN_KEY),
+        ('/srv/shared/handler.py', ConfigFault.ESCAPES_ROOT),
+        ('../sibling/util.py', ConfigFault.ESCAPES_ROOT),
+        ('~/shared/lib.py', ConfigFault.ESCAPES_ROOT),
+        ('./copy.py', ConfigFault.NOT_A_CLEAN_KEY),
+        ('jobs//copy.py', ConfigFault.NOT_A_CLEAN_KEY),
+        ('jobs/./copy.py', ConfigFault.NOT_A_CLEAN_KEY),
+        ('copy.py/', ConfigFault.NOT_A_CLEAN_KEY),
     ],
 )
 def test_a_key_that_s3_would_store_literally_is_refused(tmp_path, written, expected):
@@ -442,12 +453,12 @@ def test_a_key_that_s3_would_store_literally_is_refused(tmp_path, written, expec
 @pytest.mark.parametrize(
     ('written', 'expected'),
     [
-        ('/scripts', PathFault.ESCAPES_ROOT),
-        ('../scripts', PathFault.ESCAPES_ROOT),
-        ('~/scripts', PathFault.ESCAPES_ROOT),
-        ('./scripts', PathFault.NOT_A_CLEAN_KEY),
-        ('scripts/', PathFault.NOT_A_CLEAN_KEY),
-        ('scripts//sub', PathFault.NOT_A_CLEAN_KEY),
+        ('/scripts', ConfigFault.ESCAPES_ROOT),
+        ('../scripts', ConfigFault.ESCAPES_ROOT),
+        ('~/scripts', ConfigFault.ESCAPES_ROOT),
+        ('./scripts', ConfigFault.NOT_A_CLEAN_KEY),
+        ('scripts/', ConfigFault.NOT_A_CLEAN_KEY),
+        ('scripts//sub', ConfigFault.NOT_A_CLEAN_KEY),
     ],
 )
 def test_a_script_prefix_is_refused_for_every_shape_a_script_is(tmp_path, written, expected):
@@ -459,13 +470,101 @@ def test_a_script_prefix_is_refused_for_every_shape_a_script_is(tmp_path, writte
     pipeline = PipelineConfig.model_validate(
         {
             'resolve_paths_from': str(tmp_path),
-            'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'b', 'script_prefix': written, 'scripts': ['copy.py'], 'role': 'r'}},
+            'glue_jobs': {
+                'j': {'name': 'n', 'script_bucket': 'sales-scripts', 'script_prefix': written, 'scripts': ['copy.py'], 'role': 'r'}
+            },
         }
     )
 
     faults = pipeline_path_faults('proj', pipeline, on_disk=True)
 
     assert [(f.site.field, f.fault) for f in faults] == [('script_prefix', expected)]
+
+
+# Names S3 accepts and names it refuses, written from the service's own rule rather than from
+# either implementation. Both the check and the fake are measured against this table.
+BUCKET_NAMES = [
+    ('sales-scripts', True),
+    ('a1b', True),
+    ('my.bucket.name', True),
+    ('b', False),  # under the three-character minimum
+    ('My_Bucket', False),  # uppercase and underscore
+    ('-leading-hyphen', False),
+    ('trailing-hyphen-', False),
+    ('two..dots', False),
+    ('192.168.5.4', False),  # an IP address is reserved
+    ('b' * 64, False),  # over the sixty-three character maximum
+    ('bucket-{env}', False),  # braces, so a token that never got substituted is caught too
+]
+# Every row but the templated one, which never reaches the walk as written: `declared_names`
+# substitutes first, so the walk sees the name that actually goes to S3.
+RESOLVED_BUCKET_NAMES = [row for row in BUCKET_NAMES if '{env}' not in row[0]]
+
+
+@pytest.mark.parametrize(('written', 'accepted'), RESOLVED_BUCKET_NAMES)
+def test_a_bucket_name_s3_would_refuse_is_refused(tmp_path, written, accepted):
+    # join_uri joins three strings and key_fault covers two of them. The third reached the
+    # network before anything refused it, so `config validate` called the config valid.
+    (tmp_path / 'copy.py').write_text('x')
+    pipeline = PipelineConfig.model_validate(
+        {
+            'resolve_paths_from': str(tmp_path),
+            'glue_jobs': {'j': {'name': 'n', 'script_bucket': written, 'scripts': ['copy.py'], 'role': 'r'}},
+        }
+    )
+
+    faults = pipeline_path_faults('proj', pipeline, on_disk=True)
+
+    expected = [] if accepted else [('script_bucket', ConfigFault.NOT_A_BUCKET_NAME)]
+    assert [(f.site.field, f.fault) for f in faults] == expected
+
+
+def test_the_fake_and_the_check_agree_on_bucket_names():
+    # FakeS3Client encodes S3's rule independently of `bucket_fault`, which is what lets a
+    # deploy test catch the check being too permissive. Independent readings drift, so the
+    # agreement is asserted rather than arranged by sharing a constant — importing the check's
+    # regex into the fake would make every such test pass on whatever the check gets wrong.
+    s3 = FakeS3Client()
+    for written, accepted in BUCKET_NAMES:
+        fake_accepts = True
+        try:
+            s3.upload_file(Filename=__file__, Bucket=written, Key='k')
+        except ValueError:
+            fake_accepts = False
+        assert fake_accepts == accepted, f'the fake disagrees with S3 on {written!r}'
+        assert (bucket_fault(written) is None) == accepted, f'bucket_fault disagrees with S3 on {written!r}'
+
+
+@pytest.mark.parametrize(('template', 'accepted'), [('sales-{env}', True), ('Sales-{env}', False)])
+def test_the_bucket_checked_is_the_one_the_env_resolves_to(tmp_path, monkeypatch, template, accepted):
+    # The name that goes to S3 is the substituted one, so that is the name the check reads. A
+    # check reading the template would refuse every braced name and pass every bad resolution.
+    monkeypatch.setattr(active_environment, 'name', 'dev')
+    (tmp_path / 'copy.py').write_text('x')
+    pipeline = PipelineConfig.model_validate(
+        {
+            'resolve_paths_from': str(tmp_path),
+            'glue_jobs': {'j': {'name': 'n', 'script_bucket': template, 'scripts': ['copy.py'], 'role': 'r'}},
+        }
+    )
+
+    faults = pipeline_path_faults('proj', pipeline, on_disk=True)
+
+    assert (faults == []) == accepted
+    assert [f.configured for f in faults] == ([] if accepted else ['Sales-dev'])
+
+
+def test_every_configured_bucket_is_checked_not_only_the_glue_one(tmp_path):
+    # `buckets` entries reach S3 through `s3 export`, `mount` and `uri` rather than through a
+    # glue deploy, and they are bucket names by the same rule. Guarding the operand the defect
+    # was found in and leaving the sibling is the shape four review rounds kept finding.
+    pipeline = PipelineConfig.model_validate({'resolve_paths_from': str(tmp_path), 'buckets': {'raw': 'My_Bucket'}})
+
+    faults = pipeline_path_faults('proj', pipeline, on_disk=True)
+
+    assert [(f.site.resource, f.site.alias, f.site.field, f.fault) for f in faults] == [
+        ('s3', 'raw', 'buckets', ConfigFault.NOT_A_BUCKET_NAME)
+    ]
 
 
 def test_a_key_fault_reports_the_string_as_written(tmp_path):
@@ -489,13 +588,15 @@ def test_a_prefix_that_normalises_to_itself_is_still_refused(tmp_path, written):
     pipeline = PipelineConfig.model_validate(
         {
             'resolve_paths_from': str(tmp_path),
-            'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'b', 'script_prefix': written, 'scripts': ['copy.py'], 'role': 'r'}},
+            'glue_jobs': {
+                'j': {'name': 'n', 'script_bucket': 'sales-scripts', 'script_prefix': written, 'scripts': ['copy.py'], 'role': 'r'}
+            },
         }
     )
 
     faults = pipeline_path_faults('proj', pipeline, on_disk=True)
 
-    assert [(f.site.field, f.fault) for f in faults] == [('script_prefix', PathFault.NOT_A_CLEAN_KEY)]
+    assert [(f.site.field, f.fault) for f in faults] == [('script_prefix', ConfigFault.NOT_A_CLEAN_KEY)]
 
 
 def test_a_glue_job_declaring_no_scripts_is_refused_before_the_deploy_indexes_it(tmp_path):
@@ -506,7 +607,7 @@ def test_a_glue_job_declaring_no_scripts_is_refused_before_the_deploy_indexes_it
 
     faults = pipeline_path_faults('proj', pipeline, on_disk=True)
 
-    assert [(f.site.field, f.fault) for f in faults] == [('scripts', PathFault.DECLARES_NOTHING)]
+    assert [(f.site.field, f.fault) for f in faults] == [('scripts', ConfigFault.DECLARES_NOTHING)]
     with pytest.raises(typer.Exit):
         resolve_scripts('proj', pipeline, 'j')
 
@@ -521,8 +622,8 @@ def test_a_malformed_script_is_not_also_reported_as_missing(tmp_path):
     faults = pipeline_path_faults('proj', pipeline, on_disk=True)
 
     assert [(f.configured, f.fault) for f in faults] == [
-        ('./jobs/x.py', PathFault.NOT_A_CLEAN_KEY),
-        ('jobs/present.py', PathFault.ABSENT),
+        ('./jobs/x.py', ConfigFault.NOT_A_CLEAN_KEY),
+        ('jobs/present.py', ConfigFault.ABSENT),
     ]
 
 
@@ -535,7 +636,7 @@ def test_an_absent_root_is_reported_alone_at_the_deploy_door(tmp_path):
 
     scoped = pipeline_path_faults('proj', pipeline, on_disk=True, resource='glue', alias='j')
 
-    assert [(f.site, f.fault) for f in scoped] == [(ROOT_SITE, PathFault.ABSENT)]
+    assert [(f.site, f.fault) for f in scoped] == [(ROOT_SITE, ConfigFault.ABSENT)]
     with pytest.raises(typer.Exit):
         resolve_scripts('proj', pipeline, 'j')
 
@@ -589,7 +690,7 @@ def test_a_directory_named_as_a_script_is_reported_as_a_directory(tmp_path):
 
     faults = pipeline_path_faults('proj', pipeline, on_disk=True)
 
-    assert [f.fault for f in faults] == [PathFault.EXPECTED_FILE]
+    assert [f.fault for f in faults] == [ConfigFault.EXPECTED_FILE]
     with pytest.raises(typer.Exit):
         resolve_scripts('proj', pipeline, 'j')
 
@@ -707,7 +808,7 @@ def test_uploading_a_set_the_definition_does_not_name_is_refused(tmp_path):
     # it breakable: every path here exists, so nothing else in the function refuses, and the
     # deploy would write a ScriptLocation naming an object nothing uploaded.
     (tmp_path / 'first.py').write_text('x')
-    job = GlueJobConfig(name='my-job', script_bucket='b', scripts=['first.py', 'second.py'], role='r')
+    job = GlueJobConfig(name='my-job', script_bucket='sales-scripts', scripts=['first.py', 'second.py'], role='r')
     s3 = FakeS3Client()
 
     with pytest.raises(typer.Exit):

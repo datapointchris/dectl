@@ -119,16 +119,17 @@ def config_edit() -> None:
 
 @config_app.command('validate')
 def config_validate(
-    as_json: Annotated[bool, typer.Option('--json', help='Emit the unusable paths as machine-readable JSON to stdout.')] = False,
+    as_json: Annotated[bool, typer.Option('--json', help='Emit the unusable values as machine-readable JSON to stdout.')] = False,
 ) -> None:
-    """Check the config parses, matches the schema, and that its declared paths are usable.
+    """Check the config parses, matches the schema, and that what it names can be used.
 
     A pipeline that names `resolve_paths_from` is checked all the way down: the directory
     itself, every glue script, and every lambda source_dir. A pipeline that names none is still
-    checked for how its glue keys are written, which is answerable on any machine; its files are
-    not, since they resolve from wherever you run dectl.
+    checked for how its glue keys are spelled and whether its bucket names are ones S3 accepts,
+    both answerable on any machine; its files are not, since they resolve from wherever you run
+    dectl.
 
-    --json emits an object carrying `outcome` and `unusable_paths`. The outcome separates a
+    --json emits an object carrying `outcome` and `unusable_values`. The outcome separates a
     clean config from one that could not be read at all, which an empty list alone folds
     together — the detail of a schema failure stays on stderr, where it has a renderer.
     """
@@ -144,7 +145,7 @@ def config_validate(
         invites a call site to guard against a return that cannot happen."""
         error(message)
         if as_json:
-            emit_json({'outcome': outcome, 'unusable_paths': []})
+            emit_json({'outcome': outcome, 'unusable_values': []})
         raise typer.Exit(1)
 
     if not CONFIG_PATH.exists():
@@ -155,7 +156,7 @@ def config_validate(
     except CONFIG_LOAD_ERRORS as exc:
         report_config_error(exc)
         if as_json:
-            emit_json({'outcome': 'invalid_schema', 'unusable_paths': []})
+            emit_json({'outcome': 'invalid_schema', 'unusable_values': []})
         raise typer.Exit(1) from exc
     if config is None:
         refuse('no_config', f'config at {CONFIG_PATH} was removed while it was being read')
@@ -164,8 +165,8 @@ def config_validate(
     if as_json:
         emit_json(
             {
-                'outcome': 'unusable_paths' if problems else 'valid',
-                'unusable_paths': [
+                'outcome': 'unusable_values' if problems else 'valid',
+                'unusable_values': [
                     {
                         'pipeline': p.pipeline,
                         'resource': p.site.resource,
@@ -182,7 +183,7 @@ def config_validate(
         raise typer.Exit(1 if problems else 0)
 
     if problems:
-        error(f'config at {CONFIG_PATH} matches the schema, but names paths that cannot be used:')
+        error(f'config at {CONFIG_PATH} matches the schema, but names values that cannot be used:')
         for problem in problems:
             stderr_console.print(f'  {problem}', markup=False)
         for line in recovery_lines(problems):

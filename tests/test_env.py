@@ -109,7 +109,7 @@ def test_warning_is_emitted_once_per_invocation(capsys):
 
 def test_no_warning_when_the_placeholder_is_present(capsys):
     set_active_environment('uat', '--env')
-    render_env_model(GlueJobConfig(name='salesdata-{env}-job', script_bucket='b', scripts=['s.py'], role='r'))
+    render_env_model(GlueJobConfig(name='salesdata-{env}-job', script_bucket='sales-scripts', scripts=['s.py'], role='r'))
 
     assert capsys.readouterr().err == ''
 
