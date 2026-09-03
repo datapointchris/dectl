@@ -248,7 +248,7 @@ def test_a_throttle_backs_off_exponentially_and_then_gives_up():
     assert slept == [1, 2, 4, 8]
 
 
-def test_a_refusal_recognised_only_by_its_status_is_still_sent_again():
+def test_a_refusal_recognized_only_by_its_status_is_still_sent_again():
     # A 429 is Lambda declining to admit the invocation whatever it calls the code.
     invoker = FakeInvoker([client_error('SomeNewThrottleName', status=429)])
 

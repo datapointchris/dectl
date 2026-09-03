@@ -235,7 +235,7 @@ def limited(rows: list, limit: int) -> list:
 
     One reading of `--limit` for every verb of this resource. A sentinel may never steal a value
     the flag can otherwise mean, which leaves 0 free to mean "all" on a limit. A sentinel one
-    verb honours and its sibling does not is worse than no sentinel at all: both help rows read
+    verb honors and its sibling does not is worse than no sentinel at all: both help rows read
     the same, the two answers differ, and the verb that slices to nothing then prints an
     empty-state sentence that is false about the table."""
     return rows if limit == 0 else rows[:limit]
@@ -278,7 +278,7 @@ def format_count(value: int | None) -> str:
 
 
 def format_delta(value: int | None) -> str:
-    """A signed change. Deliberately uncoloured: a falling record count is an incident on one
+    """A signed change. Deliberately uncolored: a falling record count is an incident on one
     table and the expected result of a delete on the next, so the sign is the whole signal."""
     return '' if value is None else f'{value:+,}'
 
@@ -568,7 +568,7 @@ def render_files_table(alias: str, rows: list[dict]) -> None:
     Delete files only exist on a merge-on-read table, so the column is shown only where one of
     these commits reports any. Its absence is itself the answer for a copy-on-write table, and a
     column of blanks would crowd the numbers that moved. `--json` carries the counters either
-    way, along with the position and equality breakdown this summarises."""
+    way, along with the position and equality breakdown this summarizes."""
     has_deletes = any(row['delete_files'] for row in rows)
     table = Table(title=f'{alias} file layout')
     table.add_column('snapshot', overflow='fold')

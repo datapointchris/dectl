@@ -29,7 +29,7 @@ TRACEBACK_KEYS = ('exc_info', 'exception', 'stack_trace', 'stacktrace', 'traceba
 HEADER_KEYS = frozenset(TIMESTAMP_KEYS + LEVEL_KEYS + MESSAGE_KEYS)
 
 # The durable SDK's two opaque operation ids. Neither is a value anyone reads: they identify an
-# operation to the service, and the operation's *name* is what a person recognises, which
+# operation to the service, and the operation's *name* is what a person recognizes, which
 # `operation_tag` lifts into the header instead. Deliberately not `requestId` — one execution spans
 # many invocations, so that one varies across a scoped tail and says which invocation spoke — and
 # deliberately not `logger`, which is ordinary structured-logging output no durable function owns.
@@ -54,7 +54,7 @@ LEVEL_COLORS = {
 def stream_prefix(log_group: str) -> str:
     """Tag only the error group. A well-configured job logs through one stdout
     handler, so stderr is the exceptional case (tracebacks, the warnings module,
-    a library writing direct) and worth marking; labelling every ordinary line
+    a library writing direct) and worth marking; labeling every ordinary line
     would spend width on a constant. A line tagged err that also appears
     untagged means the job has a duplicate handler."""
     if log_group == GLUE_ERROR_LOG_GROUP:
@@ -131,7 +131,7 @@ def render_event(message: str, prefix: str, hide_keys: frozenset[str]) -> None:
     console.print(f'{prefix}{" ".join(header_parts)}' if header_parts else f'{prefix}{escape(text)}')
 
     # Hang the expanded fields under the header rather than at column 0, so a prefixed
-    # record reads as one block instead of a labelled line followed by orphans.
+    # record reads as one block instead of a labeled line followed by orphans.
     indent_width = visible_width(prefix)
     indent = ' ' * indent_width
 

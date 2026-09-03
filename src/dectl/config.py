@@ -27,7 +27,7 @@ from dectl.values import expand_home
 from dectl.values import home_fault
 from dectl.values import key_fault
 from dectl.values import leaves_root
-from dectl.values import normalised
+from dectl.values import normalized
 from dectl.values import path_fault
 from dectl.values import root_fault
 
@@ -300,11 +300,11 @@ def resolve_from_root(pipeline: PipelineConfig, substituted_path: str) -> Path:
     glue `scripts` entry may not — `key_fault` refuses that, and `pipeline_value_faults` runs it
     from `config validate` and from the deploy, because the S3 key is built from the configured
     string rather than from the resolved path."""
-    # Normalised, so what comes back is where the value lands rather than how it was written.
-    # `modules/../code` names the same directory as `code`, and an unnormalised join asks the
+    # Normalized, so what comes back is where the value lands rather than how it was written.
+    # `modules/../code` names the same directory as `code`, and an unnormalized join asks the
     # filesystem about a `modules/` that need not exist — reporting the path absent when the
     # directory it names is right there.
-    return normalised(pipeline_root(pipeline) / expand_home(substituted_path))
+    return normalized(pipeline_root(pipeline) / expand_home(substituted_path))
 
 
 def as_values(configured: str | list[str]) -> list[str]:
@@ -327,7 +327,7 @@ def declared_resource_names() -> set[str]:
 
     A fact about what dectl declares, not about what a file holds — so `glue` is a scope a
     caller may name whether or not the pipeline in front of it holds a job. Derived from the
-    same `RESOURCE` and `FIELD_RESOURCE` the rows are labelled from, so a new kind joins this
+    same `RESOURCE` and `FIELD_RESOURCE` the rows are labeled from, so a new kind joins this
     vocabulary by existing rather than by being listed here."""
     names = {PipelineConfig.RESOURCE, *PipelineConfig.FIELD_RESOURCE.values()}
     for field in PipelineConfig.model_fields.values():
@@ -470,7 +470,7 @@ def declares_nothing(pipeline: PipelineConfig) -> list[ValueSite]:
 
     `None` is not empty, it is unwritten: an optional declared field such as
     `resolve_paths_from` says the key was left out, and leaving it out is the documented way to
-    keep the earlier behaviour. Only a key the writer put there and left blank is a fault.
+    keep the earlier behavior. Only a key the writer put there and left blank is a fault.
 
     A field is reported only when *no* value in it is usable. A blank entry beside a real one is
     a different fault with a different remedy — delete the line, rather than name something to
@@ -513,8 +513,8 @@ def pipeline_value_faults(
 
     Two of them return rather than append, because a fault that explains every row beneath it is
     the only useful thing to say. Two read `refused_values`, so a value already refused for how
-    it is written is not also reported as missing. Three ignore nothing and honour the scope; the
-    root-on-disk phase honours no scope, because a caller asking about one job still cannot
+    it is written is not also reported as missing. Three ignore nothing and honor the scope; the
+    root-on-disk phase honors no scope, because a caller asking about one job still cannot
     deploy it. A new fault class has to pick its point, and whether it reads `refused_values`.
 
     `on_disk` says whether this machine's files are part of the question, and it is required
@@ -533,7 +533,7 @@ def pipeline_value_faults(
     # pipeline holds a job — reading it off the emitted rows makes a valid scope raise on a
     # pipeline declaring none of that kind. An alias is only ever this pipeline's.
     #
-    # Both include `FIELD_RESOURCE`: a `buckets` row is labelled `s3` and its owner is the
+    # Both include `FIELD_RESOURCE`: a `buckets` row is labeled `s3` and its owner is the
     # pipeline, so a set walking members alone refuses the one word its own output uses.
     sites = [*(path.site for path in declared_paths(pipeline)), *(key.site for key in declared_keys(pipeline))]
     sites.extend(name.site for name in declared_names(pipeline))

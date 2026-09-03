@@ -55,7 +55,7 @@ def zip_lambda(source: Path) -> Path:
 
     An archive with no entries is 22 bytes and perfectly valid, and `update_function_code`
     accepts it, so the function's code is replaced with nothing. A directory that exists and
-    holds nothing reaches this on ordinary routes — an uninitialised submodule, or a source_dir
+    holds nothing reaches this on ordinary routes — an uninitialized submodule, or a source_dir
     naming a build directory before the build ran — so the count is what is checked, not the
     directory. `PathKind.NON_EMPTY_DIRECTORY` is that same question asked of the config, which
     is what stops `config validate` passing a directory this refuses.

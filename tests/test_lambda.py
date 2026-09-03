@@ -520,7 +520,7 @@ def deploy_app(monkeypatch, tmp_path, client, source_dir: str = 'code'):
 
 def test_lambda_deploy_publishes_the_zip_and_moves_the_alias(monkeypatch, tmp_path):
     # The write path, end to end. Replacing `resolve_from_root(...)` with `Path(fn.source_dir)`
-    # left the whole suite green, and that mutation restores the pre-branch behaviour of the
+    # left the whole suite green, and that mutation restores the pre-branch behavior of the
     # feature's headline case: the deploy reading from wherever it was invoked.
     (tmp_path / 'code').mkdir()
     (tmp_path / 'code' / 'handler.py').write_text('def handler(event, context): pass')

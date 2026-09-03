@@ -137,7 +137,7 @@ def test_listing_qualifier_exits_when_the_alias_does_not_exist():
 
 
 def test_listing_an_alias_directly_is_rejected_by_the_service():
-    # Guards the fake against drifting from the behaviour that caused the bug.
+    # Guards the fake against drifting from the behavior that caused the bug.
     client = FakeLambdaClient([execution('order-9')], aliases={'live': '7'})
 
     with pytest.raises(ClientError, match='cannot filter durable executions by alias'):

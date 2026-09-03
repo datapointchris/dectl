@@ -74,7 +74,7 @@ def test_pipeline_to_dict_has_stable_shape_and_substitutes_env(monkeypatch):
 def test_render_pipeline_prints_alias_to_name_lines(monkeypatch, capsys):
     # Every alias and every resolved name reaches the page. Asserted as tokens rather than as
     # `alias: name` phrases, because rich soft-wraps between the two at a width the consumer
-    # owns — and normalising the wrap to keep a phrase assertion alive is a width pin by
+    # owns — and normalizing the wrap to keep a phrase assertion alive is a width pin by
     # another name, which fails at exactly the widths a width pin would have covered.
     monkeypatch.setattr(active_environment, 'name', 'dev')
     pipeline = make_pipeline().pipelines['salesdata']
@@ -88,7 +88,7 @@ def test_render_pipeline_prints_alias_to_name_lines(monkeypatch, capsys):
 
 
 def test_json_carries_the_root_with_its_tilde_already_expanded():
-    # The expansion happens between the file and the behaviour, so a reader who sees only the
+    # The expansion happens between the file and the behavior, so a reader who sees only the
     # written value cannot tell which directory a deploy would reach.
     config = DectlConfig.model_validate(
         {

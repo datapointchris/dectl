@@ -6,14 +6,14 @@ import re
 # The same reasoning as the width pinned below, for the other thing a terminal decides. A console
 # that believes it is writing to one emits SGR escapes, so `'names nothing to deploy' in
 # result.stderr` passes bare and fails under `FORCE_COLOR=1` on output correct in both. Measured:
-# nineteen tests across seven files, none of them about colour.
+# nineteen tests across seven files, none of them about color.
 #
 # Removed from the environment rather than set on the console objects, because rich reads it per
 # call and the two settings that look like the fix each reach only half. `no_color` suppresses
-# colour and leaves bold, which is seven of the nineteen. `force_terminal` reaches both and has no
+# color and leaves bold, which is seven of the nineteen. `force_terminal` reaches both and has no
 # public setter after construction, and these consoles are built at import in `dectl.output`.
 #
-# `NO_COLOR` and a `TERM` naming no colour are left alone: both push rendering towards plain, which
+# `NO_COLOR` and a `TERM` naming no color are left alone: both push rendering towards plain, which
 # is the direction every assertion here already reads.
 os.environ.pop('FORCE_COLOR', None)
 
@@ -151,7 +151,7 @@ def unwrapped(text: str) -> str:
     Two things stand between a capture and the message it carries. The wrap: a line longer than
     the console still breaks, and the lines it breaks into are not the ones the renderer
     produced — rich breaks at spaces rather than mid-word, so collapsing whitespace recovers it.
-    And the colour: whether escapes are emitted depends on what the process thinks it is writing
+    And the color: whether escapes are emitted depends on what the process thinks it is writing
     to, which is not the same locally and on CI. Measured — this suite passed here and failed
     there on `no row-per-file view`, where Click's help formatter had put a reset and a dim
     between `file` and `view`.
@@ -169,7 +169,7 @@ def at_width(console, columns: int):
     The suite pins a wide console so a rendered value is not a fact about the runner's window.
     That is the right default and the wrong one for a guard on folding: a column wide enough to
     hold its value renders identically whether it folds, truncates or does neither, so such a
-    test passes on the behaviour it was written to refuse. Those set the width they mean."""
+    test passes on the behavior it was written to refuse. Those set the width they mean."""
     original = console.width
     console.width = columns
     try:

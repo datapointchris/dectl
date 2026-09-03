@@ -86,7 +86,7 @@ selected resource's CloudWatch log group as one interleaved, time-ordered stream
 
 `src/dectl/config.py` — Pydantic models plus `load_config()` / `init_config()`. Config lives at
 `$XDG_CONFIG_HOME/dectl/config.yaml`, resolved by `pyclisteno.paths.config_home()` so the
-variable is honoured rather than `~/.config` being hardcoded. `buckets` is an
+variable is honored rather than `~/.config` being hardcoded. `buckets` is an
 `alias -> real-bucket-name` mapping (same alias→name shape as `glue_jobs` and `lambdas`), not
 a fixed set of roles. A lambda's
 `live_alias` (renamed from `alias` to avoid colliding with the CLI "alias" = the config key) is
@@ -377,7 +377,7 @@ and an eval'd `s3 export` stay clean.
   *before* `.metadata.json`, which is what Java's `TableMetadataParser` builds and the only form
   pyiceberg decompresses. `.metadata.json.gz` is the legacy spelling Java still reads and no
   current writer produces. `GZIP_SUFFIXES` carries both, because the catalog decides which one it
-  points at. Recognising only the trailing form reports a healthy table as corrupt and sends the
+  points at. Recognizing only the trailing form reports a healthy table as corrupt and sends the
   reader after a metadata file that is fine.
 - **Every Iceberg summary counter is a string** — the spec says so, so `total-records` arrives as
   `'2000'`. Adding two of them concatenates and subtracting two raises, and neither failure shows
@@ -430,7 +430,7 @@ the fake.
 
 **botocore's retry loop sits below the client object, so no fake can reach it.** A duplicate
 invoke is issued without the code under test being called twice, which makes every fake-level
-assertion here a statement about the config rather than about the behaviour. `test_invoke.py`
+assertion here a statement about the config rather than about the behavior. `test_invoke.py`
 closes that gap against a socket that accepts connections and answers none, which is what a
 still-running function looks like to botocore: it counts the requests that actually arrive. Every
 other assertion in the repo rests on `total_max_attempts: 1` meaning exactly one request, and
@@ -444,7 +444,7 @@ written twice, and it leaves something worse than a permissive fake: a green tes
 property, exercising it, and passing on the one input the code happens to get right. The tell is
 greppable, the same expression on both sides of the boundary.
 
-*Proposed, not settled.* That this generalises to every fake here is an open standards proposal
+*Proposed, not settled.* That this generalizes to every fake here is an open standards proposal
 and Chris has not ruled on it. It describes the code above, so follow it in this file's
 fakes. Do not carry it elsewhere as approved policy, and do not cite it as a rule.
 

@@ -242,7 +242,7 @@ class FakeS3:
     be the same rule written twice, and the test would pass on the one input the code gets
     right."""
 
-    # Read off the writers, so a reader that recognises fewer names than Iceberg produces fails
+    # Read off the writers, so a reader that recognizes fewer names than Iceberg produces fails
     # here rather than against a real table.
     ICEBERG_GZIP_SUFFIXES = ('.gz.metadata.json', '.metadata.json.gz')
 
@@ -339,7 +339,7 @@ def test_a_gzipped_metadata_file_reads(key):
     # is only knowable from the key the catalog handed back.
     #
     # Both spellings, because Iceberg puts the codec extension before `.metadata.json` and every
-    # current writer produces that form. Recognising only the trailing one reports a healthy
+    # current writer produces that form. Recognizing only the trailing one reports a healthy
     # gzipped table as corrupt, and says so in a message that sends the reader after the file.
     glue, s3 = fakes_for(four_commit_table(), key=key)
 
@@ -685,7 +685,7 @@ def test_file_rows_walk_back_from_the_named_snapshot():
     assert rows[0]['average_file_bytes'] == 11534336 // 11
 
 
-def test_file_rows_honour_the_limit():
+def test_file_rows_honor_the_limit():
     metadata = load(four_commit_table())
 
     assert len(file_rows(metadata, metadata.by_id(SNAP_FOUR), 2)) == 2
@@ -871,7 +871,7 @@ def test_files_json_reports_the_layout_at_each_commit(monkeypatch):
 
 @pytest.mark.parametrize('verb', ['snapshots', 'history', 'files', 'branches'])
 def test_limit_zero_means_every_row_on_every_verb(verb, monkeypatch):
-    # A sentinel one verb honours and its sibling does not is worse than no sentinel: both help
+    # A sentinel one verb honors and its sibling does not is worse than no sentinel: both help
     # rows read the same and the answers differ. A verb slicing to nothing then prints an
     # empty-state sentence that is false about a table holding four commits.
     app, _, _ = make_app(four_commit_table(), monkeypatch)

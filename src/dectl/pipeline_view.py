@@ -33,7 +33,7 @@ def resource_types(pipeline: PipelineConfig) -> list[str]:
 def script_uris(job: GlueJobConfig) -> list[str]:
     """Where every script of one job lands, for a reader rather than for a deploy.
 
-    Three operands substituted, exactly as every neighbouring row in both renderers substitutes
+    Three operands substituted, exactly as every neighboring row in both renderers substitutes
     the name beside it. Both renderers then show the destination the deploy writes, which is the
     point: two of the faults `config validate` reports are about this composed value and no
     command rendered it.
@@ -142,7 +142,7 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
         },
         's3': {alias: {'bucket': substitute_env(bucket)} for alias, bucket in pipeline.buckets.items()},
         # Aliases into this pipeline rather than AWS names, so nothing here is substituted.
-        # Both blocks have behaviour behind them — `monitor` decides which log groups are
+        # Both blocks have behavior behind them — `monitor` decides which log groups are
         # tailed, `jenkins` whether a `release` command exists — and a reader could see neither
         # resolved anywhere.
         'monitor': {'lambdas': list(pipeline.monitor.lambdas), 'step_functions': list(pipeline.monitor.step_functions)},

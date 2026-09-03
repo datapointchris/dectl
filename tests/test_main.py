@@ -216,7 +216,7 @@ def test_the_bare_banner_carries_the_whole_diagnostic(invalid_config):
 
     assert 'pipelines.p.step_function: Extra inputs are not permitted' in result.stderr
     # Not 'Usage: dectl': rich styles the two words differently, so an escape sequence sits
-    # between them wherever colour is on, and the phrase is only contiguous without it.
+    # between them wherever color is on, and the phrase is only contiguous without it.
     assert 'Usage:' in result.stdout
 
 

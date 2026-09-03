@@ -76,7 +76,7 @@ class ConfigFault(StrEnum):
 
 
 # The faults about how a value is spelled rather than about what this machine holds. They are
-# reported against the configured string: resolution normalises away the very thing a key fault
+# reported against the configured string: resolution normalizes away the very thing a key fault
 # names, and a bucket name resolves to nothing at all.
 #
 # `ESCAPES_ROOT` is deliberately absent. A path that climbs out of the anchor resolves to a real
@@ -114,7 +114,7 @@ FAULT_WORDING = {
 def join_key(prefix: str, name: str) -> str:
     """The two halves of an S3 key, joined as written.
 
-    Joined rather than normalised: S3 stores `a//b` and `a/./b` as themselves, which is why
+    Joined rather than normalized: S3 stores `a//b` and `a/./b` as themselves, which is why
     `key_fault` reads the raw string. Both operands reach this already substituted, or both raw
     for the help panel that runs before `--env` is parsed."""
     return f'{prefix}/{name}'
@@ -154,7 +154,7 @@ def join_uri(bucket: str, prefix: str, name: str) -> str:
 
 # The form each spelling-checked value has to take, said once per kind. An error naming what is
 # wrong without naming what is right leaves the reader to guess, and these are the faults where
-# `config show` cannot help: it prints the resolved path, which has the malformation normalised
+# `config show` cannot help: it prints the resolved path, which has the malformation normalized
 # out of it, and it shows a bucket name back exactly as written.
 KEY_FORM = 'an S3 key is written as plain relative segments: jobs/copy.py, never ./x, ../x, ~/x, /x, a//b or a trailing /'
 # Said for a value anchored to `resolve_paths_from` that leaves it. `~/x` and `/x` are legal
@@ -370,7 +370,7 @@ def holds_traversal(configured: str) -> bool:
     return '..' in configured.split('/')
 
 
-def normalised(path: Path) -> Path:
+def normalized(path: Path) -> Path:
     """A path with `.` and `..` collapsed, without touching the filesystem.
 
     `Path.resolve()` would answer the same question and also follow symlinks and require the
@@ -386,7 +386,7 @@ def leaves_root(root: Path, resolved: Path) -> bool:
     traversal and lands under the root, so refusing it names a fault its own resolved path
     disproves and prints a remedy describing what the config already does. `../shared/code`
     holds the same traversal and genuinely leaves."""
-    return not normalised(resolved).is_relative_to(normalised(root))
+    return not normalized(resolved).is_relative_to(normalized(root))
 
 
 def path_fault(path: Path, expects: PathKind) -> ConfigFault | None:
@@ -426,7 +426,7 @@ def root_fault(configured: str) -> ConfigFault | None:
 def key_fault(configured: str) -> ConfigFault | None:
     """Why this configured string cannot become an S3 key, or None when it can.
 
-    Every segment has to be a plain name, tested as such. `PurePosixPath` normalises `.`, `//`
+    Every segment has to be a plain name, tested as such. `PurePosixPath` normalizes `.`, `//`
     and a trailing slash away — the very shapes S3 stores literally — so anything routed
     through it agrees with the raw string on every input that matters.
 
@@ -458,7 +458,7 @@ def recovery_lines(problems: list[UnusableValue]) -> list[str]:
     """What to tell the reader to do next, one line per kind of fault present.
 
     A spelling fault cannot be sent to `config show`: that command prints the *resolved* path,
-    which has the `./`, the doubled separator and the trailing slash normalised out of it, so it
+    which has the `./`, the doubled separator and the trailing slash normalized out of it, so it
     renders a malformed key as a correct-looking one, and it shows a bucket name back exactly as
     written. Naming the form the value has to take is the answer to those; `config show` is the
     answer to a file that is not where the config says. A run carrying more than one kind gets a

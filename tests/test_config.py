@@ -566,7 +566,7 @@ def test_the_env_guard_dump_drops_a_local_only_field_of_every_member_shape(monke
 
 def test_the_scope_guard_accepts_every_resource_its_own_rows_carry():
     # The guard reads its vocabulary off the rows rather than off the members, so it cannot
-    # refuse a word its own output uses. A `buckets` row is labelled `s3` and its owner is the
+    # refuse a word its own output uses. A `buckets` row is labeled `s3` and its owner is the
     # pipeline, so a guard walking members refuses `s3` and an `s3`-scoped door gets a traceback
     # rather than a refusal.
     pipeline = PipelineConfig.model_validate(
@@ -606,7 +606,7 @@ def test_the_declared_root_expands_a_leading_tilde():
 
 
 def test_paths_resolve_from_the_working_directory_when_no_root_is_set():
-    # The behaviour a config that names no root depends on: dectl is run from the checkout and
+    # The behavior a config that names no root depends on: dectl is run from the checkout and
     # relative paths mean what they would mean to any other command in that shell.
     pipeline = pipeline_rooted_at(None)
 
@@ -747,7 +747,7 @@ def problem(fault: ConfigFault) -> UnusableValue:
 
 def test_a_spelling_fault_is_sent_to_the_form_and_never_to_config_show():
     # `config show` prints the *resolved* path, with the `./`, the doubled separator and the
-    # trailing slash normalised out — so it renders a malformed key as a correct-looking one and
+    # trailing slash normalized out — so it renders a malformed key as a correct-looking one and
     # answers a question the reader did not ask.
     lines = recovery_lines([problem(ConfigFault.NOT_A_CLEAN_KEY)])
 
@@ -796,7 +796,7 @@ def test_a_bucket_name_is_checked_on_a_pipeline_that_declares_no_root():
 
 # Which side of the spelling line each fault falls on, written out rather than derived. A fault
 # about how a value is *written* is reported against the configured string, because resolution
-# normalises away the very thing it names and a bucket name resolves to nothing at all. A fault
+# normalizes away the very thing it names and a bucket name resolves to nothing at all. A fault
 # about what this machine holds carries the resolved path and is answered by `config show`.
 SPELLING = frozenset(
     {
@@ -831,7 +831,7 @@ def test_every_fault_is_classified_as_a_spelling_or_an_on_disk_one():
     # fails the first assertion, and adding a fault without deciding its side fails the second.
     #
     # The cost of getting it wrong is silent. A spelling fault outside the set is reported with
-    # a resolved path that has the malformation normalised out of it, and its reader is sent to
+    # a resolved path that has the malformation normalized out of it, and its reader is sent to
     # `config show`, which that fault's own remedy says cannot help.
     assert SPELLING_FAULTS == SPELLING
     assert set(ConfigFault) == SPELLING | ON_DISK

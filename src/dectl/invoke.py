@@ -30,7 +30,7 @@ LAMBDA_MAX_TIMEOUT_SECONDS = 900
 # coincidence of AWS's limits, not because either follows the other.
 DURABLE_SYNC_CAP_SECONDS = 900
 
-# An Event invoke returns as soon as Lambda has the event, so this waits on an acknowledgement
+# An Event invoke returns as soon as Lambda has the event, so this waits on an acknowledgment
 # rather than on any function. Nothing here scales with what the function does.
 EVENT_ACK_TIMEOUT_SECONDS = 30
 

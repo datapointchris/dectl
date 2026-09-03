@@ -594,7 +594,7 @@ def test_a_key_fault_reports_the_string_as_written(tmp_path):
 
 
 @pytest.mark.parametrize('written', ['.', ''])
-def test_a_prefix_that_normalises_to_itself_is_still_refused(tmp_path, written):
+def test_a_prefix_that_normalizes_to_itself_is_still_refused(tmp_path, written):
     # The round trip against PurePosixPath agreed with itself on these two: `str(PurePosixPath('.'))`
     # is `'.'`, so a bare dot passed the comparison while join_uri built `s3://b/./jobs/copy.py`.
     (tmp_path / 'copy.py').write_text('x')
@@ -656,7 +656,7 @@ def test_an_absent_root_is_reported_alone_at_the_deploy_door(tmp_path):
 
 @pytest.mark.parametrize(('resource', 'alias'), [('glue_jobs', 'j'), ('glue', 'J')])
 def test_a_scope_naming_nothing_raises_rather_than_reporting_a_clean_config(tmp_path, resource, alias):
-    # An unrecognised scope returned no faults, and every door reads no faults as a clean config
+    # An unrecognized scope returned no faults, and every door reads no faults as a clean config
     # and proceeds to deploy. `glue_jobs` is the collection where `glue` is the resource, and
     # both spellings live in the same module, so the typo is the one a reader would make.
     pipeline = glue_pipeline(str(tmp_path / 'nowhere'), ['jobs/a.py'])
@@ -759,7 +759,7 @@ def test_a_directory_named_as_a_script_is_reported_as_a_directory(tmp_path):
     # Present with the wrong type and absent have opposite remedies — fix the config key, or
     # check the tree out — so they are separate values rather than one wording apart. Asserted
     # on the value: rich soft-wraps the sentence at the width whoever ran the suite happened to
-    # have, and a helper that normalises the wrapping is a width pin by another name.
+    # have, and a helper that normalizes the wrapping is a width pin by another name.
     (tmp_path / 'copy.py').mkdir()
     pipeline = glue_pipeline(str(tmp_path), ['copy.py'])
 
