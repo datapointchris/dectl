@@ -1,4 +1,4 @@
-# forge-toolchain: 20
+# forge-toolchain: 21
 fail_fast: true
 default_stages: [pre-commit]
 repos:
@@ -114,7 +114,14 @@ repos:
         # No example is spelled out here, for the reason the go.mod note below
         # gives: an example would trip this hook on this very file, in every repo
         # this block is generated into.
-        args: ['--builtin', 'clear,rare,en-GB_to_en-US']
+        #
+        # `-H` because codespell skips any file whose *basename* starts with a
+        # dot and exits 0 rather than saying it read nothing. Without it this
+        # very file sits outside the check it installs, along with every other
+        # dot-named tracked file. A dot-named *directory* was always read, so
+        # `.github/**` never needed it. pre-commit passes tracked paths, so the
+        # flag widens what is read rather than reaching untracked files.
+        args: ['-H', '--builtin', 'clear,rare,en-GB_to_en-US']
         # The second alternation is sops output. Ciphertext is base64, so it
         # produces the same false hits a lock file's hashes do. The plain
         # `secrets.yaml` name is covered alongside the *.enc.env convention.
