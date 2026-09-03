@@ -94,6 +94,9 @@ skips = ["B311", "B404", "B603"]
 [tool.codespell]
 skip = '*.lock'
 check-filenames = true
+check-hidden = true
+builtin = "clear,rare"
+uri-ignore-words-list = "*"
 
 [tool.refurb]
 enable_all = true
@@ -135,6 +138,9 @@ managed = [
     ["pyright", "typeCheckingMode"],
     ["pyright", "analyzeUnannotatedFunctions"],
     ["codespell", "check-filenames"],
+    ["codespell", "check-hidden"],
+    ["codespell", "builtin"],
+    ["codespell", "uri-ignore-words-list"],
     ["pytest", "ini_options", "verbosity_assertions"],
     ["pytest", "ini_options", "minversion"],
     ["pytest", "ini_options", "testpaths"],
