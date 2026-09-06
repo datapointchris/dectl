@@ -90,13 +90,19 @@ def make_sfn_machine_app(pipeline_name: str, alias: str, sfn_config: StepFunctio
 
     @sfn_app.command(epilog=f'Example:\n\ndectl {pipeline_name} sfn {alias} runs --limit 5')
     def runs(
-        limit: Annotated[int, typer.Option('--limit', '-n', help='Number of executions to show.')] = 10,
+        limit: Annotated[int, typer.Option('--limit', '-n', min=0, help='Number of executions to show.')] = 10,
         as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
     ) -> None:
         """List recent executions of this state machine with their status and timing."""
         sfn = resolved()
         client = make_session(config).client('stepfunctions')
-        executions = client.list_executions(stateMachineArn=state_machine_arn(config, sfn), maxResults=limit).get('executions', [])
+        # Step Functions rejects maxResults=0, so a zero row count is answered here rather
+        # than sent.
+        executions = (
+            []
+            if limit == 0
+            else client.list_executions(stateMachineArn=state_machine_arn(config, sfn), maxResults=limit).get('executions', [])
+        )
 
         if as_json:
             emit_json(

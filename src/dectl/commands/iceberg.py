@@ -27,11 +27,6 @@ from dectl.output import emit_json
 from dectl.output import info
 from dectl.session import make_session
 
-# Rows a read shows by default, matching `glue runs` and `lambda executions`. Every verb here
-# reads one metadata file however far back it looks, so the limit trims the display and never
-# the fetch.
-DEFAULT_LIMIT = 10
-
 
 def limit_option(what: str) -> OptionInfo:
     """The `--limit` every verb of this resource takes.
@@ -39,19 +34,8 @@ def limit_option(what: str) -> OptionInfo:
     Built here rather than written per verb so no two of them can disagree about what the flag
     means — both help rows would still read the same, and the divergence would only show in the
     answers. `min=0` makes a negative a usage error rather than a silent off-by-one: -1 into a
-    slice drops the last row and returns a plausible count nobody asked for. It is a floor and
-    not a sentinel: 0 is a row count like any other and returns nothing."""
+    slice drops the last row and returns a plausible count nobody asked for."""
     return typer.Option('--limit', '-n', min=0, help=what)
-
-
-def report_empty(limit: int, table_is_empty: str) -> None:
-    """Say why a verb has no rows to show, naming the narrowing when one produced them.
-
-    A zero limit renders nothing on a table holding commits, and `table_is_empty` would be false
-    about that table: a count taken under a narrowing is not a fact about the population. Shared
-    across the verbs because each writes its own sentence, and one of them describing the same
-    emptiness differently is a divergence no help row shows."""
-    info('no rows shown: --limit 0 asks for none' if limit == 0 else table_is_empty)
 
 
 def make_iceberg_table_app(pipeline_name: str, alias: str, table_config: IcebergTableConfig, config: DectlConfig) -> typer.Typer:
@@ -81,7 +65,7 @@ def make_iceberg_table_app(pipeline_name: str, alias: str, table_config: Iceberg
         ),
     )
     def snapshots(
-        limit: Annotated[int, limit_option('Snapshots to show, newest first.')] = DEFAULT_LIMIT,
+        limit: Annotated[int | None, limit_option('Snapshots to show, newest first.')] = None,
         as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
     ) -> None:
         """List the table's commits: what each one did, and how the row count moved.
@@ -97,7 +81,7 @@ def make_iceberg_table_app(pipeline_name: str, alias: str, table_config: Iceberg
             emit_json([snapshot_to_dict(metadata, snapshot) for snapshot in found])
             return
         if not found:
-            report_empty(limit, 'no snapshots — nothing has been committed to this table')
+            info('no snapshots found')
             return
         render_snapshots_table(alias, metadata, found)
 
@@ -105,7 +89,7 @@ def make_iceberg_table_app(pipeline_name: str, alias: str, table_config: Iceberg
         epilog=(f'Examples:\n\ndectl {pipeline_name} iceberg {alias} history\n\ndectl {pipeline_name} iceberg {alias} history --limit 50'),
     )
     def history(
-        limit: Annotated[int, limit_option('Log entries to show, the most recent first.')] = DEFAULT_LIMIT,
+        limit: Annotated[int | None, limit_option('Log entries to show, the most recent first.')] = None,
         as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
     ) -> None:
         """Show every change of the table's current snapshot, oldest last, and which survive.
@@ -122,7 +106,7 @@ def make_iceberg_table_app(pipeline_name: str, alias: str, table_config: Iceberg
             emit_json(rows)
             return
         if not rows:
-            report_empty(limit, 'no history — nothing has been committed to this table')
+            info('no log entries found')
             return
         render_history_table(alias, rows)
 
@@ -138,7 +122,7 @@ def make_iceberg_table_app(pipeline_name: str, alias: str, table_config: Iceberg
             str | None,
             typer.Argument(help='Snapshot id, a unique tail of one, or a branch or tag. Defaults to the current snapshot.'),
         ] = None,
-        limit: Annotated[int, limit_option('Commits to walk back through.')] = DEFAULT_LIMIT,
+        limit: Annotated[int | None, limit_option('Commits to walk back through.')] = None,
         as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
     ) -> None:
         """Show the table's file layout at each commit: file counts, total size, average size.
@@ -158,7 +142,7 @@ def make_iceberg_table_app(pipeline_name: str, alias: str, table_config: Iceberg
             emit_json(rows)
             return
         if not rows:
-            report_empty(limit, 'no committed snapshots, so the table has no files')
+            info('no commits found')
             return
         render_files_table(alias, rows)
 
@@ -204,7 +188,7 @@ def make_iceberg_table_app(pipeline_name: str, alias: str, table_config: Iceberg
         epilog=f'Example:\n\ndectl {pipeline_name} iceberg {alias} branches --json',
     )
     def branches(
-        limit: Annotated[int, limit_option('Refs to show, branches before tags.')] = DEFAULT_LIMIT,
+        limit: Annotated[int | None, limit_option('Refs to show, branches before tags.')] = None,
         as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
     ) -> None:
         """List the table's branches and tags with the snapshot each points at.
@@ -220,7 +204,7 @@ def make_iceberg_table_app(pipeline_name: str, alias: str, table_config: Iceberg
             emit_json(rows)
             return
         if not rows:
-            report_empty(limit, 'no branches or tags on this table')
+            info('no branches or tags found')
             return
         render_branches_table(alias, rows)
 

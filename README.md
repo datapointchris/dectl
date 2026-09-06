@@ -255,9 +255,9 @@ dectl salesdata iceberg events files         # file counts and average file size
 dectl salesdata iceberg events diff          # what the last commit changed
 ```
 
-Every one of those but `diff` is a list and takes `--limit`/`-n`, showing ten rows by default.
-The flag is a row count on all four, so `--limit 0` shows none and a wider read is a larger
-number.
+Every one of those but `diff` is a list and takes `--limit`/`-n`, which is a row count. Leave it
+off and you get every row; `--limit 0` shows none. The whole answer is one metadata file that has
+already been read, so the flag trims the display rather than the fetch.
 
 `diff` is the one to reach for when a number moved. Give it the snapshot the number was last
 right at and it names the commits that ran since, alongside the record, file and byte deltas:

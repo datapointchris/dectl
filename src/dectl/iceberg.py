@@ -230,21 +230,22 @@ def snapshot_timestamp_ms(snapshot: dict) -> int:
     return snapshot.get('timestamp-ms') or 0
 
 
-def limited(rows: list, limit: int) -> list:
-    """Take the first `limit` rows, where 0 takes none of them.
+def limited(rows: list, limit: int | None) -> list:
+    """Take the first `limit` rows, where `None` takes every one of them and 0 takes none.
 
-    One reading of `--limit` for every verb of this resource. A limit is a row count, and 0 is a
-    count a caller can mean: `--limit "$(remaining)"` reaches it and means none. Reserving 0 for
-    "all" answers that caller with every row, and nothing on screen separates the two."""
-    return rows[:limit]
+    One reading of `--limit` for every verb of this resource. Absence is the only thing that
+    asks for everything, and 0 is a row count like any other."""
+    return rows if limit is None else rows[:limit]
 
 
-def limited_tail(rows: list, limit: int) -> list:
+def limited_tail(rows: list, limit: int | None) -> list:
     """The last `limit` rows, under the reading `limited` documents.
 
     A log is read oldest-first, so its limit takes the most recent entries and still renders
     them in order. The first N of a log is never the part anybody wants. Zero is answered before
     the slice because `-0` is `0`, so `rows[-limit:]` on a zero limit returns every row."""
+    if limit is None:
+        return rows
     return [] if limit == 0 else rows[-limit:]
 
 
@@ -446,7 +447,7 @@ def render_snapshots_table(alias: str, metadata: TableMetadata, snapshots: list[
     console.print(table)
 
 
-def history_rows(metadata: TableMetadata, limit: int) -> list[dict]:
+def history_rows(metadata: TableMetadata, limit: int | None) -> list[dict]:
     """The snapshot log, oldest first, with each entry marked as a current ancestor or not.
 
     The log records every change of the table's current pointer, so a rollback appears in it as a
@@ -539,7 +540,7 @@ def render_branches_table(alias: str, rows: list[dict]) -> None:
     console.print(table)
 
 
-def file_rows(metadata: TableMetadata, snapshot: dict, limit: int) -> list[dict]:
+def file_rows(metadata: TableMetadata, snapshot: dict, limit: int | None) -> list[dict]:
     """The table's file layout at each commit, walking back from `snapshot` through its lineage."""
     return [
         {

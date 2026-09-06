@@ -6,6 +6,10 @@ from pydantic import ValidationError
 
 import dectl.main
 from dectl.commands.config_cmd import config_app
+from dectl.commands.glue import make_glue_app
+from dectl.commands.iceberg import make_iceberg_app
+from dectl.commands.lambda_ import make_lambda_app
+from dectl.commands.stepfunctions import make_sfn_app
 from dectl.config import DectlConfig
 from dectl.config import Defaults
 from dectl.main import REFERENCE_GLOBAL
@@ -242,3 +246,63 @@ def test_env_json_carries_every_default_the_human_view_shows(monkeypatch):
         'aws_profile': 'data-eng',
     }
     assert set(Defaults.model_fields) - {'environment'} <= set(published)
+
+
+def limit_params(command, path: tuple[str, ...] = ()) -> list[tuple[str, object]]:
+    """Every `--limit` in a command tree, with the path it sits on.
+
+    Walked rather than listed, because a resource added with its own `--limit` is covered by
+    nothing when the list is written by hand, and its absence reads exactly like conformance.
+    Typed structurally because typer vendors click, so the parameter classes are not importable
+    under a name this repo declares."""
+    here = tuple(part for part in (*path, command.name) if part)
+    found = [(' '.join(here), param) for param in command.params if '--limit' in getattr(param, 'opts', ())]
+    for child in getattr(command, 'commands', {}).values():
+        found.extend(limit_params(child, here))
+    return found
+
+
+def whole_tree():
+    """The assembled surface for a pipeline declaring one of every resource that takes `--limit`."""
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '123456789012', 'region': 'us-east-2'},
+            'pipelines': {
+                'proj': {
+                    'glue_jobs': {
+                        'source-copy': {'name': 'copy-{env}', 'script_bucket': 'sales-scripts', 'scripts': ['jobs/copy.py'], 'role': 'r'}
+                    },
+                    'lambdas': {'router': {'name': 'router-{env}', 'source_dir': 'code', 'durable': True}},
+                    'step_functions': {'flow': {'name': 'flow-{env}'}},
+                    'iceberg_tables': {'events': {'database': 'lakehouse', 'table': 'events'}},
+                }
+            },
+        }
+    )
+    pipeline = config.pipelines['proj']
+    root = typer.Typer()
+    root.add_typer(make_glue_app('proj', pipeline, config), name='glue')
+    root.add_typer(make_lambda_app('proj', pipeline, config), name='lambda')
+    root.add_typer(make_sfn_app('proj', pipeline, config), name='sfn')
+    root.add_typer(make_iceberg_app('proj', pipeline, config), name='iceberg')
+    return typer.main.get_command(root)
+
+
+def test_every_limit_in_the_binary_refuses_a_negative():
+    """`--limit` is a row count on every resource, and a count has a floor.
+
+    The parser is the only thing that refuses a negative: past it, -1 reaches a slice as
+    `rows[:-1]` and an AWS call as a MaxResults nobody looked at, and both exit 0 carrying a
+    plausible count."""
+    found = limit_params(whole_tree())
+
+    assert {path for path, _ in found} == {
+        'glue source-copy runs',
+        'lambda router executions',
+        'sfn flow runs',
+        'iceberg events snapshots',
+        'iceberg events history',
+        'iceberg events files',
+        'iceberg events branches',
+    }
+    assert [path for path, param in found if getattr(param.type, 'min', None) != 0] == []

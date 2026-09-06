@@ -447,7 +447,7 @@ def make_glue_job_app(
 
     @job_app.command(epilog=f'Example:\n\ndectl {pipeline_name} glue {alias} runs --limit 5')
     def runs(
-        limit: Annotated[int, typer.Option('--limit', '-n', help='Number of runs to show.')] = 10,
+        limit: Annotated[int, typer.Option('--limit', '-n', min=0, help='Number of runs to show.')] = 10,
         as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
     ) -> None:
         """List recent runs of this Glue job with their state and timing."""
@@ -455,7 +455,8 @@ def make_glue_job_app(
 
         job = resolved()
         glue = make_session(config).client('glue')
-        job_runs = glue.get_job_runs(JobName=job.name, MaxResults=limit).get('JobRuns', [])
+        # Glue rejects MaxResults=0, so a zero row count is answered here rather than sent.
+        job_runs = [] if limit == 0 else glue.get_job_runs(JobName=job.name, MaxResults=limit).get('JobRuns', [])
 
         if as_json:
             emit_json(

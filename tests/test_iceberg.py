@@ -1,4 +1,5 @@
 import gzip
+import inspect
 import io
 import json
 
@@ -7,7 +8,9 @@ import typer
 from botocore.exceptions import ClientError
 
 from dectl.commands.iceberg import make_iceberg_app
+from dectl.commands.iceberg import make_iceberg_table_app
 from dectl.config import DectlConfig
+from dectl.config import IcebergTableConfig
 from dectl.env import active_environment
 from dectl.iceberg import TableMetadata
 from dectl.iceberg import ancestry
@@ -302,6 +305,19 @@ def make_config(tables: dict) -> DectlConfig:
             'pipelines': {'proj': {'iceberg_tables': tables}},
         }
     )
+
+
+def limited_verbs() -> list[str]:
+    """Every verb of this resource that takes `--limit`, read off the command tree.
+
+    Listed here and a fifth verb writing its own reading of the flag is covered by nothing,
+    with its absence from the list reading exactly like a fifth that conforms."""
+    table_app = make_iceberg_table_app('proj', 'events', IcebergTableConfig(database='lakehouse', table='events'), make_config({}))
+    verbs = [command.callback for command in table_app.registered_commands if command.callback is not None]
+    return [verb.__name__ for verb in verbs if 'limit' in inspect.signature(verb).parameters]
+
+
+LIMITED_VERBS = limited_verbs()
 
 
 def make_app(document: dict, monkeypatch, tables: dict | None = None) -> tuple[typer.Typer, FakeGlue, FakeS3]:
@@ -869,7 +885,7 @@ def test_files_json_reports_the_layout_at_each_commit(monkeypatch):
     assert row['average_file_bytes'] == 12582912 // 14
 
 
-@pytest.mark.parametrize('verb', ['snapshots', 'history', 'files', 'branches'])
+@pytest.mark.parametrize('verb', LIMITED_VERBS)
 def test_limit_zero_asks_for_no_rows_on_every_verb(verb, monkeypatch):
     # One verb reading 0 as every row while its sibling reads it as none is one flag with two
     # meanings inside one CLI, and both help rows read the same. `history` is the one that
@@ -882,20 +898,20 @@ def test_limit_zero_asks_for_no_rows_on_every_verb(verb, monkeypatch):
     assert json.loads(result.stdout) == []
 
 
-@pytest.mark.parametrize('verb', ['snapshots', 'history', 'files', 'branches'])
-def test_a_zero_limit_names_itself_rather_than_calling_the_table_empty(verb, monkeypatch):
-    # The table holds four commits, so `nothing has been committed to this table` would be false
-    # about it. A count taken under a narrowing is not a fact about the population.
+@pytest.mark.parametrize('verb', LIMITED_VERBS)
+def test_an_absent_limit_is_what_asks_for_every_row(verb, monkeypatch):
+    # Absence is the only spelling for "all". The table holds four commits and three refs, so a
+    # verb that capped by default would return fewer than everything it has.
     app, _, _ = make_app(four_commit_table(), monkeypatch)
 
-    result = runner.invoke(app, ['events', verb, '--limit', '0'])
+    everything = runner.invoke(app, ['events', verb, '--json'])
+    capped = runner.invoke(app, ['events', verb, '--limit', '1', '--json'])
 
-    assert result.exit_code == 0
-    assert '--limit 0' in result.stdout
-    assert 'committed' not in result.stdout
+    assert everything.exit_code == 0
+    assert len(json.loads(everything.stdout)) > len(json.loads(capped.stdout)) == 1
 
 
-@pytest.mark.parametrize('verb', ['snapshots', 'history', 'files', 'branches'])
+@pytest.mark.parametrize('verb', LIMITED_VERBS)
 def test_a_negative_limit_is_a_usage_error_not_a_quiet_off_by_one(verb, monkeypatch):
     # -1 into a slice drops the last row and returns a plausible count nobody asked for.
     app, _, _ = make_app(four_commit_table(), monkeypatch)
