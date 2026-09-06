@@ -870,16 +870,29 @@ def test_files_json_reports_the_layout_at_each_commit(monkeypatch):
 
 
 @pytest.mark.parametrize('verb', ['snapshots', 'history', 'files', 'branches'])
-def test_limit_zero_means_every_row_on_every_verb(verb, monkeypatch):
-    # A sentinel one verb honors and its sibling does not is worse than no sentinel: both help
-    # rows read the same and the answers differ. A verb slicing to nothing then prints an
-    # empty-state sentence that is false about a table holding four commits.
+def test_limit_zero_asks_for_no_rows_on_every_verb(verb, monkeypatch):
+    # One verb reading 0 as every row while its sibling reads it as none is one flag with two
+    # meanings inside one CLI, and both help rows read the same. `history` is the one that
+    # cannot be spotted by reading: it slices from the far end, and `-0` is `0`.
     app, _, _ = make_app(four_commit_table(), monkeypatch)
 
     result = runner.invoke(app, ['events', verb, '--limit', '0', '--json'])
 
     assert result.exit_code == 0
-    assert len(json.loads(result.stdout)) >= 3
+    assert json.loads(result.stdout) == []
+
+
+@pytest.mark.parametrize('verb', ['snapshots', 'history', 'files', 'branches'])
+def test_a_zero_limit_names_itself_rather_than_calling_the_table_empty(verb, monkeypatch):
+    # The table holds four commits, so `nothing has been committed to this table` would be false
+    # about it. A count taken under a narrowing is not a fact about the population.
+    app, _, _ = make_app(four_commit_table(), monkeypatch)
+
+    result = runner.invoke(app, ['events', verb, '--limit', '0'])
+
+    assert result.exit_code == 0
+    assert '--limit 0' in result.stdout
+    assert 'committed' not in result.stdout
 
 
 @pytest.mark.parametrize('verb', ['snapshots', 'history', 'files', 'branches'])

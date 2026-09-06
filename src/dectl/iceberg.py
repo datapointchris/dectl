@@ -231,22 +231,21 @@ def snapshot_timestamp_ms(snapshot: dict) -> int:
 
 
 def limited(rows: list, limit: int) -> list:
-    """Take the first `limit` rows, where 0 means every one of them.
+    """Take the first `limit` rows, where 0 takes none of them.
 
-    One reading of `--limit` for every verb of this resource. A sentinel may never steal a value
-    the flag can otherwise mean, which leaves 0 free to mean "all" on a limit. A sentinel one
-    verb honors and its sibling does not is worse than no sentinel at all: both help rows read
-    the same, the two answers differ, and the verb that slices to nothing then prints an
-    empty-state sentence that is false about the table."""
-    return rows if limit == 0 else rows[:limit]
+    One reading of `--limit` for every verb of this resource. A limit is a row count, and 0 is a
+    count a caller can mean: `--limit "$(remaining)"` reaches it and means none. Reserving 0 for
+    "all" answers that caller with every row, and nothing on screen separates the two."""
+    return rows[:limit]
 
 
 def limited_tail(rows: list, limit: int) -> list:
     """The last `limit` rows, under the reading `limited` documents.
 
     A log is read oldest-first, so its limit takes the most recent entries and still renders
-    them in order. The first N of a log is never the part anybody wants."""
-    return rows if limit == 0 else rows[-limit:]
+    them in order. The first N of a log is never the part anybody wants. Zero is answered before
+    the slice because `-0` is `0`, so `rows[-limit:]` on a zero limit returns every row."""
+    return [] if limit == 0 else rows[-limit:]
 
 
 def format_bytes(value: int | None) -> str:
