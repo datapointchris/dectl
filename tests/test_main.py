@@ -306,3 +306,50 @@ def test_every_limit_in_the_binary_refuses_a_negative():
         'iceberg events branches',
     }
     assert [path for path, param in found if getattr(param.type, 'min', None) != 0] == []
+
+
+class RefusingClient:
+    """An AWS client that fails any listing call, so reaching one is a test failure.
+
+    Glue, Step Functions and Lambda all reject a zero row count as below their minimum, so a
+    `--limit 0` that reaches them is a traceback rather than an empty answer."""
+
+    def __getattr__(self, name: str):
+        def refuse(*_args, **_kwargs):
+            raise AssertionError(f'--limit 0 reached AWS via {name}')
+
+        return refuse
+
+
+def test_a_zero_limit_is_answered_without_reaching_aws(monkeypatch):
+    """`--limit 0` is no rows on every resource, and the three paged ones never make the call."""
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '123456789012', 'region': 'us-east-2'},
+            'pipelines': {
+                'proj': {
+                    'glue_jobs': {'source-copy': {'name': 'copy', 'script_bucket': 'b', 'scripts': ['s.py'], 'role': 'r'}},
+                    'lambdas': {'router': {'name': 'router', 'source_dir': 'code', 'durable': True}},
+                    'step_functions': {'flow': {'name': 'flow'}},
+                }
+            },
+        }
+    )
+    pipeline = config.pipelines['proj']
+    monkeypatch.setattr('dectl.session.make_session', lambda _config: RefusingSession())
+    monkeypatch.setattr('dectl.commands.stepfunctions.make_session', lambda _config: RefusingSession())
+
+    invocations = [
+        (make_glue_app('proj', pipeline, config), ['source-copy', 'runs', '--limit', '0', '--json']),
+        (make_sfn_app('proj', pipeline, config), ['flow', 'runs', '--limit', '0', '--json']),
+        (make_lambda_app('proj', pipeline, config), ['router', 'executions', '--limit', '0', '--json']),
+    ]
+    for resource_app, argv in invocations:
+        result = runner.invoke(resource_app, argv)
+        assert result.exit_code == 0, f'{argv}: {result.stdout}{result.exception}'
+        assert json.loads(result.stdout) == [], argv
+
+
+class RefusingSession:
+    def client(self, _name: str) -> RefusingClient:
+        return RefusingClient()
