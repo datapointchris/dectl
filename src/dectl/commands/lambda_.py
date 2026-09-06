@@ -372,6 +372,7 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
             typer.Option(
                 '--limit',
                 '-n',
+                min=0,
                 max=SUFFIX_SEARCH_LIMIT,
                 help=f'Number of executions to show, at most {SUFFIX_SEARCH_LIMIT} — the window a name tail resolves within.',
             ),
@@ -399,7 +400,11 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         fn = resolved()
         client = make_session(config).client('lambda')
 
-        if all_versions:
+        # Lambda rejects MaxItems=0, so a zero row count is answered here rather than sent.
+        found: list[dict]
+        if limit == 0:
+            found, scope = [], qualifier or invoke_qualifier(fn)
+        elif all_versions:
             found, scanned = sweep_executions(client, fn.name, limit=limit, status=status)
             scope = f'versions {", ".join(scanned)}'
         else:
