@@ -182,6 +182,82 @@ def log_event(event_id: str, timestamp: int, message: str, stream: str = 'stream
     return {'eventId': event_id, 'timestamp': timestamp, 'message': message, 'logStreamName': stream}
 
 
+# What every live AWS module needs before it can do anything: a session, and a role Glue will
+# assume. Here rather than per module because both were copied into each one, and a copy is what
+# made `DECTL_IT_ROLE_ARN` reach the deploy module and not the run module — a suite that
+# half-honored the variable and failed on `iam:CreateRole` for the other half.
+GLUE_MANAGED_POLICY = 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
+GLUE_TRUST_POLICY = {
+    'Version': '2012-10-17',
+    'Statement': [{'Effect': 'Allow', 'Principal': {'Service': 'glue.amazonaws.com'}, 'Action': 'sts:AssumeRole'}],
+}
+
+
+@pytest.fixture(scope='module')
+def session():
+    """The boto3 session every live test runs through, skipping rather than failing obscurely.
+
+    Region and profile come from the standard AWS environment, with `DECTL_IT_AWS_PROFILE` and
+    `DECTL_IT_REGION` overriding when a specific account is wanted."""
+    import boto3
+
+    profile = os.environ.get('DECTL_IT_AWS_PROFILE')
+    region = os.environ.get('DECTL_IT_REGION') or os.environ.get('AWS_REGION') or os.environ.get('AWS_DEFAULT_REGION')
+    kwargs = {}
+    if profile:
+        kwargs['profile_name'] = profile
+    if region:
+        kwargs['region_name'] = region
+    built = boto3.Session(**kwargs)
+    if built.get_credentials() is None:
+        pytest.skip('no AWS credentials available')
+    # A profile naming a role and a source but no region resolves credentials and then fails
+    # inside botocore's endpoint resolver, once per test, on a NoRegionError that names neither
+    # the profile nor the variable that would fix it.
+    if built.region_name is None:
+        pytest.skip(f'profile {profile or "default"} resolves no region; set DECTL_IT_REGION')
+    return built
+
+
+@pytest.fixture(scope='module')
+def glue_role_arn(session):
+    """A role Glue can assume: the one `DECTL_IT_ROLE_ARN` names, or one created for the run.
+
+    A role is a precondition rather than a thing under test, which is what makes taking one
+    reasonable where taking a Glue job would not be. Naming an existing role is the least
+    privilege the suite can run at — the principal then needs `iam:PassRole` on that one ARN and
+    nothing else from IAM. Creating one needs `iam:CreateRole`, and a principal that can create a
+    role and attach a policy to it can grant itself anything, so delegating that safely takes a
+    permissions boundary and a name condition.
+
+    Creating one stays the fallback so a fresh account with broad credentials runs the suite with
+    no setup at all. It also costs about two minutes in the worst case: IAM is eventually
+    consistent, so a new role is not immediately assumable by Glue and `create_job` has to retry
+    until it is.
+
+    A supplied role has to carry `AWSGlueServiceRole` or its equivalent, because the run module's
+    job reads its script from S3."""
+    import json
+    import time
+    import uuid
+
+    supplied = os.environ.get('DECTL_IT_ROLE_ARN')
+    if supplied:
+        yield supplied
+        return
+
+    iam = session.client('iam')
+    role_name = f'dectl-it-glue-{uuid.uuid4().hex[:8]}'
+    created = iam.create_role(RoleName=role_name, AssumeRolePolicyDocument=json.dumps(GLUE_TRUST_POLICY))
+    iam.attach_role_policy(RoleName=role_name, PolicyArn=GLUE_MANAGED_POLICY)
+    time.sleep(10)
+    try:
+        yield created['Role']['Arn']
+    finally:
+        iam.detach_role_policy(RoleName=role_name, PolicyArn=GLUE_MANAGED_POLICY)
+        iam.delete_role(RoleName=role_name)
+
+
 def pytest_addoption(parser):
     parser.addoption(
         '--run-integration',

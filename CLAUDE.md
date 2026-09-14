@@ -457,16 +457,31 @@ work. The two exemptions are real cost and setup so extensive it would not be wo
 neither is "the fake covers it", because the questions that matter here are the service's rules
 and a fake only holds the ones somebody already knew.
 
-Everything a live test needs it creates and deletes itself. Never point one at a real pipeline's
-job: a test that depends on infrastructure it did not create fails on someone else's change and
-reports that as dectl being broken.
+**Every resource under test is created and deleted by the test.** Never point one at a real
+pipeline's job: a test that depends on infrastructure it did not create fails on someone else's
+change and reports that as dectl being broken.
 
-Run them with credentials that can reach Glue **and** `iam:CreateRole`, since a Glue job needs a
-role Glue can assume:
+A role is the exception, because it is a precondition rather than a subject — the same category
+as credentials and a region. `DECTL_IT_ROLE_ARN` names one, and the fixture creates its own when
+it is unset. That choice is what the suite's permissions turn on:
 
 ```bash
+# Least privilege: glue:*, logs:*, s3:*, and iam:PassRole on that one role
+DECTL_IT_ROLE_ARN=<arn> DECTL_IT_REGION=<region> uv run pytest --run-integration
+
+# No setup, broader credentials: the fixture creates and deletes a role, needing iam:CreateRole
 DECTL_IT_AWS_PROFILE=<profile> DECTL_IT_REGION=<region> uv run pytest --run-integration
 ```
+
+Prefer the first. A principal that can create a role and attach a policy to it can grant itself
+anything, so `iam:CreateRole` is an escalation path and delegating it safely takes a permissions
+boundary and a name condition — where passing one inert role to one service takes neither. It is
+also about two minutes faster per module, since IAM is eventually consistent and a fresh role is
+not immediately assumable by Glue.
+
+**Both fixtures live in `conftest.py`.** They were copied into each live module, and the copy is
+what let `DECTL_IT_ROLE_ARN` reach one module and not the other — a suite that half-honored the
+variable and failed on `iam:CreateRole` for the rest.
 
 **What live Glue does that no fake would have told you.** Version 2.0 is retired and `CreateJob`
 refuses it outright. A job asking for `MaxCapacity` alongside version 3.0 or 4.0 comes back

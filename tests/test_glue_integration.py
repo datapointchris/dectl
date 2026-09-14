@@ -8,18 +8,16 @@ are free -- the test never starts a job run, so it costs nothing.
 Region/profile come from the standard AWS environment (AWS_PROFILE, AWS_REGION), with
 DECTL_IT_AWS_PROFILE / DECTL_IT_REGION overrides if you want to target a specific one.
 
-The credentials need `iam:CreateRole` as well as the Glue actions, because a Glue job cannot be
-created without a role Glue can assume and this module will not reuse a real one. A principal
-holding only the Glue actions fails in the fixture rather than in a test.
+A Glue job cannot be created without a role Glue can assume, so the credentials need one of two
+things beyond the Glue actions. Name an existing role in `DECTL_IT_ROLE_ARN` and they need
+`iam:PassRole` on it. Name none and they need `iam:CreateRole`, because the fixture then makes
+its own. Holding neither fails in the fixture rather than in a test.
 """
 
 import contextlib
-import json
-import os
 import time
 import uuid
 
-import boto3
 import botocore.exceptions
 import pytest
 
@@ -30,50 +28,6 @@ from dectl.commands.glue import plan_glue_job_update
 from dectl.config import GlueJobConfig
 
 pytestmark = pytest.mark.integration
-
-GLUE_MANAGED_POLICY = 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
-GLUE_TRUST_POLICY = {
-    'Version': '2012-10-17',
-    'Statement': [
-        {'Effect': 'Allow', 'Principal': {'Service': 'glue.amazonaws.com'}, 'Action': 'sts:AssumeRole'},
-    ],
-}
-
-
-@pytest.fixture(scope='module')
-def session():
-    profile = os.environ.get('DECTL_IT_AWS_PROFILE')
-    region = os.environ.get('DECTL_IT_REGION') or os.environ.get('AWS_REGION') or os.environ.get('AWS_DEFAULT_REGION')
-    kwargs = {}
-    if profile:
-        kwargs['profile_name'] = profile
-    if region:
-        kwargs['region_name'] = region
-    built = boto3.Session(**kwargs)
-    if built.get_credentials() is None:
-        pytest.skip('no AWS credentials available')
-    # A profile that names a role and a source but no region resolves credentials and then
-    # fails inside botocore's endpoint resolver, once per test, on a NoRegionError that names
-    # neither the profile nor the variable that would fix it.
-    if built.region_name is None:
-        pytest.skip(f'profile {profile or "default"} resolves no region; set DECTL_IT_REGION')
-    return built
-
-
-@pytest.fixture(scope='module')
-def glue_role_arn(session):
-    iam = session.client('iam')
-    role_name = f'dectl-it-glue-{uuid.uuid4().hex[:8]}'
-    created = iam.create_role(RoleName=role_name, AssumeRolePolicyDocument=json.dumps(GLUE_TRUST_POLICY))
-    iam.attach_role_policy(RoleName=role_name, PolicyArn=GLUE_MANAGED_POLICY)
-    # A freshly created role is not immediately assumable by Glue (IAM is eventually
-    # consistent); create_job below also retries, but a short wait avoids most churn.
-    time.sleep(10)
-    try:
-        yield created['Role']['Arn']
-    finally:
-        iam.detach_role_policy(RoleName=role_name, PolicyArn=GLUE_MANAGED_POLICY)
-        iam.delete_role(RoleName=role_name)
 
 
 def create_job_with_role_retry(glue, **create_kwargs):
