@@ -31,6 +31,8 @@ from dectl.values import ConfigFault
 from dectl.values import ValueSite
 from dectl.values import bucket_fault
 from tests.conftest import RefusalRunner
+from tests.test_glue_integration import DEFINITION_FIELD_SPECS
+from tests.test_glue_integration import SHELL_FIELD_SPEC
 
 runner = RefusalRunner()
 
@@ -54,6 +56,13 @@ def test_job_exposes_deploy_run_logs_runs_verbs():
 
 
 class FakeGlueClient:
+    """Glue stand-in that refuses the UpdateJob this whole change is built around.
+
+    A job sizes by DPU or by workers, and `UpdateJob` rejects a definition carrying each. Every
+    assertion here about suppressing a derived `MaxCapacity` rests on that, so a fake that
+    accepts both makes a build which forgot to drop one look identical to a build that dropped
+    it — and the difference is a deploy that fails after the scripts are already uploaded."""
+
     def __init__(self, existing_job):
         self.existing_job = existing_job
         self.captured_update = None
@@ -62,6 +71,9 @@ class FakeGlueClient:
         return {'Job': self.existing_job}
 
     def update_job(self, JobName, JobUpdate):
+        worker_keys = sorted(key for key in ('WorkerType', 'NumberOfWorkers') if key in JobUpdate)
+        if worker_keys and 'MaxCapacity' in JobUpdate:
+            raise AssertionError(f'UpdateJob carries MaxCapacity beside {" and ".join(worker_keys)}; Glue refuses a job sized both ways')
         self.captured_update = JobUpdate
         return {}
 
@@ -151,6 +163,28 @@ def test_max_capacity_on_a_worker_based_job_is_rejected():
 
     with pytest.raises(typer.Exit):
         apply(glue, make_job(max_capacity=1.0))
+
+
+def test_worker_sizing_on_a_python_shell_job_is_rejected():
+    # The mirror of the case above, and the same cost it exists to avoid: UpdateJob refuses the
+    # pair on a pythonshell command, after upload_scripts has already run.
+    glue = FakeGlueClient(existing_job={'Command': {'Name': 'pythonshell'}, 'MaxCapacity': 1.0})
+
+    with pytest.raises(typer.Exit):
+        apply(glue, make_job(worker_type='G.1X', number_of_workers=2))
+
+    assert glue.captured_update is None
+
+
+def test_worker_sizing_is_allowed_on_a_job_whose_type_is_unknown():
+    # GetJob always names the command, but a definition that does not is not a reason to refuse
+    # a config Glue would accept — the refusal exists to beat UpdateJob to a certain rejection,
+    # not to guess at one.
+    glue = FakeGlueClient(existing_job={'Role': 'arn:aws:iam::123456789012:role/glue'})
+
+    apply(glue, make_job(worker_type='G.1X', number_of_workers=2))
+
+    assert glue.captured_update['WorkerType'] == 'G.1X'
 
 
 def worker_based_job(**definition):
@@ -257,62 +291,86 @@ def test_a_new_script_location_is_reported_and_applied():
     assert glue.captured_update['Command']['ScriptLocation'] == 's3://my-bucket/scripts/main.py'
 
 
-# Every field that reaches the top level of the definition, with the key it writes and a value
-# distinguishable from the fixture's. Parametrized rather than written out so a field added to
-# DEFINITION_FIELDS and not to the update is a failure here rather than a silent omission.
-TOP_LEVEL_FIELDS = [
-    ('glue_version', 'GlueVersion', '5.0'),
-    ('timeout_minutes', 'Timeout', 15),
-    ('max_retries', 'MaxRetries', 0),
-    ('execution_class', 'ExecutionClass', 'FLEX'),
-    ('worker_type', 'WorkerType', 'G.2X'),
+# One row per managed field: the live job it runs against, the config that names it, and what
+# the update must then carry. Every field in one table rather than a table plus bespoke tests,
+# because the guard below is only as good as what a deleted test takes with it — a field whose
+# coverage lives in a function of its own can lose that function while an inline allow-list keeps
+# the guard green. Delete a row here and the field loses its drive and its claim together.
+SPARK = {'Command': {'Name': 'glueetl'}}
+SHELL = {'Command': {'Name': 'pythonshell', 'PythonVersion': '3.9'}}
+MANAGED_FIELD_SPECS = [
+    pytest.param(SPARK, {'glue_version': '5.0'}, lambda u: u['GlueVersion'] == '5.0', id='glue_version'),
+    pytest.param(SPARK, {'timeout_minutes': 15}, lambda u: u['Timeout'] == 15, id='timeout_minutes'),
+    pytest.param(SPARK, {'max_retries': 0}, lambda u: u['MaxRetries'] == 0, id='max_retries'),
+    pytest.param(SPARK, {'execution_class': 'FLEX'}, lambda u: u['ExecutionClass'] == 'FLEX', id='execution_class'),
+    pytest.param(
+        SPARK,
+        {'worker_type': 'G.2X', 'number_of_workers': 3},
+        lambda u: u['WorkerType'] == 'G.2X' and u['NumberOfWorkers'] == 3,
+        id='worker_type+number_of_workers',
+    ),
+    pytest.param(SHELL, {'max_capacity': 1.0}, lambda u: u['MaxCapacity'] == 1.0, id='max_capacity'),
+    # The two nested ones assert the sibling survives as well, because a merge that replaced the
+    # sub-dict rather than updating it would satisfy the key on its own.
+    pytest.param(
+        SHELL,
+        {'python_version': '3.11'},
+        lambda u: u['Command']['PythonVersion'] == '3.11' and u['Command']['Name'] == 'pythonshell',
+        id='python_version',
+    ),
+    pytest.param(
+        {**SPARK, 'ExecutionProperty': {'MaxConcurrentRuns': 1}},
+        {'max_concurrent_runs': 3},
+        lambda u: u['ExecutionProperty'] == {'MaxConcurrentRuns': 3},
+        id='max_concurrent_runs',
+    ),
 ]
 
 
-@pytest.mark.parametrize('config_field, definition_key, value', TOP_LEVEL_FIELDS)
-def test_a_configured_definition_field_reaches_the_update(config_field, definition_key, value):
-    overrides = {config_field: value}
-    if config_field == 'worker_type':
-        overrides['number_of_workers'] = 2
-    glue = FakeGlueClient(existing_job={'Command': {'Name': 'glueetl'}})
+@pytest.mark.parametrize('existing, configured, holds', MANAGED_FIELD_SPECS)
+def test_a_configured_definition_field_reaches_the_update(existing, configured, holds):
+    glue = FakeGlueClient(existing_job=dict(existing))
 
-    apply(glue, make_job(**overrides))
+    apply(glue, make_job(**configured))
 
-    assert glue.captured_update[definition_key] == value
+    assert holds(glue.captured_update)
+
+
+def driven_fields(configured_per_case) -> set[str]:
+    """Every config field a run of parametrized cases names, so a guard counts real drives.
+
+    Takes the configured mappings rather than the params, because the two tables put them at
+    different positions and a position argument here would be the thing that goes wrong."""
+    driven = set()
+    for configured in configured_per_case:
+        driven |= set(configured)
+    return driven
 
 
 def test_every_managed_definition_field_is_covered_by_a_test():
     """A field dectl writes and nobody drives is a field whose first exercise is a real deploy.
 
-    Read off both maps rather than listed here, so a field added to either is a red test rather
-    than one silently outside the count. The four named inline are each driven by a test of
-    their own above: the sizing pair by the displacement case, and the two nested fields by the
-    merge cases, because none of those is a plain top-level write."""
-    driven = {field for field, _, _ in TOP_LEVEL_FIELDS} | {
-        'max_capacity',
-        'number_of_workers',
-        'python_version',
-        'max_concurrent_runs',
-    }
+    Both sides are derived: the managed surface off the model's declarations, and the driven set
+    off the table that parametrizes the test above. Nothing is listed here, so neither adding a
+    field nor deleting its row can leave this green."""
+    driven = driven_fields(spec.values[1] for spec in MANAGED_FIELD_SPECS)
 
     assert set(DEFINITION_FIELDS) | set(NESTED_DEFINITION_FIELDS) == driven
 
 
-def test_python_version_is_merged_into_the_command():
-    glue = FakeGlueClient(existing_job={'Command': {'Name': 'pythonshell', 'PythonVersion': '3.9'}})
+def test_every_managed_definition_field_is_driven_against_live_glue():
+    """The live suite's coverage guard, asserted here because CI is what has to enforce it.
 
-    apply(glue, make_job(python_version='3.11'))
+    It cannot live beside the table it reads. That module is `pytest.mark.integration`, so the
+    workflow — which passes no `--run-integration` — skips it, and a field could be added with no
+    live test on every PR. The assertion needs no AWS, only the table, so it runs here.
 
-    assert glue.captured_update['Command']['PythonVersion'] == '3.11'
-    assert glue.captured_update['Command']['Name'] == 'pythonshell'
+    The two named inline are the ones the Spark fixture cannot carry, and they are derived
+    rather than trusted: `SHELL_FIELD_SPEC` is the case that drives them, and taking its keys is
+    what makes deleting that case red here."""
+    driven = driven_fields(spec.values[0] for spec in DEFINITION_FIELD_SPECS) | set(SHELL_FIELD_SPEC)
 
-
-def test_max_concurrent_runs_is_merged_into_the_execution_property():
-    glue = FakeGlueClient(existing_job={'Command': {'Name': 'glueetl'}, 'ExecutionProperty': {'MaxConcurrentRuns': 1}})
-
-    apply(glue, make_job(max_concurrent_runs=3))
-
-    assert glue.captured_update['ExecutionProperty'] == {'MaxConcurrentRuns': 3}
+    assert set(DEFINITION_FIELDS) | set(NESTED_DEFINITION_FIELDS) == driven
 
 
 def test_an_unset_definition_field_leaves_the_live_value_alone():

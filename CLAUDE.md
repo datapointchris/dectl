@@ -275,35 +275,30 @@ and an eval'd `s3 export` stay clean.
   scripts land at a location the live job does not name. `Command` is written on every deploy,
   which is what makes this the nested dict that matters.
 - **A key the API forced out of the update is not a change, and `JobUpdate.derived` is how the
-  diff knows.** `READ_ONLY_KEYS` covers the keys `UpdateJob` always rejects; `derived` covers the
-  ones it rejects only in the shape at hand, which today is a Spark job's `MaxCapacity`. Glue
-  derives that from the worker pair and returns it from `GetJob`, so a row reporting its removal
-  reappears on the next read and the job prompts on every deploy forever. A `MaxCapacity` taken
-  off a job that was *not* already worker-sized stays a change: there it is the job's real size
-  and the config is replacing it, so both halves of the migration belong in the diff.
-- **Whether that drop is forced is decided by the live job, never by the config.** A config
-  naming the worker sizing a job already has has asked for nothing, and keying the suppression
-  on what the config names puts the row back on exactly that case — which is the shape a config
-  generated from the job's own Terraform has, so it is the common one rather than the corner.
-  `test_a_worker_sized_job_converges_after_one_deploy[sizing_named]` is the guard, and its
-  `sizing_unmanaged` twin passes either way, which is how the defect survived a green suite.
-- **Which sizing model wins is read off the merged update, never off the live job.** That is the
-  opposite end from the rule above and both are load-bearing: reading the live definition here
-  sends both models on a migration and Glue rejects it after the upload.
+  diff knows.** That docstring is the one copy of the mechanism; do not restate it here or in the
+  README. Two boolean reads four lines apart decide it and they point opposite ways —
+  `worker_based` off the merged update, `live_worker_based` off `existing` — so inverting either
+  is a live bug that the `sizing_named` half of
+  `test_a_worker_sized_job_converges_after_one_deploy` is what catches. Its `sizing_unmanaged`
+  twin passes under either reading, so a green run of that one alone proves nothing.
 - **`glue deploy` is two writes with different owners** — the script upload is always yours, but
   the job *definition* (role, connections, sizing, runtime, arguments) is Terraform's once a
   pipeline is established. dectl can still write it, because that is the whole point before
-  Terraform exists: change a worker type and run it instead of commit → Jenkins → console. So
+  Terraform exists: change a worker type and run it instead of commit → Jenkins → apply. So
   `deploy` diffs its computed update against the live definition, skips `UpdateJob` entirely when
   nothing differs (the steady state — a pure code push, no drift surface), and otherwise renders
   the field-level diff and confirms. `--plan` shows it and exits without uploading; `--yes` skips
   the prompt for the pre-Terraform loop. `job_definition_changes` also reports keys dectl *drops*,
   since a detached connection is invisible in a diff that only walks the new definition.
-- **`DEFINITION_FIELDS` and `NESTED_DEFINITION_FIELDS` are the whole of what a deploy writes.**
-  A field merged by hand instead of declared in one of them is outside every enumeration of the
-  managed surface, including the two coverage assertions that make an undriven field a red test.
-  An omitted key means unmanaged and the live value survives, which is what lets one deploy change
-  a worker type without resetting the timeout Terraform set.
+- **`GlueJobConfig.DEFINITION_FIELDS` and `NESTED_DEFINITION_FIELDS` are the whole *declared*
+  surface, not the whole of what a deploy writes.** Four more keys are written by hand, and the
+  check is a command rather than this sentence: `rg -n "job_update\['" src/dectl/commands/glue.py`
+  returns `Role`, `Command`, `Connections` and `DefaultArguments`. Those four come from fields
+  that are required or defaulted, so none is a question about what the config named — which is
+  what the two maps answer, and what `managed_definition` reports and the coverage guards count.
+  A field merged by hand instead of declared is outside all three. An omitted declared key means
+  unmanaged and the live value survives, which is what lets one deploy change a worker type
+  without resetting the timeout Terraform set.
 - **`connections` in config is authoritative, not additive** — unioning with whatever the job
   already has makes a stale entry immortal and silently reattaches a connection renamed in
   Terraform under its old name on every deploy. `None` (key absent) means dectl does not manage

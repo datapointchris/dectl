@@ -385,6 +385,81 @@ def test_every_resolved_path_reaches_both_renderers(capsys, monkeypatch, kind, o
                 assert path in printed, f'{resource}/{alias} {name} resolves to {path} and is printed nowhere'
 
 
+# One valid, distinctive value per managed field, with whatever else the config needs to accept
+# it — the worker pair is refused one half at a time. Looked up by the parametrize below rather
+# than iterated, so a field added to either declaration arrives here as a KeyError naming it
+# instead of as a field this guard silently never probed.
+RENDERER_PROBES = {
+    'max_capacity': {'max_capacity': 0.0625},
+    'worker_type': {'worker_type': 'G.8X', 'number_of_workers': 7},
+    'number_of_workers': {'worker_type': 'G.8X', 'number_of_workers': 7},
+    'glue_version': {'glue_version': '4.2'},
+    'python_version': {'python_version': '3.13'},
+    'timeout_minutes': {'timeout_minutes': 4242},
+    'max_retries': {'max_retries': 9},
+    'max_concurrent_runs': {'max_concurrent_runs': 8},
+    'execution_class': {'execution_class': 'FLEX'},
+}
+
+
+@pytest.mark.parametrize('field', sorted({**GlueJobConfig.DEFINITION_FIELDS, **GlueJobConfig.NESTED_DEFINITION_FIELDS}))
+def test_every_managed_definition_field_reaches_both_renderers(capsys, field):
+    """A field a deploy writes and neither door reports is one no read verb can answer for.
+
+    Parametrized off the model's own declarations, so a field added to either map arrives here
+    without this test being edited. The probe values are distinctive rather than realistic: a
+    value shared with a default cannot tell a reported field from an absent one.
+
+    Both doors, because one of them reporting it is how `max_capacity` stayed invisible while
+    being managed — a reader of `--json` and a reader of `config show` must not get different
+    answers to which fields are dectl's."""
+    configured = RENDERER_PROBES[field]
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '111', 'region': 'us-east-1'},
+            'pipelines': {
+                'salesdata': {
+                    'glue_jobs': {
+                        'j': {
+                            'name': 'the-job',
+                            'script_bucket': 'sales-scripts',
+                            'scripts': ['main.py'],
+                            'role': 'r',
+                            **configured,
+                        }
+                    }
+                }
+            },
+        }
+    )
+    pipeline = config.pipelines['salesdata']
+
+    published = pipeline_to_dict('salesdata', pipeline)
+    render_pipeline('salesdata', pipeline)
+    printed = capsys.readouterr().out
+
+    assert published['glue']['j']['managed'][field] == configured[field], f'{field} is managed and absent from --json'
+    assert str(configured[field]) in printed, f'{field} is managed and printed nowhere'
+
+
+def test_an_unmanaged_definition_field_is_absent_rather_than_null():
+    # Absence is the whole meaning of an omitted key: the live value survives the deploy. A row
+    # carrying null would say dectl writes a null, which is the one thing a reader must not
+    # conclude from this block.
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '111', 'region': 'us-east-1'},
+            'pipelines': {
+                'salesdata': {'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'sales-scripts', 'scripts': ['m.py'], 'role': 'r'}}}
+            },
+        }
+    )
+
+    published = pipeline_to_dict('salesdata', config.pipelines['salesdata'])
+
+    assert published['glue']['j']['managed'] == {}
+
+
 def test_a_bare_field_member_replaces_its_collection_in_the_env_guard_dump():
     # `monitor` is held as a bare field, so it has no alias to be filed under. Filing it under
     # the empty one leaves the unfiltered original beside the filtered copy, and the env-effect

@@ -50,10 +50,11 @@ defaults:
 
 # The Jenkins dectl reaches for `release`. Both this block and a pipeline's own `jenkins` below
 # have to be present for the command to appear at all, because the whole tree is assembled from
-# what the config declares. A value written as ${NAME} is read from that environment variable,
-# which is how the token stays out of the file.
+# what the config declares.
 jenkins:
   url: https://jenkins.example.com
+  # These two only: written as ${NAME} they are read from that environment variable, which keeps
+  # the credential out of the file. Every other value in this config is used exactly as written.
   user: ${JENKINS_USER}
   token: ${JENKINS_API_TOKEN}
 
@@ -90,9 +91,9 @@ pipelines:
         arguments:
           SOURCE_BUCKET: my-{env}-source-bucket
           SOURCE_PREFIX: incoming
-      # Every key below this line is optional and every one of them is left alone when omitted,
-      # because a deploy that reset an unnamed field would take whatever Terraform set with it.
-      # Name one only while you want dectl, rather than Terraform, deciding it.
+      # A second job, sized the other way, and naming every optional key so each one is here to
+      # copy. A real config names only the fields it wants dectl to decide; `dectl PIPELINE list`
+      # prints which those are.
       conform:
         name: my-{env}-conform-job
         script_bucket: my-script-bucket
@@ -107,8 +108,8 @@ pipelines:
         python_version: "3"
         # Glue counts this in minutes.
         timeout_minutes: 60
-        # Zero is the one worth setting by hand: left at the Glue default a failing job runs
-        # three times before it reports, which is three tracebacks to read instead of one.
+        # Zero is the one worth setting by hand: a job at three retries takes three runs to
+        # report a failure, which is three tracebacks to read instead of one.
         max_retries: 0
         max_concurrent_runs: 1
         # STANDARD or FLEX. FLEX runs on spare capacity for less money and starts when it
@@ -200,6 +201,29 @@ class GlueJobConfig(ResourceModel):
     KEY_FIELDS: ClassVar[frozenset[str]] = frozenset({'script_prefix', 'scripts'})
     # The third operand `join_uri` joins, and the one with no local meaning at all.
     BUCKET_FIELDS: ClassVar[frozenset[str]] = frozenset({'script_bucket'})
+
+    # Config field -> the `UpdateJob` key it writes, for the fields landing at the definition's
+    # top level and for the ones Glue files inside a sub-structure. Declared on the model beside
+    # the three above, so the deploy that writes them and the renderers that report them read one
+    # source. A field merged by hand instead of declared here is outside every enumeration of the
+    # managed surface, which includes the guards asserting each one is driven by a test.
+    #
+    # These are the *optional* half. `role` and `scripts` are required and written on every
+    # deploy, and `connections` and `arguments` are written from fields with defaults, so none of
+    # the four is a question about what the config named.
+    DEFINITION_FIELDS: ClassVar[Mapping[str, str]] = {
+        'max_capacity': 'MaxCapacity',
+        'worker_type': 'WorkerType',
+        'number_of_workers': 'NumberOfWorkers',
+        'glue_version': 'GlueVersion',
+        'timeout_minutes': 'Timeout',
+        'max_retries': 'MaxRetries',
+        'execution_class': 'ExecutionClass',
+    }
+    NESTED_DEFINITION_FIELDS: ClassVar[Mapping[str, tuple[str, str]]] = {
+        'python_version': ('Command', 'PythonVersion'),
+        'max_concurrent_runs': ('ExecutionProperty', 'MaxConcurrentRuns'),
+    }
 
     name: str
     script_bucket: str

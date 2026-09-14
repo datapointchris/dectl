@@ -21,8 +21,6 @@ import uuid
 import botocore.exceptions
 import pytest
 
-from dectl.commands.glue import DEFINITION_FIELDS
-from dectl.commands.glue import NESTED_DEFINITION_FIELDS
 from dectl.commands.glue import apply_glue_job_update
 from dectl.commands.glue import plan_glue_job_update
 from dectl.config import GlueJobConfig
@@ -226,14 +224,12 @@ def test_a_managed_field_round_trips_through_update_job(session, glue_role_arn, 
         assert holds(session.client('glue').get_job(JobName=job_name)['Job'])
 
 
-def test_every_managed_definition_field_is_driven_against_live_glue():
-    """A field dectl writes and no live test drives is one whose first real UpdateJob is a user's.
-
-    `max_capacity` and `python_version` are absent from the table because neither can be set on
-    the Spark fixture the table runs against. The Python shell case below drives both."""
-    driven = {field for spec in DEFINITION_FIELD_SPECS for field in spec.values[0]}
-
-    assert set(DEFINITION_FIELDS) | set(NESTED_DEFINITION_FIELDS) == driven | {'max_capacity', 'python_version'}
+# The two fields the Spark table cannot carry. A Python shell job is the only one that takes
+# either, so they get their own case — and `test_every_managed_definition_field_is_driven_against_live_glue`
+# in tests/test_glue.py reads this name, which is what makes deleting the case red rather than
+# quietly uncovered. That guard lives there because this module is marked `integration` and CI
+# passes no --run-integration, so an assertion placed here would never gate a merge.
+SHELL_FIELD_SPEC = {'max_capacity': 1.0, 'python_version': '3.9'}
 
 
 def test_a_python_shell_job_takes_max_capacity_and_a_python_version(session, glue_role_arn):
@@ -242,13 +238,13 @@ def test_a_python_shell_job_takes_max_capacity_and_a_python_version(session, glu
         'MaxCapacity': 0.0625,
     }
     with live_job(session, Role=glue_role_arn, **shell_job) as job_name:
-        glue_job = job_config(job_name, glue_role_arn, max_capacity=1.0, python_version='3.9')
+        glue_job = job_config(job_name, glue_role_arn, **SHELL_FIELD_SPEC)
 
         assert deploy_definition(session, glue_job) is True
 
         live = session.client('glue').get_job(JobName=job_name)['Job']
-        assert live['MaxCapacity'] == 1.0
-        assert live['Command']['PythonVersion'] == '3.9'
+        assert live['MaxCapacity'] == SHELL_FIELD_SPEC['max_capacity']
+        assert live['Command']['PythonVersion'] == SHELL_FIELD_SPEC['python_version']
 
 
 def test_migrating_a_dpu_sized_job_to_worker_sizing_is_accepted(session, glue_role_arn):

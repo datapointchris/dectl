@@ -72,20 +72,47 @@ def test_template_config_is_valid():
     assert 'example-pipeline' in config.pipelines
 
 
-def keys_written_in(template: str) -> set[str]:
-    """Every mapping key the template writes, comments and commented-out lines excluded.
+def nested_model(annotation) -> tuple[type[StrictModel] | None, bool]:
+    """The model an annotation carries, and whether the template holds them keyed by alias.
 
-    Textual rather than a walk of the parsed config, because a key the template never mentions
-    parses into its model default and is then indistinguishable from one it set to that value.
-    The question here is what a reader can see, so the text is the right thing to read."""
-    written = set()
-    for line in template.splitlines():
-        bare = line.strip()
-        if not bare or bare.startswith('#') or bare.startswith('- '):
+    `dict[str, GlueJobConfig]` holds one per alias, so its *values* are the blocks to descend
+    into. A bare `MonitorConfig` and a `JenkinsJobConfig | None` are the block itself."""
+    for arg in [annotation, *get_args(annotation)]:
+        if isinstance(arg, type) and issubclass(arg, StrictModel):
+            return arg, get_origin(annotation) in (dict, Mapping)
+    return None, False
+
+
+def pairs_written_in(model: type[StrictModel], raw) -> set[tuple[type[StrictModel], str]]:
+    """Every `(model, field)` the parsed template writes, walking the mapping beside the models.
+
+    Keyed on the pair rather than the name. Three names are shared across models — `name` on
+    three resources, `lambdas` and `step_functions` on two — so a flat set of names lets a field
+    deleted from its only block be answered by a same-named field somewhere else entirely.
+
+    The mapping `yaml.safe_load` returns rather than the validated config, because a key the
+    template never mentions parses into its model default and is then indistinguishable from one
+    the example set. The raw mapping distinguishes absent from set exactly, and it is also the
+    only form that knows which model a block belongs to.
+
+    Reading the parse rather than the lines is what makes the walk blind to where a key *looks*
+    like it is written: a `key: value` inside a block scalar is a string, and counting it would
+    let a field deleted from the template be answered by its own name appearing inside some
+    unrelated free-form `arguments:` entry."""
+    written: set[tuple[type[StrictModel], str]] = set()
+    if not isinstance(raw, dict):
+        return written
+    for name, field in model.model_fields.items():
+        if name not in raw:
             continue
-        key, separator, _ = bare.partition(':')
-        if separator:
-            written.add(key.strip())
+        written.add((model, name))
+        child, by_alias = nested_model(field.annotation)
+        if child is None:
+            continue
+        value = raw[name]
+        blocks = value.values() if by_alias and isinstance(value, dict) else [value]
+        for block in blocks:
+            written |= pairs_written_in(child, block)
     return written
 
 
@@ -94,23 +121,25 @@ def test_the_template_names_every_field_the_models_hold():
     a field with no documentation anywhere.
 
     Validity is not enough on its own: every field has a default or is supplied elsewhere in the
-    example, so a whole block can fall out and the round-trip above still passes. Both `jenkins`
-    blocks did exactly that, which left `release` — a command built only when they are present —
-    unreachable from the example config that is supposed to document it.
+    example, so a whole block can fall out and the round-trip above still passes.
 
-    An alias key is excluded because the template chooses those names itself. A field genuinely
-    not worth showing is added below with the reason, the same bargain as `UNCHECKED_FIELDS`."""
-    declared = {field for model in config_models() for field in model.model_fields}
-    shown = keys_written_in(TEMPLATE_CONFIG)
+    An alias key is not a field and never appears here, because the walk descends by model rather
+    than by key name. A field genuinely not worth writing out is added below with the reason, the
+    same bargain as `UNCHECKED_FIELDS`."""
+    declared = set()
+    for model in config_models():
+        for field in model.model_fields:
+            declared.add((model, field))
+    written = pairs_written_in(DectlConfig, yaml.safe_load(TEMPLATE_CONFIG))
 
-    assert declared - shown == set(SHOWN_ONLY_AS_A_COMMENT)
+    assert declared - written == set(SHOWN_ONLY_AS_A_COMMENT)
 
 
-# Fields the template carries commented out, with the reason. `keys_written_in` reads written
-# keys only, so these subtract rather than count: the point of the guard is that a reader can
+# Fields the template carries commented out, with the reason. The walk reads the parse, so a
+# commented key is absent from it and these subtract: the point of the guard is that a reader can
 # see a field, and a commented line shows it while an absent one does not.
 SHOWN_ONLY_AS_A_COMMENT = {
-    'resolve_paths_from': 'names a directory no machine has, and `config validate` checks it, '
+    (PipelineConfig, 'resolve_paths_from'): 'names a directory no machine has, and `config validate` checks it, '
     'so `config init` would write a config that fails its own check',
 }
 
@@ -211,12 +240,25 @@ def test_a_job_naming_neither_sizing_model_is_valid():
     assert glue_job().worker_type is None
 
 
-@pytest.mark.parametrize('field', ['number_of_workers', 'timeout_minutes', 'max_concurrent_runs'])
-def test_a_count_that_has_to_be_positive_refuses_zero(field):
+# Each field that has to be positive, with whatever else the config needs to be otherwise valid.
+# number_of_workers carries a worker_type: without one the mutual-exclusion rule raises first,
+# so the case passes on a rule it is not about and deleting the bound leaves it green.
+POSITIVE_COUNTS = [
+    pytest.param('number_of_workers', {'worker_type': 'G.1X'}, id='number_of_workers'),
+    pytest.param('timeout_minutes', {}, id='timeout_minutes'),
+    pytest.param('max_concurrent_runs', {}, id='max_concurrent_runs'),
+]
+
+
+@pytest.mark.parametrize('field, valid_rest', POSITIVE_COUNTS)
+def test_a_count_that_has_to_be_positive_refuses_zero(field, valid_rest):
     # Glue rejects each of these at zero. max_retries is deliberately not here: zero is the
     # value worth having, since the Glue default reruns a failing job three times.
-    with pytest.raises(ValidationError):
-        glue_job(**{field: 0})
+    with pytest.raises(ValidationError) as raised:
+        glue_job(**{field: 0}, **valid_rest)
+
+    # Named, because ValidationError is what every other rule on this model raises too.
+    assert raised.value.errors()[0]['type'] == 'greater_than_equal'
 
 
 def test_max_retries_accepts_zero():
@@ -493,8 +535,12 @@ def config_models(root: type[BaseModel] = DectlConfig) -> set[type[StrictModel]]
 
     Both a bare annotation and a `dict[str, Model]` one, because the code reaches both. Walking
     only `get_args` left a declaration on `monitor` — a bare `MonitorConfig` field — inert with
-    the whole suite green, which is the guard reporting complete on a member it cannot see."""
-    found: set[type[StrictModel]] = set()
+    the whole suite green, which is the guard reporting complete on a member it cannot see.
+
+    The root is seeded into the result, not only into the queue. Nothing declares a field of the
+    root's type, so a walk that adds only what it finds in an annotation never reaches it, and
+    every field on `DectlConfig` is then outside every guard reading this."""
+    found: set[type[StrictModel]] = {root} if issubclass(root, StrictModel) else set()
     pending = [root]
     while pending:
         model = pending.pop()
@@ -549,7 +595,10 @@ def test_every_exempted_field_is_one_the_classification_walk_can_reach():
     of these named models the walk had been filtered down past, and their presence is precisely
     what made the narrow population look deliberate rather than broken. Deleting all eight left
     the suite green, which is the tell."""
-    reachable = {(model, field) for model in config_models() for field in string_fields(model)}
+    reachable = set()
+    for model in config_models():
+        for field in string_fields(model):
+            reachable.add((model, field))
 
     assert set(UNCHECKED_FIELDS) - reachable == set()
 

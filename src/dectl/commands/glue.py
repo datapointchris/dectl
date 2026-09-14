@@ -160,50 +160,48 @@ class JobUpdate(NamedTuple):
     derived: frozenset[str]
 
 
-# Config field -> the `JobUpdate` key it writes, for every field that lands at the top level of
-# the definition.
-DEFINITION_FIELDS = {
-    'max_capacity': 'MaxCapacity',
-    'worker_type': 'WorkerType',
-    'number_of_workers': 'NumberOfWorkers',
-    'glue_version': 'GlueVersion',
-    'timeout_minutes': 'Timeout',
-    'max_retries': 'MaxRetries',
-    'execution_class': 'ExecutionClass',
-}
-
-# The same, for the fields Glue files inside a sub-structure. Data rather than two hand-written
-# merges, so the pair of maps is the whole answer to what dectl writes — a field merged by hand
-# is one no enumeration of the managed surface can see, and the tests that assert every managed
-# field is driven would pass without covering it.
-NESTED_DEFINITION_FIELDS = {
-    'python_version': ('Command', 'PythonVersion'),
-    'max_concurrent_runs': ('ExecutionProperty', 'MaxConcurrentRuns'),
-}
+DEFINITION_FIELDS = GlueJobConfig.DEFINITION_FIELDS
+NESTED_DEFINITION_FIELDS = GlueJobConfig.NESTED_DEFINITION_FIELDS
 
 WORKER_KEYS = ('WorkerType', 'NumberOfWorkers')
+# Glue's own name for a Spark job. The one command type that takes the worker pair, and the one
+# `MaxCapacity` cannot size on a runtime Glue still offers.
+SPARK_COMMAND = 'glueetl'
 
 
-def refuse_dpu_sizing_of_a_worker_job(existing: dict, glue_job: GlueJobConfig) -> None:
-    """Refuse `max_capacity` against a job Glue currently sizes by workers.
+def refuse_sizing_the_job_type_cannot_take(existing: dict, glue_job: GlueJobConfig) -> None:
+    """Refuse a sizing model the live job's type will not accept, before anything is uploaded.
 
-    The reverse direction is allowed and is a real migration: naming `worker_type` on a
-    DPU-sized job displaces `MaxCapacity`, and the diff shows both halves of that. This
-    direction has no expression, because `None` means unmanaged everywhere in this config —
-    there is no way to write "and unset WorkerType", so the update would carry both models and
-    Glue would reject it after the scripts had already been uploaded."""
-    if glue_job.max_capacity is None:
-        return
-    if glue_job.worker_type is not None or glue_job.number_of_workers is not None:
-        return
-    live_worker_keys = [key for key in WORKER_KEYS if key in existing]
-    if not live_worker_keys:
-        return
-    error(
-        f'{glue_job.name} is sized by {" and ".join(live_worker_keys)} in Glue, and max_capacity cannot replace them. '
-        'Set worker_type and number_of_workers instead, or drop max_capacity to leave the size alone.'
-    )
-    raise typer.Exit(1)
+    Both directions reach `UpdateJob` as the same failure — a rejection naming neither the job
+    nor the config key, arriving after `upload_scripts` has run. The config grammar does not
+    force either refusal, which is worth stating because it looks like it does: naming
+    `max_capacity` is exactly as expressive as naming `worker_type`, and the symmetric
+    implementation would pop `WORKER_KEYS` the way `build_job_update` already pops `MaxCapacity`.
+    What forbids them is Glue.
+
+    A worker-sized job cannot be re-sized by DPU, because a runtime that still accepts
+    `MaxCapacity` on Spark hands the job a `WorkerType` anyway — only a job created without a
+    `GlueVersion` at all is DPU-sized, and that is not a state an update can return one to.
+
+    A Python shell job cannot take workers at all; the pair belongs to `glueetl`."""
+    if glue_job.max_capacity is not None:
+        live_worker_keys = [key for key in WORKER_KEYS if key in existing]
+        if live_worker_keys:
+            error(
+                f'{glue_job.name} is sized by {" and ".join(live_worker_keys)} in Glue, which no longer accepts '
+                'max_capacity. Set worker_type and number_of_workers instead, or drop max_capacity to leave the '
+                'size alone.'
+            )
+            raise typer.Exit(1)
+
+    wants_workers = glue_job.worker_type is not None or glue_job.number_of_workers is not None
+    command_name = existing.get('Command', {}).get('Name')
+    if wants_workers and command_name and command_name != SPARK_COMMAND:
+        error(
+            f'{glue_job.name} is a {command_name} job in Glue, which sizes by max_capacity rather than workers. '
+            'Remove worker_type and number_of_workers, or set max_capacity (0.0625 or 1).'
+        )
+        raise typer.Exit(1)
 
 
 def build_job_update(existing: dict, glue_job: GlueJobConfig) -> JobUpdate:
@@ -219,7 +217,7 @@ def build_job_update(existing: dict, glue_job: GlueJobConfig) -> JobUpdate:
     compares that object with itself and reports no change — so a definition whose only
     difference is inside a nested dict is read as converged, `UpdateJob` is skipped, and the
     scripts land at a location the live job is not pointing at."""
-    refuse_dpu_sizing_of_a_worker_job(existing, glue_job)
+    refuse_sizing_the_job_type_cannot_take(existing, glue_job)
     job_update = {key: value for key, value in existing.items() if key not in READ_ONLY_KEYS}
 
     for config_field, definition_key in DEFINITION_FIELDS.items():
@@ -246,12 +244,9 @@ def build_job_update(existing: dict, glue_job: GlueJobConfig) -> JobUpdate:
     # sizing drops the DPU value it is replacing. Reading the live definition instead would send
     # both models and let Glue refuse the deploy after the upload.
     worker_based = any(key in job_update for key in WORKER_KEYS)
-    # Whether the *live* job was already worker-sized, which is what decides where its
-    # MaxCapacity came from. On one that was, Glue derived the value and will derive it again,
-    # so its removal is forced. On one that was not, the value is the job's real size and the
-    # config is displacing it, which is a change. Asking the config instead gets the steady
-    # state wrong: a config that names the worker sizing the job already has has asked for
-    # nothing, and the row would come back on every deploy.
+    # Read off `existing`, and the opposite end from the line above. Which MaxCapacity Glue
+    # derived is a fact about the live job, so asking the config gets it wrong — `JobUpdate`
+    # carries what each answer costs.
     live_worker_based = any(key in existing for key in WORKER_KEYS)
     derived = set()
     if worker_based and 'MaxCapacity' in job_update:
@@ -296,13 +291,13 @@ def diff_mappings(existing: dict, updated: dict) -> dict:
 def job_definition_changes(existing: dict, update: JobUpdate) -> list[tuple[str, str, str]]:
     """Field-level diff of what UpdateJob would change, for review before it is applied.
 
-    Nested dicts (Command, DefaultArguments, Connections) are expanded one level: whole-dict
-    before/after blobs are unreadable, and the interesting change is almost always a single key.
+    Any dict value is expanded one level, whichever it is: whole-dict before/after blobs are
+    unreadable, and the interesting change is almost always a single key.
 
     Two things are absent from the update without being changes, and they are absent for the
     same reason: UpdateJob rejects them. `READ_ONLY_KEYS` covers the ones that are always
-    rejected, and `update.derived` covers the ones rejected only in the shape at hand. A key
-    reported from either set is a row nothing can ever make go away."""
+    rejected, and `update.derived` covers the ones rejected only in the shape at hand —
+    `JobUpdate` carries why. A key reported from either set is a row nothing can ever clear."""
     job_update = update.definition
     changes = []
     for key, new_value in job_update.items():
@@ -486,7 +481,7 @@ def make_glue_job_app(
     ) -> None:
         """Upload the job's scripts to S3 and point the Glue job at them (does not run it).
 
-        Changes to the job definition itself — role, connections, capacity, arguments — are shown
+        Changes to the job definition itself — every field the config names — are shown
         and confirmed before they are applied, since Terraform owns those once a pipeline is
         established. When nothing differs, the definition is left untouched."""
         from dectl.session import make_session
