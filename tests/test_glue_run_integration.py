@@ -21,12 +21,9 @@ wall-clock bounded rather than only about content. Region/profile come from the 
 environment, with DECTL_IT_AWS_PROFILE / DECTL_IT_REGION overrides.
 """
 
-import json
-import os
 import time
 import uuid
 
-import boto3
 import botocore.exceptions
 import pytest
 
@@ -38,31 +35,10 @@ from dectl.output import console
 
 pytestmark = pytest.mark.integration
 
-GLUE_MANAGED_POLICY = 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
-GLUE_TRUST_POLICY = {
-    'Version': '2012-10-17',
-    'Statement': [{'Effect': 'Allow', 'Principal': {'Service': 'glue.amazonaws.com'}, 'Action': 'sts:AssumeRole'}],
-}
-
 # A run that has finished must have its whole output readable within this. The failure mode being
 # guarded is a scan of the shared group from the start of retention, which took minutes.
 TAIL_BUDGET_SECONDS = 30
 RUN_TIMEOUT_SECONDS = 600
-
-
-@pytest.fixture(scope='module')
-def session():
-    profile = os.environ.get('DECTL_IT_AWS_PROFILE')
-    region = os.environ.get('DECTL_IT_REGION') or os.environ.get('AWS_REGION') or os.environ.get('AWS_DEFAULT_REGION')
-    kwargs = {}
-    if profile:
-        kwargs['profile_name'] = profile
-    if region:
-        kwargs['region_name'] = region
-    built = boto3.Session(**kwargs)
-    if built.get_credentials() is None:
-        pytest.skip('no AWS credentials available')
-    return built
 
 
 @pytest.fixture(scope='module')
@@ -96,20 +72,6 @@ def script_location(session, marker):
     finally:
         s3.delete_object(Bucket=bucket, Key=key)
         s3.delete_bucket(Bucket=bucket)
-
-
-@pytest.fixture(scope='module')
-def glue_role_arn(session, marker):
-    iam = session.client('iam')
-    role_name = f'{marker}-role'
-    created = iam.create_role(RoleName=role_name, AssumeRolePolicyDocument=json.dumps(GLUE_TRUST_POLICY))
-    iam.attach_role_policy(RoleName=role_name, PolicyArn=GLUE_MANAGED_POLICY)
-    time.sleep(10)  # IAM is eventually consistent; create_job below also retries.
-    try:
-        yield created['Role']['Arn']
-    finally:
-        iam.detach_role_policy(RoleName=role_name, PolicyArn=GLUE_MANAGED_POLICY)
-        iam.delete_role(RoleName=role_name)
 
 
 @pytest.fixture(scope='module')

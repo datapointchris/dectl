@@ -8,7 +8,9 @@ import yaml
 from pyclisteno.paths import config_home
 from pydantic import BaseModel
 from pydantic import ConfigDict
+from pydantic import Field
 from pydantic import ValidationError
+from pydantic import model_validator
 
 from dectl.env import substitute_env
 from dectl.output import error
@@ -46,6 +48,16 @@ defaults:
   environment: dev
   aws_profile: ""
 
+# The Jenkins dectl reaches for `release`. Both this block and a pipeline's own `jenkins` below
+# have to be present for the command to appear at all, because the whole tree is assembled from
+# what the config declares.
+jenkins:
+  url: https://jenkins.example.com
+  # These two only: written as ${NAME} they are read from that environment variable, which keeps
+  # the credential out of the file. Every other value in this config is used exactly as written.
+  user: ${JENKINS_USER}
+  token: ${JENKINS_API_TOKEN}
+
 pipelines:
   example-pipeline:
     # The directory the relative paths below resolve from — every glue `scripts` entry and every
@@ -72,11 +84,37 @@ pipelines:
         # Omit the key entirely to leave the job's connections alone.
         connections:
           - my-{env}-vpc-connection
-        # Python shell: 0.0625 (1 GB) or 1 (16 GB). Omit for Spark jobs, which size by WorkerType.
+        # A Glue job sizes one of two ways and dectl refuses a config naming both. A Python
+        # shell job takes max_capacity, which is 0.0625 (1 GB) or 1 (16 GB). A Spark job takes
+        # the worker pair below instead.
         max_capacity: 1
         arguments:
           SOURCE_BUCKET: my-{env}-source-bucket
           SOURCE_PREFIX: incoming
+      # A second job, sized the other way, and naming every optional key so each one is here to
+      # copy. A real config names only the fields it wants dectl to decide; `dectl PIPELINE list`
+      # prints which those are.
+      conform:
+        name: my-{env}-conform-job
+        script_bucket: my-script-bucket
+        scripts:
+          - conform.py
+          - lib/shared.py            # every script after the first becomes --extra-py-files
+        role: "arn:aws:iam::123456789012:role/my-{env}-glue-role"
+        # Spark sizing. Glue takes the two together, so dectl refuses one without the other.
+        worker_type: G.1X
+        number_of_workers: 4
+        glue_version: "5.0"
+        python_version: "3"
+        # Glue counts this in minutes.
+        timeout_minutes: 60
+        # Zero is the one worth setting by hand: a job at three retries takes three runs to
+        # report a failure, which is three tracebacks to read instead of one.
+        max_retries: 0
+        max_concurrent_runs: 1
+        # STANDARD or FLEX. FLEX runs on spare capacity for less money and starts when it
+        # starts, which is the trade an iteration loop usually wants and a schedule does not.
+        execution_class: FLEX
     lambdas:
       my-function:
         name: my-{env}-lambda-function
@@ -107,6 +145,12 @@ pipelines:
         - my-function
       step_functions:
         - my-flow
+    # Which Jenkins job `dectl example-pipeline release` builds, and what it posts. Needs the
+    # top-level `jenkins` block as well; either one missing and the command is not built.
+    jenkins:
+      job_path: data-engineering/job/example-pipeline-deploy
+      parameters:
+        ENVIRONMENT: "{env}"
 """
 
 
@@ -158,6 +202,29 @@ class GlueJobConfig(ResourceModel):
     # The third operand `join_uri` joins, and the one with no local meaning at all.
     BUCKET_FIELDS: ClassVar[frozenset[str]] = frozenset({'script_bucket'})
 
+    # Config field -> the `UpdateJob` key it writes, for the fields landing at the definition's
+    # top level and for the ones Glue files inside a sub-structure. Declared on the model beside
+    # the three above, so the deploy that writes them and the renderers that report them read one
+    # source. A field merged by hand instead of declared here is outside every enumeration of the
+    # managed surface, which includes the guards asserting each one is driven by a test.
+    #
+    # These are the *optional* half. `role` and `scripts` are required and written on every
+    # deploy, and `connections` and `arguments` are written from fields with defaults, so none of
+    # the four is a question about what the config named.
+    DEFINITION_FIELDS: ClassVar[Mapping[str, str]] = {
+        'max_capacity': 'MaxCapacity',
+        'worker_type': 'WorkerType',
+        'number_of_workers': 'NumberOfWorkers',
+        'glue_version': 'GlueVersion',
+        'timeout_minutes': 'Timeout',
+        'max_retries': 'MaxRetries',
+        'execution_class': 'ExecutionClass',
+    }
+    NESTED_DEFINITION_FIELDS: ClassVar[Mapping[str, tuple[str, str]]] = {
+        'python_version': ('Command', 'PythonVersion'),
+        'max_concurrent_runs': ('ExecutionProperty', 'MaxConcurrentRuns'),
+    }
+
     name: str
     script_bucket: str
     script_prefix: str = 'scripts'
@@ -171,6 +238,48 @@ class GlueJobConfig(ResourceModel):
     arguments: dict[str, str] = {}
     # Python shell jobs accept 0.0625 (1 GB) or 1 (16 GB); Spark jobs use WorkerType instead.
     max_capacity: float | None = None
+    # The two halves of Spark sizing. Glue takes them together or not at all, so a job naming one
+    # and not the other is refused below rather than at UpdateJob, which lands after the upload.
+    worker_type: str | None = None
+    number_of_workers: int | None = Field(default=None, ge=1)
+    # Left as plain strings because AWS owns both vocabularies and adds to them. An enum here
+    # would be this release's snapshot of the list, and a version dectl has not heard of is one
+    # it would refuse rather than pass through.
+    glue_version: str | None = None
+    python_version: str | None = None
+    # Glue's Timeout is minutes. The name says so because a duration whose unit lives in the
+    # docs is one a writer guesses, and a wrong guess there is silent.
+    timeout_minutes: int | None = Field(default=None, ge=1)
+    # Zero is the value worth having: a failing job left at the Glue default runs three times
+    # before it reports, which is three tracebacks to read instead of one.
+    max_retries: int | None = Field(default=None, ge=0)
+    max_concurrent_runs: int | None = Field(default=None, ge=1)
+    execution_class: str | None = None
+
+    @model_validator(mode='after')
+    def sizing_is_one_model_or_the_other(self) -> 'GlueJobConfig':
+        """Refuse a job sizing itself both ways, and refuse half a worker pair.
+
+        Glue rejects both of these itself, and its message names neither the job nor the config
+        key — the caller gets "Please do not set Max Capacity if using Worker Type and Number Of
+        Workers" with nothing saying which of several jobs produced it. It also arrives from
+        UpdateJob, which the deploy runs after the script upload, so the answer is late as well
+        as unattributed.
+
+        This is a fact about the config alone. It needs no AWS call, no environment and no
+        filesystem, which is what makes it a field validator rather than a `config validate`
+        fault — the distinction `key_fault` draws in `values.py`."""
+        worker_fields = {'worker_type': self.worker_type, 'number_of_workers': self.number_of_workers}
+        named = sorted(key for key, value in worker_fields.items() if value is not None)
+        if named and self.max_capacity is not None:
+            raise ValueError(
+                f'{self.name} sets max_capacity and {", ".join(named)}; a Glue job sizes by one model or the other. '
+                'Python shell jobs take max_capacity (0.0625 or 1); Spark jobs take worker_type with number_of_workers.'
+            )
+        if len(named) == 1:
+            missing = next(key for key in worker_fields if key not in named)
+            raise ValueError(f'{self.name} sets {named[0]} without {missing}; Glue takes the two together or neither.')
+        return self
 
 
 class LambdaConfig(ResourceModel):

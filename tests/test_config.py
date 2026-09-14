@@ -72,6 +72,78 @@ def test_template_config_is_valid():
     assert 'example-pipeline' in config.pipelines
 
 
+def nested_model(annotation) -> tuple[type[StrictModel] | None, bool]:
+    """The model an annotation carries, and whether the template holds them keyed by alias.
+
+    `dict[str, GlueJobConfig]` holds one per alias, so its *values* are the blocks to descend
+    into. A bare `MonitorConfig` and a `JenkinsJobConfig | None` are the block itself."""
+    for arg in [annotation, *get_args(annotation)]:
+        if isinstance(arg, type) and issubclass(arg, StrictModel):
+            return arg, get_origin(annotation) in (dict, Mapping)
+    return None, False
+
+
+def pairs_written_in(model: type[StrictModel], raw) -> set[tuple[type[StrictModel], str]]:
+    """Every `(model, field)` the parsed template writes, walking the mapping beside the models.
+
+    Keyed on the pair rather than the name. Three names are shared across models — `name` on
+    three resources, `lambdas` and `step_functions` on two — so a flat set of names lets a field
+    deleted from its only block be answered by a same-named field somewhere else entirely.
+
+    The mapping `yaml.safe_load` returns rather than the validated config, because a key the
+    template never mentions parses into its model default and is then indistinguishable from one
+    the example set. The raw mapping distinguishes absent from set exactly, and it is also the
+    only form that knows which model a block belongs to.
+
+    Reading the parse rather than the lines is what makes the walk blind to where a key *looks*
+    like it is written: a `key: value` inside a block scalar is a string, and counting it would
+    let a field deleted from the template be answered by its own name appearing inside some
+    unrelated free-form `arguments:` entry."""
+    written: set[tuple[type[StrictModel], str]] = set()
+    if not isinstance(raw, dict):
+        return written
+    for name, field in model.model_fields.items():
+        if name not in raw:
+            continue
+        written.add((model, name))
+        child, by_alias = nested_model(field.annotation)
+        if child is None:
+            continue
+        value = raw[name]
+        blocks = value.values() if by_alias and isinstance(value, dict) else [value]
+        for block in blocks:
+            written |= pairs_written_in(child, block)
+    return written
+
+
+def test_the_template_names_every_field_the_models_hold():
+    """The template is the only exhaustive listing of the config, so a field missing from it is
+    a field with no documentation anywhere.
+
+    Validity is not enough on its own: every field has a default or is supplied elsewhere in the
+    example, so a whole block can fall out and the round-trip above still passes.
+
+    An alias key is not a field and never appears here, because the walk descends by model rather
+    than by key name. A field genuinely not worth writing out is added below with the reason, the
+    same bargain as `UNCHECKED_FIELDS`."""
+    declared = set()
+    for model in config_models():
+        for field in model.model_fields:
+            declared.add((model, field))
+    written = pairs_written_in(DectlConfig, yaml.safe_load(TEMPLATE_CONFIG))
+
+    assert declared - written == set(SHOWN_ONLY_AS_A_COMMENT)
+
+
+# Fields the template carries commented out, with the reason. The walk reads the parse, so a
+# commented key is absent from it and these subtract: the point of the guard is that a reader can
+# see a field, and a commented line shows it while an absent one does not.
+SHOWN_ONLY_AS_A_COMMENT = {
+    (PipelineConfig, 'resolve_paths_from'): 'names a directory no machine has, and `config validate` checks it, '
+    'so `config init` would write a config that fails its own check',
+}
+
+
 def test_validation_rejects_unknown_pipeline_key():
     raw = {
         'defaults': {'account_id': '111'},
@@ -132,6 +204,65 @@ def test_validation_rejects_invalid_glue_job():
     }
     with pytest.raises(ValidationError):
         DectlConfig.model_validate(raw)
+
+
+def glue_job(**sizing):
+    return GlueJobConfig(name='j', script_bucket='sales-scripts', scripts=['s.py'], role='r', **sizing)
+
+
+def test_a_job_sizing_itself_both_ways_is_refused_by_name():
+    # Glue refuses this too, but from UpdateJob, which the deploy runs after the scripts are
+    # already uploaded — and its message names neither the job nor the config key.
+    with pytest.raises(ValidationError) as raised:
+        glue_job(max_capacity=1, worker_type='G.1X', number_of_workers=2)
+
+    message = str(raised.value)
+    assert 'max_capacity' in message
+    assert 'number_of_workers, worker_type' in message
+    assert 'j' in message
+
+
+@pytest.mark.parametrize(
+    'named, missing',
+    [({'worker_type': 'G.1X'}, 'number_of_workers'), ({'number_of_workers': 2}, 'worker_type')],
+)
+def test_half_a_worker_pair_is_refused_naming_the_other_half(named, missing):
+    # Glue sizes by the pair. One without the other reaches UpdateJob as a half-specified job,
+    # and which half is missing is the whole content of the fix.
+    with pytest.raises(ValidationError) as raised:
+        glue_job(**named)
+
+    assert missing in str(raised.value)
+
+
+def test_a_job_naming_neither_sizing_model_is_valid():
+    # The common case by far: sizing stays Terraform's and dectl deploys code over the top.
+    assert glue_job().worker_type is None
+
+
+# Each field that has to be positive, with whatever else the config needs to be otherwise valid.
+# number_of_workers carries a worker_type: without one the mutual-exclusion rule raises first,
+# so the case passes on a rule it is not about and deleting the bound leaves it green.
+POSITIVE_COUNTS = [
+    pytest.param('number_of_workers', {'worker_type': 'G.1X'}, id='number_of_workers'),
+    pytest.param('timeout_minutes', {}, id='timeout_minutes'),
+    pytest.param('max_concurrent_runs', {}, id='max_concurrent_runs'),
+]
+
+
+@pytest.mark.parametrize('field, valid_rest', POSITIVE_COUNTS)
+def test_a_count_that_has_to_be_positive_refuses_zero(field, valid_rest):
+    # Glue rejects each of these at zero. max_retries is deliberately not here: zero is the
+    # value worth having, since the Glue default reruns a failing job three times.
+    with pytest.raises(ValidationError) as raised:
+        glue_job(**{field: 0}, **valid_rest)
+
+    # Named, because ValidationError is what every other rule on this model raises too.
+    assert raised.value.errors()[0]['type'] == 'greater_than_equal'
+
+
+def test_max_retries_accepts_zero():
+    assert glue_job(max_retries=0).max_retries == 0
 
 
 def test_glue_job_arguments_parsed_as_dict():
@@ -351,6 +482,10 @@ UNCHECKED_FIELDS = {
     (GlueJobConfig, 'role'): 'an IAM role ARN; UpdateJob validates it',
     (GlueJobConfig, 'arguments'): 'Glue job arguments, passed through; Glue validates them',
     (GlueJobConfig, 'connections'): 'Glue connection names; UpdateJob validates them',
+    (GlueJobConfig, 'worker_type'): 'a Glue worker type; AWS owns the list and adds to it, so UpdateJob is the authority',
+    (GlueJobConfig, 'glue_version'): 'a Glue version; AWS owns the list and adds to it, so UpdateJob is the authority',
+    (GlueJobConfig, 'python_version'): 'the Python a Glue command runs; UpdateJob rejects one the job type does not offer',
+    (GlueJobConfig, 'execution_class'): 'STANDARD or FLEX; UpdateJob rejects anything else',
     (LambdaConfig, 'name'): 'a Lambda function name; the API is what says whether it exists',
     (LambdaConfig, 'live_alias'): 'a Lambda alias; update_alias validates it',
     (StepFunctionConfig, 'name'): 'a state machine name; the API is what says whether it exists',
@@ -400,8 +535,12 @@ def config_models(root: type[BaseModel] = DectlConfig) -> set[type[StrictModel]]
 
     Both a bare annotation and a `dict[str, Model]` one, because the code reaches both. Walking
     only `get_args` left a declaration on `monitor` — a bare `MonitorConfig` field — inert with
-    the whole suite green, which is the guard reporting complete on a member it cannot see."""
-    found: set[type[StrictModel]] = set()
+    the whole suite green, which is the guard reporting complete on a member it cannot see.
+
+    The root is seeded into the result, not only into the queue. Nothing declares a field of the
+    root's type, so a walk that adds only what it finds in an annotation never reaches it, and
+    every field on `DectlConfig` is then outside every guard reading this."""
+    found: set[type[StrictModel]] = {root} if issubclass(root, StrictModel) else set()
     pending = [root]
     while pending:
         model = pending.pop()
@@ -456,7 +595,10 @@ def test_every_exempted_field_is_one_the_classification_walk_can_reach():
     of these named models the walk had been filtered down past, and their presence is precisely
     what made the narrow population look deliberate rather than broken. Deleting all eight left
     the suite green, which is the tell."""
-    reachable = {(model, field) for model in config_models() for field in string_fields(model)}
+    reachable = set()
+    for model in config_models():
+        for field in string_fields(model):
+            reachable.add((model, field))
 
     assert set(UNCHECKED_FIELDS) - reachable == set()
 

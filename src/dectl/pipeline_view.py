@@ -30,6 +30,21 @@ def resource_types(pipeline: PipelineConfig) -> list[str]:
     return types
 
 
+def managed_definition(job: GlueJobConfig) -> dict[str, Any]:
+    """The optional definition fields this job's config decides, and what it sets them to.
+
+    Only the ones it names. An absent key means unmanaged, so the live value survives a deploy —
+    reporting it as a null would say dectl writes a null, which is the opposite of what absence
+    means and is the one thing a reader of this block must not conclude.
+
+    Built from the model's own declarations, so a field added to either map appears here without
+    anything being remembered. The question the whole managed-field surface exists to make
+    answerable is which fields are dectl's and which stay Terraform's, and a deploy's diff is a
+    write rather than a read."""
+    declared = {**job.DEFINITION_FIELDS, **job.NESTED_DEFINITION_FIELDS}
+    return {field: getattr(job, field) for field in declared if getattr(job, field) is not None}
+
+
 def script_uris(job: GlueJobConfig) -> list[str]:
     """Where every script of one job lands, for a reader rather than for a deploy.
 
@@ -119,6 +134,9 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
                 # faults `config validate` reports are about this value, and a reader refused
                 # over one otherwise has to join two fields by hand to see what was refused.
                 'script_uris': script_uris(job),
+                # Which definition fields this config decides, so the split between dectl's and
+                # Terraform's is answerable from a read rather than from a deploy's diff.
+                'managed': managed_definition(job),
                 'paths': resolved.get(('glue', alias), {}),
             }
             for alias, job in pipeline.glue_jobs.items()
@@ -185,6 +203,9 @@ def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
         info(f'  glue/{alias}: {substitute_env(job.name)}')
         for uri in script_uris(job):
             info(f'    deploys to: {uri}')
+        managed = managed_definition(job)
+        if managed:
+            info(f'    manages: {", ".join(f"{field}={value}" for field, value in managed.items())}')
         print_paths('glue', alias)
     for alias, fn in pipeline.lambdas.items():
         # Worth calling out inline: a durable function carries a different set of verbs.

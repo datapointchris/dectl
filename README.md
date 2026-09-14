@@ -72,6 +72,87 @@ dectl env
 # environment: prod  (from DECTL_ENV)
 ```
 
+## Glue: deploying without the Terraform loop
+
+```bash
+dectl salesdata glue conform deploy --plan   # what would change; touches nothing
+dectl salesdata glue conform deploy          # upload, show the diff, confirm
+dectl salesdata glue conform run --follow    # start it and tail both log streams
+dectl salesdata glue conform runs            # recent runs, --json to script them
+```
+
+A deploy is two writes with different owners. The script upload is always yours. The job
+*definition* is Terraform's once a pipeline is established, and dectl keeps write access to it
+because that is the point before Terraform exists — change a worker type and run it, instead of
+commit → Jenkins → apply. So `deploy` diffs its computed definition against the live one and
+confirms before applying. `--plan` shows the diff and exits, `--yes` skips the prompt.
+
+### Three kinds of field, and the difference matters
+
+dectl **manages** what your config names, **preserves** everything else, and **cannot create**
+a job at all — `deploy` reads the live definition first, so the job has to exist.
+
+Preserving is the load-bearing half. `UpdateJob` replaces the whole definition rather than
+patching it, so a field dectl did not carry over would silently reset to its default on every
+deploy. Omit a key and dectl leaves whatever is there, which is how a Terraform-owned field
+survives a deploy you ran to change something else.
+
+When nothing your config names differs, the definition is left untouched and no `UpdateJob` is
+sent. That is the steady state: a deploy becomes a pure code push with no drift surface.
+
+### The managed fields
+
+| Config key | What it sets |
+| --- | --- |
+| `role` | the IAM role the job runs as |
+| `scripts` | `ScriptLocation` from the first entry; the rest become `--extra-py-files` |
+| `connections` | authoritative — a name dropped from this list is detached |
+| `arguments` | merged onto the job's existing default arguments |
+| `max_capacity` | DPU sizing — every Python shell job, and a Spark job that predates workers |
+| `worker_type`, `number_of_workers` | worker sizing, Spark only |
+| `glue_version` | the Glue runtime |
+| `python_version` | the Python inside `Command` |
+| `timeout_minutes` | `Timeout`, which Glue counts in minutes |
+| `max_retries` | reruns after a failure |
+| `max_concurrent_runs` | `ExecutionProperty.MaxConcurrentRuns` |
+| `execution_class` | `STANDARD` or `FLEX` |
+
+Every row below `arguments` is optional. Omit one and dectl writes nothing for it, so whatever
+Terraform or a console edit last set survives the deploy. Name one only while you want dectl
+deciding it instead.
+
+`dectl PIPELINE list` and `dectl config show` print what each job's config decides, so the split
+is answerable without running a deploy:
+
+```bash
+dectl salesdata list --json | jq '.glue.conform.managed'
+# { "worker_type": "G.1X", "number_of_workers": 4, "timeout_minutes": 60 }
+```
+
+`max_retries: 0` is the one worth setting by hand while iterating. A job left at three retries
+takes three runs to report a failure, which is three tracebacks to read instead of one.
+`execution_class: FLEX` runs on spare capacity for less money and starts when it starts, which is
+usually the right trade for a loop and the wrong one for a schedule.
+
+### Sizing is one model or the other
+
+A Glue job sizes by DPU or by workers, never both, and `UpdateJob` rejects a definition carrying
+each. A Python shell job takes `max_capacity`, which is `0.0625` (1 GB) or `1` (16 GB). A Spark
+job takes `worker_type` with `number_of_workers`, unless it is old enough to be sized by DPU.
+
+dectl refuses four shapes up front: a config naming both models, one half of the worker pair,
+`max_capacity` against a job Glue already sizes by workers, and workers against a Python shell
+job. Glue refuses all four itself, but from `UpdateJob` — which runs after the scripts have
+already been uploaded, and whose message names neither the job nor the config key.
+
+Migrating a DPU-sized Spark job to workers works, and the diff shows the DPU value being removed
+alongside the workers arriving. The reverse is refused rather than attempted: Glue has no runtime
+that will take `MaxCapacity` on a Spark job and leave `WorkerType` off, so there is no update
+that gets a job back to DPU sizing.
+
+One row you will not see: a Spark job's derived `MaxCapacity`. `JobUpdate` in
+`src/dectl/commands/glue.py` carries why.
+
 ## Lambda dev loop vs release
 
 Aliases are the short config keys, not the full AWS names. The verb is last, so the
