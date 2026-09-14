@@ -1,9 +1,11 @@
+import copy
 from pathlib import Path
 
 import pytest
 import typer
 
 from dectl import prompt
+from dectl.commands.glue import DEFINITION_FIELDS
 from dectl.commands.glue import GlueRunWatcher
 from dectl.commands.glue import ResolvedScript
 from dectl.commands.glue import apply_glue_job_update
@@ -72,15 +74,17 @@ class FakeSession:
         return self.glue_client
 
 
-def make_job(connections=None, arguments=None, max_capacity=None):
+def make_job(**overrides):
+    """One job with any field overridden by name.
+
+    Keyword-wise rather than a fixed parameter list, because every managed field has a model
+    default and a test that spells out the ones it is not about hides the one it is."""
     return GlueJobConfig(
         name='my-job',
         script_bucket='my-bucket',
         scripts=['main.py'],
         role='arn:aws:iam::123456789012:role/glue',
-        connections=connections,
-        arguments=arguments or {},
-        max_capacity=max_capacity,
+        **overrides,
     )
 
 
@@ -146,6 +150,160 @@ def test_max_capacity_on_a_worker_based_job_is_rejected():
 
     with pytest.raises(typer.Exit):
         apply(glue, make_job(max_capacity=1.0))
+
+
+def worker_based_job(**definition):
+    """A Spark job as GetJob returns one: the worker pair, plus the MaxCapacity Glue derives.
+
+    The derived value is the whole point. A fixture omitting it describes a job Glue does not
+    serve, and every assertion about suppressing it would pass against nothing."""
+    return {
+        'Command': {'Name': 'glueetl', 'ScriptLocation': 's3://my-bucket/scripts/main.py'},
+        'Role': 'arn:aws:iam::123456789012:role/glue',
+        'DefaultArguments': {'--JOB_NAME': 'my-job'},
+        'GlueVersion': '4.0',
+        'WorkerType': 'G.1X',
+        'NumberOfWorkers': 4,
+        'MaxCapacity': 4.0,
+        **definition,
+    }
+
+
+def test_a_derived_max_capacity_is_not_reported_as_a_change():
+    # UpdateJob rejects MaxCapacity beside the worker pair, so dropping it is forced. Reported
+    # as a removal it is a row the next GetJob puts straight back, so the job would prompt on
+    # every deploy and never reach the unchanged-definition steady state.
+    existing = worker_based_job()
+
+    changes = job_definition_changes(existing, build_job_update(existing, make_job()))
+
+    assert changes == []
+
+
+def test_a_worker_based_job_needing_nothing_skips_update_job_entirely():
+    glue = FakeGlueClient(existing_job=worker_based_job())
+
+    apply(glue, make_job())
+
+    assert glue.captured_update is None
+
+
+def test_worker_sizing_displaces_a_configured_max_capacity_and_says_so():
+    # The opposite case to the one above: the config asked for this removal, so it is a change
+    # the reader confirms rather than one suppressed as forced.
+    existing = {
+        'Command': {'Name': 'glueetl', 'ScriptLocation': 's3://my-bucket/scripts/main.py'},
+        'Role': 'arn:aws:iam::123456789012:role/glue',
+        'DefaultArguments': {'--JOB_NAME': 'my-job'},
+        'MaxCapacity': 10.0,
+    }
+    job = make_job(worker_type='G.2X', number_of_workers=4)
+
+    update = build_job_update(existing, job)
+    changes = job_definition_changes(existing, update)
+
+    assert 'MaxCapacity' not in update.definition
+    assert ('MaxCapacity', '10.0', '(removed)') in changes
+    assert ('WorkerType', '(unset)', 'G.2X') in changes
+    assert ('NumberOfWorkers', '(unset)', '4') in changes
+
+
+def test_build_job_update_leaves_the_definition_it_was_handed_alone():
+    """The before-image is what the diff is measured against, so writing into it hides changes.
+
+    A shallow copy shares every nested dict, and `Command` is written into on every deploy. With
+    the two aliased, a `ScriptLocation` change compares equal to itself, the definition reads as
+    converged, and UpdateJob is skipped while the scripts land somewhere the job does not name."""
+    existing = {
+        'Name': 'my-job',
+        'Command': {'Name': 'pythonshell', 'ScriptLocation': 's3://old-bucket/scripts/old.py'},
+        'ExecutionProperty': {'MaxConcurrentRuns': 1},
+    }
+    before = copy.deepcopy(existing)
+
+    build_job_update(existing, make_job(max_concurrent_runs=5))
+
+    assert existing == before
+
+
+def test_a_new_script_location_is_reported_and_applied():
+    existing = {
+        'Command': {'Name': 'pythonshell', 'ScriptLocation': 's3://old-bucket/scripts/old.py'},
+        'Role': 'arn:aws:iam::123456789012:role/glue',
+        'DefaultArguments': {'--JOB_NAME': 'my-job'},
+    }
+    glue = FakeGlueClient(existing_job=existing)
+
+    changes = job_definition_changes(dict(existing), build_job_update(dict(existing), make_job()))
+    apply(glue, make_job())
+
+    assert ('Command.ScriptLocation', 's3://old-bucket/scripts/old.py', 's3://my-bucket/scripts/main.py') in changes
+    assert glue.captured_update['Command']['ScriptLocation'] == 's3://my-bucket/scripts/main.py'
+
+
+# Every field that reaches the top level of the definition, with the key it writes and a value
+# distinguishable from the fixture's. Parametrized rather than written out so a field added to
+# DEFINITION_FIELDS and not to the update is a failure here rather than a silent omission.
+TOP_LEVEL_FIELDS = [
+    ('glue_version', 'GlueVersion', '5.0'),
+    ('timeout_minutes', 'Timeout', 15),
+    ('max_retries', 'MaxRetries', 0),
+    ('execution_class', 'ExecutionClass', 'FLEX'),
+    ('worker_type', 'WorkerType', 'G.2X'),
+]
+
+
+@pytest.mark.parametrize('config_field, definition_key, value', TOP_LEVEL_FIELDS)
+def test_a_configured_definition_field_reaches_the_update(config_field, definition_key, value):
+    overrides = {config_field: value}
+    if config_field == 'worker_type':
+        overrides['number_of_workers'] = 2
+    glue = FakeGlueClient(existing_job={'Command': {'Name': 'glueetl'}})
+
+    apply(glue, make_job(**overrides))
+
+    assert glue.captured_update[definition_key] == value
+
+
+def test_every_top_level_definition_field_is_covered_by_the_parametrization():
+    """A field dectl writes and nobody drives is a field whose first exercise is a real deploy.
+
+    `max_capacity` and `number_of_workers` are absent from the table because each is half of a
+    sizing pair the mutual-exclusion rule governs; both are driven by their own tests above."""
+    driven = {field for field, _, _ in TOP_LEVEL_FIELDS} | {'max_capacity', 'number_of_workers'}
+
+    assert set(DEFINITION_FIELDS) == driven
+
+
+def test_python_version_is_merged_into_the_command():
+    glue = FakeGlueClient(existing_job={'Command': {'Name': 'pythonshell', 'PythonVersion': '3.9'}})
+
+    apply(glue, make_job(python_version='3.11'))
+
+    assert glue.captured_update['Command']['PythonVersion'] == '3.11'
+    assert glue.captured_update['Command']['Name'] == 'pythonshell'
+
+
+def test_max_concurrent_runs_is_merged_into_the_execution_property():
+    glue = FakeGlueClient(existing_job={'Command': {'Name': 'glueetl'}, 'ExecutionProperty': {'MaxConcurrentRuns': 1}})
+
+    apply(glue, make_job(max_concurrent_runs=3))
+
+    assert glue.captured_update['ExecutionProperty'] == {'MaxConcurrentRuns': 3}
+
+
+def test_an_unset_definition_field_leaves_the_live_value_alone():
+    # None means unmanaged everywhere in this config. A deploy that reset an omitted field to a
+    # default would make every key dectl does not name a field Terraform silently loses.
+    existing = worker_based_job(Timeout=2880, MaxRetries=3, ExecutionClass='STANDARD')
+    glue = FakeGlueClient(existing_job=existing)
+
+    apply(glue, make_job(glue_version='5.0'))
+
+    assert glue.captured_update['Timeout'] == 2880
+    assert glue.captured_update['MaxRetries'] == 3
+    assert glue.captured_update['ExecutionClass'] == 'STANDARD'
+    assert glue.captured_update['WorkerType'] == 'G.1X'
 
 
 def test_update_without_a_terminal_fails_naming_the_flag():
@@ -407,7 +565,7 @@ def test_the_upload_and_the_job_definition_name_one_object(tmp_path, monkeypatch
     s3 = FakeS3Client()
 
     upload_scripts(FakeS3Session(s3), job, resolve_scripts('proj', pipeline, 'j'))
-    definition = build_job_update({'Name': 'my-job'}, job)
+    definition = build_job_update({'Name': 'my-job'}, job).definition
 
     assert definition['Command']['ScriptLocation'] == f's3://{s3.uploads[0][1]}/{s3.uploads[0][2]}'
     assert '{env}' not in definition['Command']['ScriptLocation']
@@ -423,7 +581,7 @@ def test_extra_py_files_name_the_same_objects_the_upload_wrote(tmp_path, monkeyp
     s3 = FakeS3Client()
 
     upload_scripts(FakeS3Session(s3), job, resolve_scripts('proj', pipeline, 'j'))
-    definition = build_job_update({'Name': 'my-job'}, job)
+    definition = build_job_update({'Name': 'my-job'}, job).definition
 
     assert definition['DefaultArguments']['--extra-py-files'] == f's3://{s3.uploads[1][1]}/{s3.uploads[1][2]}'
 
@@ -728,7 +886,7 @@ def test_every_site_composing_a_script_destination_substitutes_exactly_once(tmp_
     s3 = FakeS3Client()
 
     upload_scripts(FakeS3Session(s3), job, resolve_scripts('proj', pipeline, 'j'))
-    definition = build_job_update({'Name': 'my-job'}, job)
+    definition = build_job_update({'Name': 'my-job'}, job).definition
 
     once = 'p-a{env}b/main-a{env}b.py'
     assert s3.uploads[0][1] == job.script_bucket

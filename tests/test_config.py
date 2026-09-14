@@ -134,6 +134,52 @@ def test_validation_rejects_invalid_glue_job():
         DectlConfig.model_validate(raw)
 
 
+def glue_job(**sizing):
+    return GlueJobConfig(name='j', script_bucket='sales-scripts', scripts=['s.py'], role='r', **sizing)
+
+
+def test_a_job_sizing_itself_both_ways_is_refused_by_name():
+    # Glue refuses this too, but from UpdateJob, which the deploy runs after the scripts are
+    # already uploaded — and its message names neither the job nor the config key.
+    with pytest.raises(ValidationError) as raised:
+        glue_job(max_capacity=1, worker_type='G.1X', number_of_workers=2)
+
+    message = str(raised.value)
+    assert 'max_capacity' in message
+    assert 'number_of_workers, worker_type' in message
+    assert 'j' in message
+
+
+@pytest.mark.parametrize(
+    'named, missing',
+    [({'worker_type': 'G.1X'}, 'number_of_workers'), ({'number_of_workers': 2}, 'worker_type')],
+)
+def test_half_a_worker_pair_is_refused_naming_the_other_half(named, missing):
+    # Glue sizes by the pair. One without the other reaches UpdateJob as a half-specified job,
+    # and which half is missing is the whole content of the fix.
+    with pytest.raises(ValidationError) as raised:
+        glue_job(**named)
+
+    assert missing in str(raised.value)
+
+
+def test_a_job_naming_neither_sizing_model_is_valid():
+    # The common case by far: sizing stays Terraform's and dectl deploys code over the top.
+    assert glue_job().worker_type is None
+
+
+@pytest.mark.parametrize('field', ['number_of_workers', 'timeout_minutes', 'max_concurrent_runs'])
+def test_a_count_that_has_to_be_positive_refuses_zero(field):
+    # Glue rejects each of these at zero. max_retries is deliberately not here: zero is the
+    # value worth having, since the Glue default reruns a failing job three times.
+    with pytest.raises(ValidationError):
+        glue_job(**{field: 0})
+
+
+def test_max_retries_accepts_zero():
+    assert glue_job(max_retries=0).max_retries == 0
+
+
 def test_glue_job_arguments_parsed_as_dict():
     raw = {
         'defaults': {'account_id': '111', 'region': 'us-east-1'},
@@ -351,6 +397,10 @@ UNCHECKED_FIELDS = {
     (GlueJobConfig, 'role'): 'an IAM role ARN; UpdateJob validates it',
     (GlueJobConfig, 'arguments'): 'Glue job arguments, passed through; Glue validates them',
     (GlueJobConfig, 'connections'): 'Glue connection names; UpdateJob validates them',
+    (GlueJobConfig, 'worker_type'): 'a Glue worker type; AWS owns the list and adds to it, so UpdateJob is the authority',
+    (GlueJobConfig, 'glue_version'): 'a Glue version; AWS owns the list and adds to it, so UpdateJob is the authority',
+    (GlueJobConfig, 'python_version'): 'the Python a Glue command runs; UpdateJob rejects one the job type does not offer',
+    (GlueJobConfig, 'execution_class'): 'STANDARD or FLEX; UpdateJob rejects anything else',
     (LambdaConfig, 'name'): 'a Lambda function name; the API is what says whether it exists',
     (LambdaConfig, 'live_alias'): 'a Lambda alias; update_alias validates it',
     (StepFunctionConfig, 'name'): 'a state machine name; the API is what says whether it exists',

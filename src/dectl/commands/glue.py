@@ -140,31 +140,107 @@ def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: lis
         success(f'uploaded {source.path} -> {script_uri(glue_job, source.name)}')
 
 
-def build_job_update(existing: dict, glue_job: GlueJobConfig) -> dict:
+class JobUpdate(NamedTuple):
+    """The definition to send, and the keys dropped from it that are not changes.
+
+    Glue derives `MaxCapacity` from `WorkerType` and `NumberOfWorkers`, returns it from GetJob,
+    and rejects an UpdateJob carrying both. Dropping it is therefore forced by the API rather
+    than asked for by anyone, and a forced drop is not a change: shown as one it is a row that
+    reappears on the next GetJob, so a worker-based job would prompt on every deploy forever and
+    never reach the unchanged-definition steady state the diff exists to produce.
+
+    A key the *config* displaced is a different thing and is deliberately absent from here.
+    Naming `worker_type` on a job Glue currently sizes by DPU really does remove `MaxCapacity`,
+    and that is a change worth seeing before it is applied."""
+
+    definition: dict
+    derived: frozenset[str]
+
+
+# Config field -> the `JobUpdate` key it writes, for every field that lands at the top level of
+# the definition. `python_version` and `max_concurrent_runs` are absent because they sit inside
+# `Command` and `ExecutionProperty`; both are merged by hand below.
+DEFINITION_FIELDS = {
+    'max_capacity': 'MaxCapacity',
+    'worker_type': 'WorkerType',
+    'number_of_workers': 'NumberOfWorkers',
+    'glue_version': 'GlueVersion',
+    'timeout_minutes': 'Timeout',
+    'max_retries': 'MaxRetries',
+    'execution_class': 'ExecutionClass',
+}
+
+WORKER_KEYS = ('WorkerType', 'NumberOfWorkers')
+
+
+def refuse_dpu_sizing_of_a_worker_job(existing: dict, glue_job: GlueJobConfig) -> None:
+    """Refuse `max_capacity` against a job Glue currently sizes by workers.
+
+    The reverse direction is allowed and is a real migration: naming `worker_type` on a
+    DPU-sized job displaces `MaxCapacity`, and the diff shows both halves of that. This
+    direction has no expression, because `None` means unmanaged everywhere in this config —
+    there is no way to write "and unset WorkerType", so the update would carry both models and
+    Glue would reject it after the scripts had already been uploaded."""
+    if glue_job.max_capacity is None:
+        return
+    if glue_job.worker_type is not None or glue_job.number_of_workers is not None:
+        return
+    live_worker_keys = [key for key in WORKER_KEYS if key in existing]
+    if not live_worker_keys:
+        return
+    error(
+        f'{glue_job.name} is sized by {" and ".join(live_worker_keys)} in Glue, and max_capacity cannot replace them. '
+        'Set worker_type and number_of_workers instead, or drop max_capacity to leave the size alone.'
+    )
+    raise typer.Exit(1)
+
+
+def build_job_update(existing: dict, glue_job: GlueJobConfig) -> JobUpdate:
     """Reconstruct the full job definition with dectl's managed fields applied.
 
     UpdateJob replaces the whole definition rather than patching it, so this starts from the
     existing definition and overrides only what dectl manages. Otherwise every deploy silently
-    resets omitted fields (Timeout, GlueVersion, WorkerType, MaxRetries, ...) to their defaults."""
+    resets omitted fields (Timeout, GlueVersion, WorkerType, MaxRetries, ...) to their defaults.
+
+    Copy `Command` and `ExecutionProperty` before writing into them. The comprehension below is
+    a shallow copy, so every nested dict in it is the caller's own object, and writing through
+    one edits the before-image that `job_definition_changes` diffs against. The diff then
+    compares that object with itself and reports no change — so a definition whose only
+    difference is inside a nested dict is read as converged, `UpdateJob` is skipped, and the
+    scripts land at a location the live job is not pointing at."""
+    refuse_dpu_sizing_of_a_worker_job(existing, glue_job)
     job_update = {key: value for key, value in existing.items() if key not in READ_ONLY_KEYS}
 
-    # Spark jobs (glueetl) report a derived MaxCapacity alongside WorkerType/NumberOfWorkers, but
-    # UpdateJob rejects setting both. Drop MaxCapacity when the job uses the worker-based model.
-    worker_based = 'WorkerType' in job_update or 'NumberOfWorkers' in job_update
-    if worker_based:
-        job_update.pop('MaxCapacity', None)
-
-    if glue_job.max_capacity is not None:
-        if worker_based:
-            error(f'{glue_job.name} sizes by WorkerType/NumberOfWorkers; remove max_capacity from its config')
-            raise typer.Exit(1)
-        job_update['MaxCapacity'] = glue_job.max_capacity
+    for config_field, definition_key in DEFINITION_FIELDS.items():
+        configured = getattr(glue_job, config_field)
+        if configured is not None:
+            job_update[definition_key] = configured
 
     job_update['Role'] = glue_job.role
 
-    command = job_update.get('Command', {})
+    command = dict(job_update.get('Command', {}))
     command['ScriptLocation'] = script_uri(glue_job, glue_job.scripts[0])
+    if glue_job.python_version is not None:
+        command['PythonVersion'] = glue_job.python_version
     job_update['Command'] = command
+
+    if glue_job.max_concurrent_runs is not None:
+        execution_property = dict(job_update.get('ExecutionProperty', {}))
+        execution_property['MaxConcurrentRuns'] = glue_job.max_concurrent_runs
+        job_update['ExecutionProperty'] = execution_property
+
+    # Read off the merged update rather than off `existing`, so a job being migrated to worker
+    # sizing drops the DPU value it is replacing. Reading the live definition instead would send
+    # both models and let Glue refuse the deploy after the upload.
+    worker_based = any(key in job_update for key in WORKER_KEYS)
+    config_sizes_by_workers = glue_job.worker_type is not None or glue_job.number_of_workers is not None
+    derived = set()
+    if worker_based and 'MaxCapacity' in job_update:
+        job_update.pop('MaxCapacity')
+        # Suppressed only when nobody asked. A config naming worker sizing displaces a live
+        # DPU value on purpose, and that removal is a change the reader confirms.
+        if not config_sizes_by_workers:
+            derived.add('MaxCapacity')
 
     if glue_job.connections is None:
         connections = list(existing.get('Connections', {}).get('Connections', []))
@@ -188,7 +264,7 @@ def build_job_update(existing: dict, glue_job: GlueJobConfig) -> dict:
         default_args[arg_key] = value
     job_update['DefaultArguments'] = default_args
 
-    return job_update
+    return JobUpdate(job_update, frozenset(derived))
 
 
 def render_value(value) -> str:
@@ -200,11 +276,17 @@ def diff_mappings(existing: dict, updated: dict) -> dict:
     return {key: (existing.get(key), updated.get(key)) for key in keys if existing.get(key) != updated.get(key)}
 
 
-def job_definition_changes(existing: dict, job_update: dict) -> list[tuple[str, str, str]]:
+def job_definition_changes(existing: dict, update: JobUpdate) -> list[tuple[str, str, str]]:
     """Field-level diff of what UpdateJob would change, for review before it is applied.
 
     Nested dicts (Command, DefaultArguments, Connections) are expanded one level: whole-dict
-    before/after blobs are unreadable, and the interesting change is almost always a single key."""
+    before/after blobs are unreadable, and the interesting change is almost always a single key.
+
+    Two things are absent from the update without being changes, and they are absent for the
+    same reason: UpdateJob rejects them. `READ_ONLY_KEYS` covers the ones that are always
+    rejected, and `update.derived` covers the ones rejected only in the shape at hand. A key
+    reported from either set is a row nothing can ever make go away."""
+    job_update = update.definition
     changes = []
     for key, new_value in job_update.items():
         old_value = existing.get(key)
@@ -216,10 +298,10 @@ def job_definition_changes(existing: dict, job_update: dict) -> list[tuple[str, 
         else:
             changes.append((key, render_value(old_value), render_value(new_value)))
 
-    # Keys dectl drops (a detached connection, MaxCapacity on a Spark job) are absent from
-    # job_update, so the loop above cannot see them — removals matter as much as changes here.
+    # Keys dectl drops (a detached connection, a MaxCapacity the config replaced) are absent
+    # from job_update, so the loop above cannot see them — removals matter as much as changes.
     for key, old_value in existing.items():
-        if key not in job_update and key not in READ_ONLY_KEYS:
+        if key not in job_update and key not in READ_ONLY_KEYS and key not in update.derived:
             changes.append((key, render_value(old_value), '(removed)'))
 
     return sorted(changes)
@@ -244,14 +326,14 @@ def plan_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig, assume
     call entirely — the steady state is then a pure code push with no drift surface at all.
 
     Everything that can refuse lives here rather than beside the apply, so a caller gets the
-    refusals out of the way before it writes anything. `build_job_update` exits on a
-    max_capacity Glue would reject, and the confirmation can be declined; either landing after a
+    refusals out of the way before it writes anything. `build_job_update` exits on a sizing
+    model Glue would reject, and the confirmation can be declined; either landing after a
     script upload leaves ScriptLocation pointing at code the user was then told not to deploy."""
     glue = session.client('glue')
     existing = glue.get_job(JobName=glue_job.name)['Job']
-    job_update = build_job_update(existing, glue_job)
+    update = build_job_update(existing, glue_job)
 
-    changes = job_definition_changes(existing, job_update)
+    changes = job_definition_changes(existing, update)
     if not changes:
         info(f'{glue_job.name}: job definition unchanged')
         return None
@@ -262,7 +344,7 @@ def plan_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig, assume
         return None
     if not assume_yes:
         confirm_or_exit('apply these job definition changes?')
-    return job_update
+    return update.definition
 
 
 def apply_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig, job_update: dict) -> None:

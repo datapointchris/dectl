@@ -8,7 +8,9 @@ import yaml
 from pyclisteno.paths import config_home
 from pydantic import BaseModel
 from pydantic import ConfigDict
+from pydantic import Field
 from pydantic import ValidationError
+from pydantic import model_validator
 
 from dectl.env import substitute_env
 from dectl.output import error
@@ -72,11 +74,37 @@ pipelines:
         # Omit the key entirely to leave the job's connections alone.
         connections:
           - my-{env}-vpc-connection
-        # Python shell: 0.0625 (1 GB) or 1 (16 GB). Omit for Spark jobs, which size by WorkerType.
+        # A Glue job sizes one of two ways and dectl refuses a config naming both. A Python
+        # shell job takes max_capacity, which is 0.0625 (1 GB) or 1 (16 GB). A Spark job takes
+        # the worker pair below instead.
         max_capacity: 1
         arguments:
           SOURCE_BUCKET: my-{env}-source-bucket
           SOURCE_PREFIX: incoming
+      # Every key below this line is optional and every one of them is left alone when omitted,
+      # because a deploy that reset an unnamed field would take whatever Terraform set with it.
+      # Name one only while you want dectl, rather than Terraform, deciding it.
+      conform:
+        name: my-{env}-conform-job
+        script_bucket: my-script-bucket
+        scripts:
+          - conform.py
+          - lib/shared.py            # every script after the first becomes --extra-py-files
+        role: "arn:aws:iam::123456789012:role/my-{env}-glue-role"
+        # Spark sizing. Glue takes the two together, so dectl refuses one without the other.
+        worker_type: G.1X
+        number_of_workers: 4
+        glue_version: "5.0"
+        python_version: "3"
+        # Glue counts this in minutes.
+        timeout_minutes: 60
+        # Zero is the one worth setting by hand: left at the Glue default a failing job runs
+        # three times before it reports, which is three tracebacks to read instead of one.
+        max_retries: 0
+        max_concurrent_runs: 1
+        # STANDARD or FLEX. FLEX runs on spare capacity for less money and starts when it
+        # starts, which is the trade an iteration loop usually wants and a schedule does not.
+        execution_class: FLEX
     lambdas:
       my-function:
         name: my-{env}-lambda-function
@@ -171,6 +199,48 @@ class GlueJobConfig(ResourceModel):
     arguments: dict[str, str] = {}
     # Python shell jobs accept 0.0625 (1 GB) or 1 (16 GB); Spark jobs use WorkerType instead.
     max_capacity: float | None = None
+    # The two halves of Spark sizing. Glue takes them together or not at all, so a job naming one
+    # and not the other is refused below rather than at UpdateJob, which lands after the upload.
+    worker_type: str | None = None
+    number_of_workers: int | None = Field(default=None, ge=1)
+    # Left as plain strings because AWS owns both vocabularies and adds to them. An enum here
+    # would be this release's snapshot of the list, and a version dectl has not heard of is one
+    # it would refuse rather than pass through.
+    glue_version: str | None = None
+    python_version: str | None = None
+    # Glue's Timeout is minutes. The name says so because a duration whose unit lives in the
+    # docs is one a writer guesses, and a wrong guess there is silent.
+    timeout_minutes: int | None = Field(default=None, ge=1)
+    # Zero is the value worth having: a failing job left at the Glue default runs three times
+    # before it reports, which is three tracebacks to read instead of one.
+    max_retries: int | None = Field(default=None, ge=0)
+    max_concurrent_runs: int | None = Field(default=None, ge=1)
+    execution_class: str | None = None
+
+    @model_validator(mode='after')
+    def sizing_is_one_model_or_the_other(self) -> 'GlueJobConfig':
+        """Refuse a job sizing itself both ways, and refuse half a worker pair.
+
+        Glue rejects both of these itself, and its message names neither the job nor the config
+        key — the caller gets "Please do not set Max Capacity if using Worker Type and Number Of
+        Workers" with nothing saying which of several jobs produced it. It also arrives from
+        UpdateJob, which the deploy runs after the script upload, so the answer is late as well
+        as unattributed.
+
+        This is a fact about the config alone. It needs no AWS call, no environment and no
+        filesystem, which is what makes it a field validator rather than a `config validate`
+        fault — the distinction `key_fault` draws in `values.py`."""
+        worker_fields = {'worker_type': self.worker_type, 'number_of_workers': self.number_of_workers}
+        named = sorted(key for key, value in worker_fields.items() if value is not None)
+        if named and self.max_capacity is not None:
+            raise ValueError(
+                f'{self.name} sets max_capacity and {", ".join(named)}; a Glue job sizes by one model or the other. '
+                'Python shell jobs take max_capacity (0.0625 or 1); Spark jobs take worker_type with number_of_workers.'
+            )
+        if len(named) == 1:
+            missing = next(key for key in worker_fields if key not in named)
+            raise ValueError(f'{self.name} sets {named[0]} without {missing}; Glue takes the two together or neither.')
+        return self
 
 
 class LambdaConfig(ResourceModel):
