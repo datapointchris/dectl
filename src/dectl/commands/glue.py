@@ -149,9 +149,12 @@ class JobUpdate(NamedTuple):
     reappears on the next GetJob, so a worker-based job would prompt on every deploy forever and
     never reach the unchanged-definition steady state the diff exists to produce.
 
-    A key the *config* displaced is a different thing and is deliberately absent from here.
-    Naming `worker_type` on a job Glue currently sizes by DPU really does remove `MaxCapacity`,
-    and that is a change worth seeing before it is applied."""
+    A key displaced from a job that was *not* already worker-sized is a different thing and is
+    deliberately absent from here. There the DPU value is the job's real size, the config is
+    replacing it, and that is a change worth seeing before it is applied.
+
+    What decides between the two is the live job, never the config. A config naming the worker
+    sizing a job already has has asked for nothing."""
 
     definition: dict
     derived: frozenset[str]
@@ -243,13 +246,17 @@ def build_job_update(existing: dict, glue_job: GlueJobConfig) -> JobUpdate:
     # sizing drops the DPU value it is replacing. Reading the live definition instead would send
     # both models and let Glue refuse the deploy after the upload.
     worker_based = any(key in job_update for key in WORKER_KEYS)
-    config_sizes_by_workers = glue_job.worker_type is not None or glue_job.number_of_workers is not None
+    # Whether the *live* job was already worker-sized, which is what decides where its
+    # MaxCapacity came from. On one that was, Glue derived the value and will derive it again,
+    # so its removal is forced. On one that was not, the value is the job's real size and the
+    # config is displacing it, which is a change. Asking the config instead gets the steady
+    # state wrong: a config that names the worker sizing the job already has has asked for
+    # nothing, and the row would come back on every deploy.
+    live_worker_based = any(key in existing for key in WORKER_KEYS)
     derived = set()
     if worker_based and 'MaxCapacity' in job_update:
         job_update.pop('MaxCapacity')
-        # Suppressed only when nobody asked. A config naming worker sizing displaces a live
-        # DPU value on purpose, and that removal is a change the reader confirms.
-        if not config_sizes_by_workers:
+        if live_worker_based:
             derived.add('MaxCapacity')
 
     if glue_job.connections is None:

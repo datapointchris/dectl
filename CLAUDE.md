@@ -278,11 +278,18 @@ and an eval'd `s3 export` stay clean.
   diff knows.** `READ_ONLY_KEYS` covers the keys `UpdateJob` always rejects; `derived` covers the
   ones it rejects only in the shape at hand, which today is a Spark job's `MaxCapacity`. Glue
   derives that from the worker pair and returns it from `GetJob`, so a row reporting its removal
-  reappears on the next read and the job prompts on every deploy forever. A drop the *config*
-  asked for stays a change — naming `worker_type` on a DPU-sized job displaces `MaxCapacity` on
-  purpose, and both halves belong in the diff.
-- **Which sizing model wins is read off the merged update, never off the live job.** Reading the
-  live definition sends both models on a migration, and Glue rejects that after the upload.
+  reappears on the next read and the job prompts on every deploy forever. A `MaxCapacity` taken
+  off a job that was *not* already worker-sized stays a change: there it is the job's real size
+  and the config is replacing it, so both halves of the migration belong in the diff.
+- **Whether that drop is forced is decided by the live job, never by the config.** A config
+  naming the worker sizing a job already has has asked for nothing, and keying the suppression
+  on what the config names puts the row back on exactly that case — which is the shape a config
+  generated from the job's own Terraform has, so it is the common one rather than the corner.
+  `test_a_worker_sized_job_converges_after_one_deploy[sizing_named]` is the guard, and its
+  `sizing_unmanaged` twin passes either way, which is how the defect survived a green suite.
+- **Which sizing model wins is read off the merged update, never off the live job.** That is the
+  opposite end from the rule above and both are load-bearing: reading the live definition here
+  sends both models on a migration and Glue rejects it after the upload.
 - **`glue deploy` is two writes with different owners** — the script upload is always yours, but
   the job *definition* (role, connections, sizing, runtime, arguments) is Terraform's once a
   pipeline is established. dectl can still write it, because that is the whole point before

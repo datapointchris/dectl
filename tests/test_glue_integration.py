@@ -211,7 +211,18 @@ SPARK_JOB = {
 }
 
 
-def test_a_worker_sized_job_converges_after_one_deploy(session, glue_role_arn):
+# A config that leaves sizing unmanaged, and one that names the size the job already has. Both
+# are ordinary and only the second is what a config generated from the job's own Terraform looks
+# like — which is the one that stays broken if the suppression is decided by what the config
+# names rather than by what the live job is.
+SIZING_CONFIGS = [
+    pytest.param({}, id='sizing_unmanaged'),
+    pytest.param({'worker_type': 'G.1X', 'number_of_workers': 2}, id='sizing_named'),
+]
+
+
+@pytest.mark.parametrize('sizing', SIZING_CONFIGS)
+def test_a_worker_sized_job_converges_after_one_deploy(session, glue_role_arn, sizing):
     """The steady state, against the derived MaxCapacity only real Glue produces.
 
     GetJob returns a MaxCapacity for a worker-sized job that UpdateJob refuses to take back, so
@@ -219,7 +230,7 @@ def test_a_worker_sized_job_converges_after_one_deploy(session, glue_role_arn):
     establishes this: a fake returns the definition it was given, and the derivation is the
     service's. A second deploy finding work to do is the defect."""
     with live_job(session, Role=glue_role_arn, **SPARK_JOB) as job_name:
-        glue_job = job_config(job_name, glue_role_arn)
+        glue_job = job_config(job_name, glue_role_arn, **sizing)
 
         assert deploy_definition(session, glue_job) is True
         assert deploy_definition(session, glue_job) is False

@@ -189,6 +189,21 @@ def test_a_worker_based_job_needing_nothing_skips_update_job_entirely():
     assert glue.captured_update is None
 
 
+def test_a_config_naming_the_sizing_the_job_already_has_changes_nothing():
+    """The shape a real config has, and the one a config leaving sizing unset does not reach.
+
+    Deciding the suppression on whether the *config* named worker sizing gets this wrong: the
+    config here names it, so the drop reads as requested, and the row comes back on every
+    deploy because Glue derives MaxCapacity again each time. Naming the size a job already has
+    is not a request for anything."""
+    existing = worker_based_job()
+    job = make_job(worker_type='G.1X', number_of_workers=4)
+
+    changes = job_definition_changes(existing, build_job_update(existing, job))
+
+    assert changes == []
+
+
 def test_worker_sizing_displaces_a_configured_max_capacity_and_says_so():
     # The opposite case to the one above: the config asked for this removal, so it is a change
     # the reader confirms rather than one suppressed as forced.
