@@ -72,6 +72,79 @@ dectl env
 # environment: prod  (from DECTL_ENV)
 ```
 
+## Glue: deploying without the Terraform loop
+
+```bash
+dectl salesdata glue conform deploy --plan   # what would change; touches nothing
+dectl salesdata glue conform deploy          # upload, show the diff, confirm
+dectl salesdata glue conform run --follow    # start it and tail both log streams
+dectl salesdata glue conform runs            # recent runs, --json to script them
+```
+
+A deploy is two writes with different owners. The script upload is always yours. The job
+*definition* is Terraform's once a pipeline is established, and dectl keeps write access to it
+because that is the point before Terraform exists — change a worker type and run it, instead of
+commit → Jenkins → apply. So `deploy` diffs its computed definition against the live one and
+confirms before applying. `--plan` shows the diff and exits, `--yes` skips the prompt.
+
+### Three kinds of field, and the difference matters
+
+dectl **manages** what your config names, **preserves** everything else, and **cannot create**
+a job at all — `deploy` reads the live definition first, so the job has to exist.
+
+Preserving is the load-bearing half. `UpdateJob` replaces the whole definition rather than
+patching it, so a field dectl did not carry over would silently reset to its default on every
+deploy. Omit a key and dectl leaves whatever is there, which is how a Terraform-owned field
+survives a deploy you ran to change something else.
+
+When nothing your config names differs, the definition is left untouched and no `UpdateJob` is
+sent. That is the steady state: a deploy becomes a pure code push with no drift surface.
+
+### The managed fields
+
+| Config key | What it sets |
+| --- | --- |
+| `role` | the IAM role the job runs as |
+| `scripts` | `ScriptLocation` from the first entry; the rest become `--extra-py-files` |
+| `connections` | authoritative — a name dropped from this list is detached |
+| `arguments` | merged onto the job's existing default arguments |
+| `max_capacity` | DPU sizing, for Python shell jobs |
+| `worker_type`, `number_of_workers` | Spark sizing |
+| `glue_version` | the Glue runtime |
+| `python_version` | the Python inside `Command` |
+| `timeout_minutes` | `Timeout`, which Glue counts in minutes |
+| `max_retries` | reruns after a failure |
+| `max_concurrent_runs` | `ExecutionProperty.MaxConcurrentRuns` |
+| `execution_class` | `STANDARD` or `FLEX` |
+
+Every row below `arguments` is optional and unmanaged when omitted. Name one only while you
+want dectl deciding it rather than Terraform.
+
+`max_retries: 0` is the one worth setting by hand while iterating. Left at the Glue default a
+failing job runs three times before it reports, which is three tracebacks to read instead of one.
+`execution_class: FLEX` runs on spare capacity for less money and starts when it starts, which is
+usually the right trade for a loop and the wrong one for a schedule.
+
+### Sizing is one model or the other
+
+A Glue job sizes by DPU or by workers, never both, and `UpdateJob` rejects a definition carrying
+each. Python shell jobs take `max_capacity`, which is `0.0625` (1 GB) or `1` (16 GB). Spark jobs
+take `worker_type` with `number_of_workers`.
+
+dectl refuses a config naming both, and refuses one half of the worker pair. Glue refuses these
+too, but from `UpdateJob` — which runs after the scripts have already been uploaded, and whose
+message names neither the job nor the config key.
+
+Naming `worker_type` on a job Glue currently sizes by DPU is a migration and works; the diff
+shows the DPU value being removed alongside the workers arriving. The reverse has no expression,
+because an omitted key means unmanaged everywhere in this config and there is no way to write
+"and unset the worker type".
+
+One row you will not see: a Spark job's `MaxCapacity`. Glue derives it from the worker pair,
+returns it from `GetJob`, and rejects an `UpdateJob` that carries both — so dropping it is forced
+rather than intended, and it is left out of the diff. Reported as a removal it would reappear on
+the next read, and the job would prompt on every deploy forever.
+
 ## Lambda dev loop vs release
 
 Aliases are the short config keys, not the full AWS names. The verb is last, so the

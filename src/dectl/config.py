@@ -48,6 +48,15 @@ defaults:
   environment: dev
   aws_profile: ""
 
+# The Jenkins dectl reaches for `release`. Both this block and a pipeline's own `jenkins` below
+# have to be present for the command to appear at all, because the whole tree is assembled from
+# what the config declares. A value written as ${NAME} is read from that environment variable,
+# which is how the token stays out of the file.
+jenkins:
+  url: https://jenkins.example.com
+  user: ${JENKINS_USER}
+  token: ${JENKINS_API_TOKEN}
+
 pipelines:
   example-pipeline:
     # The directory the relative paths below resolve from — every glue `scripts` entry and every
@@ -135,6 +144,12 @@ pipelines:
         - my-function
       step_functions:
         - my-flow
+    # Which Jenkins job `dectl example-pipeline release` builds, and what it posts. Needs the
+    # top-level `jenkins` block as well; either one missing and the command is not built.
+    jenkins:
+      job_path: data-engineering/job/example-pipeline-deploy
+      parameters:
+        ENVIRONMENT: "{env}"
 """
 
 

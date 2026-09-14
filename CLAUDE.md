@@ -183,8 +183,13 @@ drives all four with a name that tells them apart.
 
 `deploy` runs everything that can refuse before it writes anything — `resolve_scripts`, then
 `plan_glue_job_update`, then the upload, then `apply_glue_job_update`. `build_job_update` exits
-on a capacity Glue would reject and the confirmation can be declined, and either one landing
+on a sizing model Glue would reject and the confirmation can be declined, and either one landing
 after an upload leaves `ScriptLocation` pointing at code the user was just told not to deploy.
+
+A config naming both sizing models, or half the worker pair, is refused by `GlueJobConfig`
+itself. That is a fact about the config alone — no AWS call, no environment, no filesystem —
+which is what makes it a field validator rather than one of `values.py`'s faults, and what puts
+it before the upload rather than at `UpdateJob`.
 
 `TEMPLATE_CONFIG` is the single source for the example config: `config init` writes it, `config
 example` prints it (syntax-highlighted on a TTY, plain when piped so `config example > config.yaml`
@@ -262,15 +267,36 @@ and an eval'd `s3 export` stay clean.
 - **Glue `UpdateJob` replaces the whole job definition** — it does not patch. `build_job_update`
   reconstructs the update from the existing definition and overrides only what dectl manages, so
   fields set outside dectl survive a deploy. See the comments there before touching it.
+- **`build_job_update` must not write into the definition it was handed.** That dict is the
+  before-image `job_definition_changes` diffs against, and the comprehension that copies it is
+  shallow — so every nested dict in the update is still the caller's object. Write through one
+  and the diff compares it with itself, reports no change, and a definition differing only
+  inside `Command` or `ExecutionProperty` reads as converged. `UpdateJob` is then skipped and the
+  scripts land at a location the live job does not name. `Command` is written on every deploy,
+  which is what makes this the nested dict that matters.
+- **A key the API forced out of the update is not a change, and `JobUpdate.derived` is how the
+  diff knows.** `READ_ONLY_KEYS` covers the keys `UpdateJob` always rejects; `derived` covers the
+  ones it rejects only in the shape at hand, which today is a Spark job's `MaxCapacity`. Glue
+  derives that from the worker pair and returns it from `GetJob`, so a row reporting its removal
+  reappears on the next read and the job prompts on every deploy forever. A drop the *config*
+  asked for stays a change — naming `worker_type` on a DPU-sized job displaces `MaxCapacity` on
+  purpose, and both halves belong in the diff.
+- **Which sizing model wins is read off the merged update, never off the live job.** Reading the
+  live definition sends both models on a migration, and Glue rejects that after the upload.
 - **`glue deploy` is two writes with different owners** — the script upload is always yours, but
-  the job *definition* (role, connections, capacity, arguments) is Terraform's once a pipeline is
-  established. dectl can still write it, because that is the whole point before Terraform exists:
-  set arguments and deploy from the shell instead of commit → Jenkins → console. So `deploy` diffs
-  its computed update against the live definition, skips `UpdateJob` entirely when nothing differs
-  (the steady state — a pure code push, no drift surface), and otherwise renders the field-level
-  diff and confirms. `--plan` shows it and exits without uploading; `--yes` skips the prompt for
-  the pre-Terraform loop. `job_definition_changes` also reports keys dectl *drops*, since a
-  detached connection is invisible in a diff that only walks the new definition.
+  the job *definition* (role, connections, sizing, runtime, arguments) is Terraform's once a
+  pipeline is established. dectl can still write it, because that is the whole point before
+  Terraform exists: change a worker type and run it instead of commit → Jenkins → console. So
+  `deploy` diffs its computed update against the live definition, skips `UpdateJob` entirely when
+  nothing differs (the steady state — a pure code push, no drift surface), and otherwise renders
+  the field-level diff and confirms. `--plan` shows it and exits without uploading; `--yes` skips
+  the prompt for the pre-Terraform loop. `job_definition_changes` also reports keys dectl *drops*,
+  since a detached connection is invisible in a diff that only walks the new definition.
+- **`DEFINITION_FIELDS` and `NESTED_DEFINITION_FIELDS` are the whole of what a deploy writes.**
+  A field merged by hand instead of declared in one of them is outside every enumeration of the
+  managed surface, including the two coverage assertions that make an undriven field a red test.
+  An omitted key means unmanaged and the live value survives, which is what lets one deploy change
+  a worker type without resetting the timeout Terraform set.
 - **`connections` in config is authoritative, not additive** — unioning with whatever the job
   already has makes a stale entry immortal and silently reattaches a connection renamed in
   Terraform under its old name on every deploy. `None` (key absent) means dectl does not manage
@@ -416,6 +442,30 @@ and an eval'd `s3 export` stay clean.
 `typer.testing.CliRunner` against a factory-built app. Live AWS integration tests are marked
 `integration` and skipped unless `--run-integration` is passed — they create and delete real
 resources.
+
+**Anything that writes to AWS gets a live test, and the bar for leaving one out is high.**
+dectl is driven where a failure is read once, from its output, with no way to attach a debugger
+and no second attempt — so a write whose only evidence is a fake is a write nobody has seen
+work. The two exemptions are real cost and setup so extensive it would not be worth maintaining;
+neither is "the fake covers it", because the questions that matter here are the service's rules
+and a fake only holds the ones somebody already knew.
+
+Everything a live test needs it creates and deletes itself. Never point one at a real pipeline's
+job: a test that depends on infrastructure it did not create fails on someone else's change and
+reports that as dectl being broken.
+
+Run them with credentials that can reach Glue **and** `iam:CreateRole`, since a Glue job needs a
+role Glue can assume:
+
+```bash
+DECTL_IT_AWS_PROFILE=<profile> DECTL_IT_REGION=<region> uv run pytest --run-integration
+```
+
+**What live Glue does that no fake would have told you.** Version 2.0 is retired and `CreateJob`
+refuses it outright. A job asking for `MaxCapacity` alongside version 3.0 or 4.0 comes back
+carrying `WorkerType` as well, already worker-sized. A DPU-only Spark job is still creatable, by
+omitting `GlueVersion` entirely, and that is the only way to build the fixture a
+DPU-to-worker migration needs.
 
 **A fake enforces the service's constraints rather than replaying responses.** The constraints
 this repo's fakes encode: `FakeCloudWatchLogs` applies `startTime`, `endTime`,
