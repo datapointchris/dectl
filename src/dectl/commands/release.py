@@ -26,7 +26,7 @@ def resolve_env(value: str) -> str:
 
 
 def jenkins_request(config: DectlConfig, method: str, path: str, **kwargs):
-    import httpx
+    import httpx2
 
     jenkins = config.jenkins
     if not jenkins:
@@ -36,7 +36,7 @@ def jenkins_request(config: DectlConfig, method: str, path: str, **kwargs):
     url = f'{jenkins.url.rstrip("/")}/{path.lstrip("/")}'
     auth = (resolve_env(jenkins.user), resolve_env(jenkins.token))
 
-    with httpx.Client(verify=False, auth=auth, timeout=30) as client:  # nosec B501
+    with httpx2.Client(verify=False, auth=auth, timeout=30) as client:  # nosec B501
         resp = client.request(method, url, **kwargs)
         return resp
 
