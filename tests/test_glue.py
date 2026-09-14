@@ -6,6 +6,7 @@ import typer
 
 from dectl import prompt
 from dectl.commands.glue import DEFINITION_FIELDS
+from dectl.commands.glue import NESTED_DEFINITION_FIELDS
 from dectl.commands.glue import GlueRunWatcher
 from dectl.commands.glue import ResolvedScript
 from dectl.commands.glue import apply_glue_job_update
@@ -265,14 +266,21 @@ def test_a_configured_definition_field_reaches_the_update(config_field, definiti
     assert glue.captured_update[definition_key] == value
 
 
-def test_every_top_level_definition_field_is_covered_by_the_parametrization():
+def test_every_managed_definition_field_is_covered_by_a_test():
     """A field dectl writes and nobody drives is a field whose first exercise is a real deploy.
 
-    `max_capacity` and `number_of_workers` are absent from the table because each is half of a
-    sizing pair the mutual-exclusion rule governs; both are driven by their own tests above."""
-    driven = {field for field, _, _ in TOP_LEVEL_FIELDS} | {'max_capacity', 'number_of_workers'}
+    Read off both maps rather than listed here, so a field added to either is a red test rather
+    than one silently outside the count. The four named inline are each driven by a test of
+    their own above: the sizing pair by the displacement case, and the two nested fields by the
+    merge cases, because none of those is a plain top-level write."""
+    driven = {field for field, _, _ in TOP_LEVEL_FIELDS} | {
+        'max_capacity',
+        'number_of_workers',
+        'python_version',
+        'max_concurrent_runs',
+    }
 
-    assert set(DEFINITION_FIELDS) == driven
+    assert set(DEFINITION_FIELDS) | set(NESTED_DEFINITION_FIELDS) == driven
 
 
 def test_python_version_is_merged_into_the_command():

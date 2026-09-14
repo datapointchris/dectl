@@ -158,8 +158,7 @@ class JobUpdate(NamedTuple):
 
 
 # Config field -> the `JobUpdate` key it writes, for every field that lands at the top level of
-# the definition. `python_version` and `max_concurrent_runs` are absent because they sit inside
-# `Command` and `ExecutionProperty`; both are merged by hand below.
+# the definition.
 DEFINITION_FIELDS = {
     'max_capacity': 'MaxCapacity',
     'worker_type': 'WorkerType',
@@ -168,6 +167,15 @@ DEFINITION_FIELDS = {
     'timeout_minutes': 'Timeout',
     'max_retries': 'MaxRetries',
     'execution_class': 'ExecutionClass',
+}
+
+# The same, for the fields Glue files inside a sub-structure. Data rather than two hand-written
+# merges, so the pair of maps is the whole answer to what dectl writes — a field merged by hand
+# is one no enumeration of the managed surface can see, and the tests that assert every managed
+# field is driven would pass without covering it.
+NESTED_DEFINITION_FIELDS = {
+    'python_version': ('Command', 'PythonVersion'),
+    'max_concurrent_runs': ('ExecutionProperty', 'MaxConcurrentRuns'),
 }
 
 WORKER_KEYS = ('WorkerType', 'NumberOfWorkers')
@@ -218,16 +226,18 @@ def build_job_update(existing: dict, glue_job: GlueJobConfig) -> JobUpdate:
 
     job_update['Role'] = glue_job.role
 
+    # Unconditional, and the reason `Command` is not left to the loop below: a job is defined by
+    # its ScriptLocation, so pointing at the uploaded script is the one thing a deploy always does.
     command = dict(job_update.get('Command', {}))
     command['ScriptLocation'] = script_uri(glue_job, glue_job.scripts[0])
-    if glue_job.python_version is not None:
-        command['PythonVersion'] = glue_job.python_version
     job_update['Command'] = command
 
-    if glue_job.max_concurrent_runs is not None:
-        execution_property = dict(job_update.get('ExecutionProperty', {}))
-        execution_property['MaxConcurrentRuns'] = glue_job.max_concurrent_runs
-        job_update['ExecutionProperty'] = execution_property
+    for config_field, (section, definition_key) in NESTED_DEFINITION_FIELDS.items():
+        configured = getattr(glue_job, config_field)
+        if configured is not None:
+            merged = dict(job_update.get(section, {}))
+            merged[definition_key] = configured
+            job_update[section] = merged
 
     # Read off the merged update rather than off `existing`, so a job being migrated to worker
     # sizing drops the DPU value it is replacing. Reading the live definition instead would send
