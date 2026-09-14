@@ -72,6 +72,49 @@ def test_template_config_is_valid():
     assert 'example-pipeline' in config.pipelines
 
 
+def keys_written_in(template: str) -> set[str]:
+    """Every mapping key the template writes, comments and commented-out lines excluded.
+
+    Textual rather than a walk of the parsed config, because a key the template never mentions
+    parses into its model default and is then indistinguishable from one it set to that value.
+    The question here is what a reader can see, so the text is the right thing to read."""
+    written = set()
+    for line in template.splitlines():
+        bare = line.strip()
+        if not bare or bare.startswith('#') or bare.startswith('- '):
+            continue
+        key, separator, _ = bare.partition(':')
+        if separator:
+            written.add(key.strip())
+    return written
+
+
+def test_the_template_names_every_field_the_models_hold():
+    """The template is the only exhaustive listing of the config, so a field missing from it is
+    a field with no documentation anywhere.
+
+    Validity is not enough on its own: every field has a default or is supplied elsewhere in the
+    example, so a whole block can fall out and the round-trip above still passes. Both `jenkins`
+    blocks did exactly that, which left `release` — a command built only when they are present —
+    unreachable from the example config that is supposed to document it.
+
+    An alias key is excluded because the template chooses those names itself. A field genuinely
+    not worth showing is added below with the reason, the same bargain as `UNCHECKED_FIELDS`."""
+    declared = {field for model in config_models() for field in model.model_fields}
+    shown = keys_written_in(TEMPLATE_CONFIG)
+
+    assert declared - shown == set(SHOWN_ONLY_AS_A_COMMENT)
+
+
+# Fields the template carries commented out, with the reason. `keys_written_in` reads written
+# keys only, so these subtract rather than count: the point of the guard is that a reader can
+# see a field, and a commented line shows it while an absent one does not.
+SHOWN_ONLY_AS_A_COMMENT = {
+    'resolve_paths_from': 'names a directory no machine has, and `config validate` checks it, '
+    'so `config init` would write a config that fails its own check',
+}
+
+
 def test_validation_rejects_unknown_pipeline_key():
     raw = {
         'defaults': {'account_id': '111'},
