@@ -2,8 +2,7 @@
 
 Data engineering control CLI for driving AWS pipelines (Glue, Lambda, Step Functions, S3,
 Jenkins deploys) from a single config file. Installed via `uv tool install`; the entry point is
-`dectl.main:app`. Universal rules live in `~/.claude/CLAUDE.md` — this file only covers what
-is specific to dectl.
+`dectl.main:app`.
 
 ## The core idea: the CLI surface is assembled from config at import time
 
@@ -54,170 +53,105 @@ def make_<resource>_app(pipeline_name: str, pipeline, config: DectlConfig) -> ty
 ```
 
 The factory returns the resource-level app (`glue`) and, for each configured alias, attaches a
-**per-alias sub-app** (`make_<resource>_<thing>_app`) whose commands are the verbs. This is the
-same config-assembled pattern as the pipeline loop, one level down: the alias is a tree node,
-not an argument. Each verb command **closes over that alias's config** and resolves `{env}` at
-call time (`render_env_model` / `substitute_env`) — never at import, since `--env` is not known
-until the command runs. Because the alias is a sub-app, an unknown alias is a Typer
-"no such command" (usage) error, not a `resolve_*` failure; the valid aliases are discoverable
-via no-args/`--help` at the resource level, and each alias sub-app's `help=` doubles as an info
-panel (its resolved name, bucket, scripts). `glue.py` and `lambda_.py` are the reference
-implementations, `stepfunctions.py` and `s3.py` the newest.
+**per-alias sub-app** (`make_<resource>_<thing>_app`) whose commands are the verbs. The alias is
+a tree node, not an argument. Each verb command **closes over that alias's config** and resolves
+`{env}` at call time (`render_env_model` / `substitute_env`), never at import, since `--env` is
+not known until the command runs. An unknown alias is therefore a Typer "no such command" usage
+error, not a `resolve_*` failure. Each alias sub-app's `help=` doubles as an info panel (its
+resolved name, bucket, scripts). `glue.py` and `lambda_.py` are the reference implementations.
 
-`iceberg.py` is the one resource whose verbs are all reads. Its factory is the same two-level
-shape, and the domain behind it lives in `src/dectl/iceberg.py` — the same split as
-`durable.py` beside `lambda_.py`.
+Aliases matter: users reference the short config keys (`raw`, `source-copy`), never the real AWS
+names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
 
-Aliases matter: users reference the short config keys (`raw`, `source-copy`), never the real
-AWS names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
-
-`s3` is the one resource with a set-level verb: per-bucket `mount`/`unmount`/`uri` are alias
-sub-apps, but `export` (spans every bucket, no alias) is a command on the `s3` app itself.
-`lambda`/`sfn` `run` take payloads through `payloads.read_payload`: a payload comes from
-`--payload-file F` or from stdin as `-`, never from an inline string argument.
-
-`monitor` is the exception to the factory pattern: it is a **pipeline-level** command (like
-`list`, registered on `pipeline_app` directly), not a resource sub-app, because it spans
-several resources. It reads the pipeline's explicit `monitor` config block and tails every
-selected resource's CloudWatch log group as one interleaved, time-ordered stream via
-`logs.tail_log_groups`.
+- `iceberg` is the one resource whose verbs are all reads. Its domain lives in
+  `src/dectl/iceberg.py`, the same split as `durable.py` beside `lambda_.py`.
+- `s3` is the one resource with a set-level verb: `export` spans every bucket and is a command on
+  the `s3` app itself, beside the per-bucket alias sub-apps.
+- `lambda`/`sfn` `run` take payloads through `payloads.read_payload`: from `--payload-file F` or
+  from stdin as `-`, never from an inline string argument.
+- `monitor` is a **pipeline-level** command registered on `pipeline_app`, because it spans
+  several resources. It tails every resource its `monitor` config block selects as one
+  time-ordered stream via `logs.tail_log_groups`.
 
 ## Config
 
-`src/dectl/config.py` — Pydantic models plus `load_config()` / `init_config()`. Config lives at
-`$XDG_CONFIG_HOME/dectl/config.yaml`, resolved by `pyclisteno.paths.config_home()` so the
-variable is honored rather than `~/.config` being hardcoded. `buckets` is an
-`alias -> real-bucket-name` mapping (same alias→name shape as `glue_jobs` and `lambdas`), not
-a fixed set of roles. A lambda's
-`live_alias` (renamed from `alias` to avoid colliding with the CLI "alias" = the config key) is
-the AWS Lambda alias that `deploy --publish` repoints; its `durable` flag selects the durable
-verb set and doubles as the invocation qualifier's source. `step_functions` maps
-alias → `{name, log_group}` (the log group is optional, needed only for `monitor`).
-`iceberg_tables` maps alias → `{database, table}`, the Glue Data Catalog pair that owns the
-table; both fields carry `{env}`. `monitor` is
-its own block listing which lambdas / step machines to tail, kept separate so the monitored view
-is defined in one scannable place. When you change a model, update `TEMPLATE_CONFIG` in the same
-file so `config init` stays valid — a test asserts `TEMPLATE_CONFIG` round-trips through the models.
+`src/dectl/config.py` holds the Pydantic models plus `load_config()` / `init_config()`. Config
+lives at `$XDG_CONFIG_HOME/dectl/config.yaml`, resolved by `pyclisteno.paths.config_home()`, so
+the variable is honored rather than `~/.config` being hardcoded. `buckets`, `glue_jobs` and
+`lambdas` are all `alias -> real-name` mappings. A lambda's `live_alias` (not `alias`, which would
+collide with the CLI's "alias" = the config key) is the AWS Lambda alias that `deploy --publish`
+repoints. Its `durable` flag selects the durable verb set and is the invocation qualifier's
+source. `step_functions` maps alias → `{name, log_group}`; the log group is needed only for
+`monitor`. `iceberg_tables` maps alias → `{database, table}`, both carrying `{env}`. `monitor` is
+its own block listing which lambdas and state machines to tail.
+
+**`TEMPLATE_CONFIG` is the single source for the example config.** `config init` writes it and
+`config example` prints it (highlighted on a TTY, plain when piped). It exercises every option, and
+a test asserts it round-trips through the models, so update it with any model change. Its
+`resolve_paths_from` line stays commented: uncommented, it names a directory no machine has, and
+`config init` would write a config that fails `config validate`.
+
+**All models inherit `StrictModel` (`extra='forbid'`)**, so a typo like `step_function:` is a loud
+error. `main.py` wraps its import-time `load_config()` so an invalid config falls back to
+`cfg = None`, keeping the `config` commands reachable, and stores the exception in
+`CONFIG_ERROR`. Only a *missing* config yields `None` directly; `CONFIG_LOAD_ERRORS` is the tuple
+every caller catches. `report_config_error` is the single renderer for that failure. It writes to
+stderr, keeps the rejected value because it identifies an ambiguous location, and disables markup
+because a rejected list renders as `['a']`, which rich would eat as a style tag.
+
+`config edit` resolves the editor via `$VISUAL` → `$EDITOR` with no hardcoded fallback,
+`shlex.split`s it, resolves the binary with `shutil.which`, and seeds the template first if no
+config exists.
 
 ### Paths
 
-`src/dectl/values.py` answers whether a value the config names outside the program can be what
-it has to be; `config.py` walks the models and builds the records it defines. Read `values.py`'s
-module docstring before changing either. Below are the constraints a new resource has to meet,
-which the docstrings do not state.
+`src/dectl/values.py` answers whether a value the config names outside the program can be what it
+has to be; `config.py` walks the models and builds the records. Read `values.py`'s module
+docstring before changing either. What a new field or resource has to meet:
 
-- **A resource declares its own path, key and bucket fields, on the model.**
-  `ResourceModel.PATH_FIELDS` maps a field to the `PathKind` it must be; `KEY_FIELDS` names the
-  fields a glue S3 key is built from; `BUCKET_FIELDS` names the fields that have to be real S3
-  bucket names. `declared_paths`, `declared_keys`, `declared_names` and `env.aws_names_of` all
-  read them, so a field declared to some and not the others is checked one way and not another
-  — and every one of those reads as success. `test_every_string_field_is_classified` makes a new
-  field a decision rather than a default: it is in one of the three, or named in
-  `UNCHECKED_FIELDS` with the reason.
-- **Every enumeration of a declaration reads `declaring_members`, which is the one walk.** It
-  yields the pipeline itself and then each resource, so the three member shapes — held in a
-  dict, held as a bare field, declared on the pipeline — reach every enumeration or none. One
-  that traverses for itself reaches a narrower set, and the failure is silent in both
-  directions: a value nothing enumerates is a value nothing checks, and nothing checked reports
-  no fault. `test_every_declaration_consumer_sees_every_member_shape` names each and drives it.
-  `aws_names_only` is the exception and stays one: it dumps the pipeline as a container and
-  filters what comes back, rather than enumerating values filed inside members. Its own test
-  asserts what it emits.
-- **Adding a path field to a resource that already has a section is the whole edit.** Checking,
-  resolution, the env-guard exclusion, the `paths` block in `--json` and the printed row all
-  come from the declaration, so nothing needs adding to `pipeline_to_dict` or `render_pipeline`.
-  A row guaranteed by something that runs is a row nobody has to remember.
-  **A new resource *kind* costs six edits**, because its sections carry per-kind AWS fields and
-  are written out: the `--json` section, the `paths` key inside it, the human section, the
-  `print_paths` call inside *that*, `resource_types`, and the pipeline loop in `main.py`. The
-  fourth is the one nothing else would catch, and `s3` is the kind that has neither it nor a
-  `paths` key today. `test_every_resolved_path_reaches_both_renderers` and
-  `test_every_resolved_path_reaches_the_human_renderer` are what make a kind with declared paths
-  and no display a red test rather than a missing row.
-- **A new `ConfigFault` needs a `FAULT_WORDING` entry, a decision about `SPELLING_FAULTS`, and
-  a line in `recovery_lines`.** The first two fail in opposite directions: a missing wording
-  raises where a reader needs the answer, and a missing `SPELLING_FAULTS` entry silently reports
-  the resolved path for a fault about how the value is written.
-  `test_every_fault_has_a_sentence` pins the first.
-- **`join_uri` joins three strings and all three are guarded.** `key_fault` covers the prefix
-  and the script, `bucket_fault` covers the bucket. A guard over some operands of a composed
-  value and not the rest is the defect this whole surface keeps producing.
-- **An `s3://` URI is constructed in `values.py` and nowhere else, and the check is a command
-  rather than this sentence.** `rg -n "f's3://" src/` returns two rows, both definitions —
-  `bucket_uri` and `s3_uri`. A third row is a second rendering of one location, and it drifts
-  from the object the deploy wrote. Reading one is a separate question: `iceberg.py` takes a
-  URI Glue hands it apart with `parse_s3_uri`, which constructs nothing.
+- **A resource declares its path, key and bucket fields on the model**: `PATH_FIELDS` (field →
+  `PathKind`), `KEY_FIELDS` (the parts of a glue S3 key) and `BUCKET_FIELDS`. Every checker reads
+  them. `test_every_string_field_is_classified` makes a new string field a decision: it is in one
+  of the three, or in `UNCHECKED_FIELDS` with the reason.
+- **Every enumeration of a declaration reads `declaring_members`**, the one walk over the pipeline
+  and each resource. A consumer that traverses for itself reaches a narrower set, and a value
+  nothing enumerates reports no fault. `aws_names_only` is the deliberate exception.
+- **Adding a path field to an existing resource is the whole edit.** Checking, resolution,
+  `--json` and the printed row all come from the declaration. **A new resource *kind* costs six
+  edits**: the `--json` section, its `paths` key, the human section, its `print_paths` call,
+  `resource_types`, and the pipeline loop in `main.py`. `s3` has neither a `print_paths` call nor
+  a `paths` key today. `test_every_resolved_path_reaches_both_renderers` catches a kind with
+  declared paths and no display.
+- **A new `ConfigFault` needs a `FAULT_WORDING` entry, a `SPELLING_FAULTS` decision, and a line in
+  `recovery_lines`.** `test_every_fault_has_a_sentence` pins the first.
+- **`join_uri` joins three strings and all three are guarded.** `key_fault` covers the prefix and
+  the script, and `bucket_fault` covers the bucket. A guard over some operands of a composed value
+  and not the rest is the defect this surface keeps producing.
+- **An `s3://` URI is constructed in `values.py` and nowhere else.** `rg -n "f's3://" src/`
+  returns exactly `bucket_uri` and `s3_uri`. A third row is a second rendering of one location,
+  and it drifts from the object the deploy wrote. `iceberg.py`'s `parse_s3_uri` only reads one.
 - **Every value naming a file or directory goes through `resolve_from_root(pipeline, value)`,
-  never `Path(value)`** — missing it reintroduces the dependency on where dectl was invoked,
-  silently. `pipeline_root` is the fallback half: no `resolve_paths_from` means `Path.cwd()`.
-- **A fault about how a value is *written*, or about what this machine holds, belongs to
-  `config validate` and to the deploy, never to a field validator.** `key_fault`'s docstring
-  carries why. `UNRESOLVABLE_HOME` is the member that most looks like a validator's job and
-  is not: as one it could only reach the values carrying no `{env}`.
+  never `Path(value)`**, or it silently depends on where dectl was invoked.
+- **A fault about how a value is written, or what this machine holds, belongs to `config validate`
+  and the deploy, never a field validator.** `key_fault`'s docstring says why.
 - **A deploy door scopes `pipeline_value_faults` by argument, never by filtering its result.**
-  Filtering drops the row naming the absent root, which is the cause of every row it kept.
-- **Nothing in the path domain or the walk exits the process.** A refusal raised beneath a
-  command that has already committed to emitting a document leaves `--json` writing zero bytes.
-  `render_unusable_values` is the lines as data and `refuse_unusable_values` is the one exit;
-  every door reaches one of the two.
-- **A value crossing the substitution boundary carries the substituted name.** `ResolvedScript`
-  is that boundary for a glue deploy. A record pairing a raw config string with a resolved path
-  presents two spellings of one file as two files, and no call site can see which it holds.
+  Filtering drops the row naming the absent root.
+- **Nothing in the path domain or the walk exits the process**, or `--json` writes zero bytes.
+  `render_unusable_values` returns the lines; `refuse_unusable_values` is the one exit.
 
-`join_uri` composes a script's destination out of its three operands. `rg -n 'join_key\(|join_uri\(' src/`
-names every composer, and there are four beyond the definitions: `script_uri` for the deploy,
-`script_uris` for both renderers, `configured_uris` for the per-alias help panel, and the upload,
-which needs the key alone because `upload_file` takes the bucket separately.
+**Each `join_uri` operand is substituted exactly once, and which caller does it varies.**
+`rg -n 'join_key\(|join_uri\(' src/` names the composers. `script_uri` and the upload are handed a
+rendered job. `configured_uris` is handed a raw one, because the help panel is built before
+`--env` is parsed. `script_uris` renders its own operands, because a renderer must not reach
+`render_env_model`. Mixing conventions names an object nothing wrote, but only when the
+environment's own name carries the token.
+`test_every_site_composing_a_script_destination_substitutes_exactly_once` drives all four.
 
-**Each of the three operands is substituted exactly once, and which caller does it varies.**
-`script_uri` and the upload render nothing and are handed a rendered job. `configured_uris`
-renders nothing and is handed a raw one, because the help panel is built before `--env` is
-parsed, so its `{env}` is left standing rather than resolved to the wrong environment.
-`script_uris` renders its own three operands, because a renderer must not reach `render_env_model`
-— that also asks the env guard, at a narrower scope than the caller already asked it at.
-
-A caller mixing those conventions names an object nothing wrote, and only when the environment's
-own name carries the token: every other name makes `substitute_env` idempotent and the two
-spellings identical. `test_every_site_composing_a_script_destination_substitutes_exactly_once`
-drives all four with a name that tells them apart.
-
-`deploy` runs everything that can refuse before it writes anything — `resolve_scripts`, then
-`plan_glue_job_update`, then the upload, then `apply_glue_job_update`. `build_job_update` exits
-on a sizing model Glue would reject and the confirmation can be declined, and either one landing
-after an upload leaves `ScriptLocation` pointing at code the user was just told not to deploy.
-
-A config naming both sizing models, or half the worker pair, is refused by `GlueJobConfig`
-itself. That is a fact about the config alone — no AWS call, no environment, no filesystem —
-which is what makes it a field validator rather than one of `values.py`'s faults, and what puts
-it before the upload rather than at `UpdateJob`.
-
-`TEMPLATE_CONFIG` is the single source for the example config: `config init` writes it, `config
-example` prints it (syntax-highlighted on a TTY, plain when piped so `config example > config.yaml`
-stays clean), and it exercises every option so it doubles as side-by-side reference while editing.
-Its `resolve_paths_from` line stays commented — uncommented it would name a directory no machine
-has, and `config validate` checks it, so `config init` would write a config that fails.
-
-All models inherit `StrictModel` (`extra='forbid'`), so an unknown key — a typo like
-`step_function:` — is a loud error rather than a silently dropped field. Because forbidding
-extras widens what counts as "invalid," `main.py` wraps its import-time `load_config()` in
-try/except: a present-but-invalid config falls back to `cfg = None` (so the always-present
-`config` commands stay reachable to diagnose and fix it) and keeps the exception in
-`CONFIG_ERROR`. Only a *missing* config yields `None` from `load_config()` directly; an invalid
-one raises, and `CONFIG_LOAD_ERRORS` is the tuple every caller catches.
-
-`report_config_error` is the single renderer for that failure, and every site that notices the
-missing pipelines calls it: `list`, `search`, `config show`, `config validate`, bare `dectl`, and
-`DectlGroup.get_command` when the name typed was a pipeline. It prints the file and which of the
-two failures it hit, then one entry per problem carrying the location, the message, and the
-rejected value — `describe_config_error` keeps that value because it is what identifies the
-offending key when the location alone is ambiguous. Every line goes to stderr, and the detail
-prints with markup disabled because a rejected list renders as `['a']`, which rich would eat as
-a style tag.
-
-`config edit` resolves the editor via `$VISUAL` → `$EDITOR` (no hardcoded fallback — the env var
-carries the user's intent, including any `--wait`), `shlex.split`s it so args survive, resolves the
-binary with `shutil.which` (full path, B607-clean), and runs it in the foreground. It seeds from the
-template first if no config exists.
+`deploy` runs everything that can refuse before it writes anything: `resolve_scripts`, then
+`plan_glue_job_update`, then the upload, then `apply_glue_job_update`. A refusal after the upload
+leaves `ScriptLocation` pointing at code the user was just told not to deploy. A config naming
+both sizing models, or half the worker pair, is refused by `GlueJobConfig` itself. That is a fact
+about the config alone, so it is a field validator rather than one of `values.py`'s faults.
 
 ### Environments
 
@@ -248,188 +182,121 @@ names calls it — `render_env_model`, `s3`'s bare-string `resolved_bucket`/`exp
 both `pipeline_view` renderers. The warning goes to **stderr** (`output.warn`), so `--json` output
 and an eval'd `s3 export` stay clean.
 
-## Cross-cutting modules
+## Module boundaries
 
-| Module | Responsibility |
-| --- | --- |
-| `session.py` | Builds the boto3 `Session` from config (region + optional profile). Every command that touches AWS goes through `make_session`. |
-| `invoke.py` | The Lambda Invoke domain: how long to wait for one, the client to send it through, and which failures may safely be sent again. Kept out of `session.py` for the reason `durable.py` is kept out of `logs.py` — it is the Lambda API, not the boto3 session. |
-| `output.py` | The two `rich` consoles and the `error`/`success`/`info`/`warn` helpers, plus `emit_json` (bare-print JSON for `--json`) and `format_duration`. Use these, not bare `print`, for anything human-facing. `error` and `warn` write to `stderr_console`; `success` and `info` write to stdout. |
-| `pipeline_view.py` | Shared pipeline rendering — `render_pipeline` (human) and `pipeline_to_dict` (the stable `--json` shape). Used by both `main.py` (`list`) and `config_cmd.py` (`show`); lives outside both to avoid the `main` ↔ `config_cmd` import cycle. |
-| `values.py` | Whether a value the config names outside the program can be what it has to be: a usable `Path`, a string S3 will store as written, a name S3 accepts for a bucket. Three questions, three records, one `ConfigFault` vocabulary reporting all of them. Knows nothing of pipelines — `config.py` walks the models and builds the records this defines, the same split as `durable.py` beside `commands/lambda_.py`. |
-| `payloads.py` | `read_payload` — resolves a `--payload-file` path or `-` (stdin) to a JSON string for `lambda`/`sfn` `run`. |
-| `logs.py` | CloudWatch log tailing (Glue, Lambda, and the multi-group `monitor` stream) plus Step Functions execution-history rendering, including structured-JSON pretty-printing. `LogGroupCursor` is the shared primitive all three tailers poll through. |
-| `durable.py` | The Lambda durable-functions domain: qualifier resolution, execution lookup by name/ARN, and execution-history rendering. Kept out of `logs.py` because it is the Lambda API, not CloudWatch. |
-| `iceberg.py` | The Iceberg table domain: locating the metadata file through Glue, parsing it, resolving a snapshot by id/tail/ref, walking lineage, and the diff. Talks to Glue and S3 only. |
+Each module's docstring says what it holds. Three splits are deliberate: `invoke.py` is the Lambda
+Invoke API, kept out of the boto3 session in `session.py`; `durable.py` is the Lambda API, kept
+out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipelines.
+`pipeline_view.py` sits outside `main.py` and `config_cmd.py` to avoid an import cycle.
 
 ## Gotchas
 
-- **Glue `UpdateJob` replaces the whole job definition** — it does not patch. `build_job_update`
-  reconstructs the update from the existing definition and overrides only what dectl manages, so
-  fields set outside dectl survive a deploy. See the comments there before touching it.
-- **`build_job_update` must not write into the definition it was handed.** That dict is the
-  before-image `job_definition_changes` diffs against, and the comprehension that copies it is
-  shallow — so every nested dict in the update is still the caller's object. Write through one
-  and the diff compares it with itself, reports no change, and a definition differing only
-  inside `Command` or `ExecutionProperty` reads as converged. `UpdateJob` is then skipped and the
-  scripts land at a location the live job does not name. `Command` is written on every deploy,
-  which is what makes this the nested dict that matters.
-- **A key the API forced out of the update is not a change, and `JobUpdate.derived` is how the
-  diff knows.** That docstring is the one copy of the mechanism; do not restate it here or in the
-  README. Two boolean reads four lines apart decide it and they point opposite ways —
-  `worker_based` off the merged update, `live_worker_based` off `existing` — so inverting either
-  is a live bug that the `sizing_named` half of
-  `test_a_worker_sized_job_converges_after_one_deploy` is what catches. Its `sizing_unmanaged`
-  twin passes under either reading, so a green run of that one alone proves nothing.
-- **`glue deploy` is two writes with different owners** — the script upload is always yours, but
-  the job *definition* (role, connections, sizing, runtime, arguments) is Terraform's once a
-  pipeline is established. dectl can still write it, because that is the whole point before
-  Terraform exists: change a worker type and run it instead of commit → Jenkins → apply. So
-  `deploy` diffs its computed update against the live definition, skips `UpdateJob` entirely when
-  nothing differs (the steady state — a pure code push, no drift surface), and otherwise renders
-  the field-level diff and confirms. `--plan` shows it and exits without uploading; `--yes` skips
-  the prompt for the pre-Terraform loop. `job_definition_changes` also reports keys dectl *drops*,
-  since a detached connection is invisible in a diff that only walks the new definition.
-- **`GlueJobConfig.DEFINITION_FIELDS` and `NESTED_DEFINITION_FIELDS` are the whole *declared*
-  surface, not the whole of what a deploy writes.** Four more keys are written by hand, and the
-  check is a command rather than this sentence: `rg -n "job_update\['" src/dectl/commands/glue.py`
-  returns `Role`, `Command`, `Connections` and `DefaultArguments`. Those four come from fields
-  that are required or defaulted, so none is a question about what the config named — which is
-  what the two maps answer, and what `managed_definition` reports and the coverage guards count.
-  A field merged by hand instead of declared is outside all three. An omitted declared key means
-  unmanaged and the live value survives, which is what lets one deploy change a worker type
-  without resetting the timeout Terraform set.
-- **`connections` in config is authoritative, not additive** — unioning with whatever the job
-  already has makes a stale entry immortal and silently reattaches a connection renamed in
-  Terraform under its old name on every deploy. `None` (key absent) means dectl does not manage
-  connections; `[]` detaches all.
-- **Lambda `$LATEST` vs. published alias** — `deploy` without `--publish` only moves `$LATEST`;
-  alias-following triggers keep running the old published version until you `--publish` (which
-  moves the configured `live_alias`). `run` always targets `$LATEST`.
-- **`Invoke` is the one call dectl makes that AWS cannot take back, so `invoke.py` owns it and
-  `make_session` is never what sends it** — the module's docstring and constants carry the whole
-  mechanism, including which failures may be sent again and why the two attempt-count keys are not
-  interchangeable. Two consequences are worth knowing before reading it: a botocore default reached
-  a 205-second function and ran it five times over, and the function's own `MaximumRetryAttempts`
-  cannot reach that, because those are the client's HTTP retries and Lambda never sees them.
-- **A wait is chosen per invocation, not per function** — a synchronous run waits on the function, a
-  durable one on the whole execution, and an `--async` one only on Lambda taking the event.
-  `invoke_read_timeout` is where the three are told apart, and the third is why the wait is resolved
-  after `--async` is read rather than before.
-- **`s3 export` / `s3 <alias> uri` must stay eval-safe** — a CLI cannot mutate its parent shell,
-  so `export` prints `export name='s3://…'` lines for `eval "$(...)"` and `uri` prints a bare
-  `s3://…`. Both use bare `print()`, not the rich console, so no markup or ANSI escapes leak into
-  command substitution.
-- **`s3 <alias> mount` is Linux-only** — it shells out to `mount-s3` (Mountpoint for Amazon S3),
-  which is FUSE-based and unavailable on macOS. The command detects a non-Linux OS and refuses
-  with a pointer to `export`. Binaries are resolved with `shutil.which` (full path) so bandit's
-  partial-path check (B607) stays clean without a `nosec`.
-- **Step Functions has two log sources** — `sfn <alias> logs` uses the `GetExecutionHistory` API
-  (typed state transitions, no setup, Standard workflows only). `monitor` instead uses the state
-  machine's CloudWatch **log group**, because it needs one uniform source it can merge with the
-  Lambda groups — which is why a monitored state machine must have `log_group` set (Express
-  workflows only log to CloudWatch and have no history API at all).
-- **Log tailing follows by time, not by stream** — every tailer polls whole log groups through
-  `LogGroupCursor` (moving `startTime`, boundary dedup by `eventId`), never a named stream.
-  Lambda writes each execution environment to a new stream; Glue creates its *error* stream only
-  when something first writes to stderr. `tail_glue_run` isolates a run with
-  `logStreamNamePrefix=<run id>` on the two shared Glue groups. Waiting for the streams to exist
-  via `describe_log_streams` is the trap: done sequentially, output then error, it costs up to
-  two minutes of silence before the first line whenever a job never writes to stderr, and it
-  pins the stream list so a traceback landing in a later-created error stream never shows at all.
-- **`glue run --follow` stops on its own and exits non-zero on failure** — `GlueRunWatcher.finished`
-  is handed to the tailer as a predicate (it only holds a logs client and cannot ask Glue
-  anything), and the watcher keeps the last state so the caller can set the exit code without a
-  second `get_job_run`. A few drain passes run past the terminal state, because CloudWatch
-  ingestion lags the run's end and the tail would otherwise cut off mid-traceback.
-- **A durable Lambda's unit of work is the execution, not the invocation** — so `durable: true`
-  *swaps* `run`/`logs` for the execution-scoped set (`executions`, `history`, `logs EXECUTION`)
-  rather than adding to them; see `add_durable_verbs`. `history` and `logs` read *different*
-  sources: `history` is the checkpoint log via `GetDurableExecutionHistory`, while `logs` is
-  CloudWatch filtered on the execution ARN that the SDK logger stamps onto every record. Note the
-  two Error shapes — `GetDurableExecution` returns `Error` unwrapped, history events wrap it in a
-  `Payload`/`Truncated` envelope.
-- **The handle is the name's tail, never a row number** — a UUID-keyed resource needs a short
-  handle of its own, and AWS assigns none, so `resolve_execution` accepts any
-  unique suffix of `DurableExecutionName`, tried after both exact-name paths and erroring with the
-  candidates when several match. A row number was built first and reverted: a position is only
-  valid for the exact query that produced it, so `--status`, `--qualifier` and `--all-versions`
-  each made the same digit name a different execution, silently. The table folds the name rather
-  than truncating it, because an ellipsis mid-UUID hides the tail you would retype.
-- **`render_event` takes `hide_keys` with no default, and the reason is the failure mode** — a
-  suppressed field leaves a record that still reads as complete, so a wrong default is invisible.
-  Glue, `monitor` and the non-durable `logs` pass `frozenset()`; only the durable `logs` suppresses,
-  and only `DURABLE_OPERATION_ID_KEYS`. `requestId` is deliberately not in it — one execution spans
-  many invocations, so it varies across a scoped tail. `tail_lambda_logs` adds `EXECUTION_ARN_KEY`
-  itself when its filter pattern says the tail is scoped, because that is the fact that decides it
-  and a caller recomputing it can get it wrong invisibly. Whether folding was wanted at all is
-  `fold_scope_fields`, a parameter rather than an empty `hide_keys`, because emptiness already
-  means "this caller has nothing to suppress" for glue and the non-durable `logs`.
-- **`operation_tag` returns the keys it *rendered*, never one it merely read** — the claim is
-  consulted before `hide_keys`, so a key claimed without being shown is one no flag can bring
-  back. That was live for `attempt: 1`: folded out of the tag deliberately, claimed anyway, and
-  unreachable even with `--context`. Only a retry is folded.
-- **`SUFFIX_SEARCH_LIMIT` is both the tail search window and the cap on `executions --limit`** —
-  one number on purpose. A tail is typed off a listing, so a row the table can print and the
-  resolver cannot reach is an ambiguity that resolves silently to whichever candidate fell inside.
-- **Invoking and listing need *different* qualifiers, which is why there are two functions** —
-  `invoke_qualifier` returns the alias (Lambda rejects an unqualified invoke of a durable
-  function, and an alias is the right thing to send since it resolves to whatever is live).
-  `listing_qualifier` must return a *version*: Lambda resolves the alias to a version number when
-  the execution starts, so the alias never appears in the execution ARN and
-  `ListDurableExecutionsByFunction` refuses it with "cannot filter durable executions by alias".
-  The API reference claims `Qualifier` takes "the function version or alias" — for that operation
-  it is wrong. Collapsing these back into one function reintroduces the bug.
-- **Resolving the alias scopes the listing to one deploy** — `deploy --publish` moves the alias,
-  and earlier runs stay under the old version. `sweep_executions` is the escape hatch (one list
-  call per version, merged newest-first); `executions --all-versions` uses it, and
-  `resolve_execution` falls back to it automatically so a name from the console resolves whatever
-  version ran it. It is bounded by `VERSION_SWEEP_DEPTH` and returns the versions it scanned, so
-  callers report the span rather than presenting a bounded search as exhaustive.
+**Glue**
 
-- **`cfg is None` covers two states that need opposite answers** — no config file, and a config
-  file that failed to load. The first is `config init`, the second is `config edit`, and telling
-  a reader to init a config that already exists sends them to a command that refuses. Nothing
-  reads `cfg` directly to refuse: `require_config` is the guard, it consults `CONFIG_ERROR`
-  first, and it returns the config so the caller has no reason to reach for the global.
-- **A config that does not load takes the whole pipeline tree with it** — every pipeline is a
-  subcommand assembled from config, so Click's answer to `dectl my-pipeline ...` is "No such
-  command", which sends the reader after a typo in something they have run for months.
-  `DectlGroup.get_command` answers with the config failure instead, and only while `cfg is None`.
-  With a config loaded, an unknown name really is one and the usage error is correct.
-- **stdout is data and stderr is everything else, and `error()` is where that is enforced** —
-  every refusal in the tool goes through it, and every read verb takes `--json`, so a message
-  printed to stdout reaches a caller as a parse error instead. `success` and `info` stay on
-  stdout because they are the answer. A new refusal path calls `error`, never `console.print`.
-- **A gzipped metadata file is named `<name>.gz.metadata.json`** — the codec extension goes
-  *before* `.metadata.json`, which is what Java's `TableMetadataParser` builds and the only form
-  pyiceberg decompresses. `.metadata.json.gz` is the legacy spelling Java still reads and no
-  current writer produces. `GZIP_SUFFIXES` carries both, because the catalog decides which one it
-  points at. Recognizing only the trailing form reports a healthy table as corrupt and sends the
-  reader after a metadata file that is fine.
-- **Every Iceberg summary counter is a string** — the spec says so, so `total-records` arrives as
-  `'2000'`. Adding two of them concatenates and subtracting two raises, and neither failure shows
-  up until a real table. Every read goes through `summary_int`, and the test fixtures write
-  strings for the same reason: an integer fixture would let a reader that never coerces pass.
-- **Glue holds a pointer, not the state** — `table_type` and `metadata_location` on the catalog
-  table are the whole of what it knows about an Iceberg table. A table missing either is not an
-  Iceberg table, and saying that beats a `KeyError` on a parameter name, because pointing dectl
-  at a plain Glue table is the first thing anyone does.
-- **The metadata file is the floor** — snapshots, the snapshot log, refs and schemas are all in
-  it. Everything below it (the manifest list, and the manifests naming data files) is Avro, which
-  is why `files` reports per-snapshot summary counters rather than a row per data file. Reading
-  Avro would mean pyiceberg, which cannot open an `s3://` table without pyarrow or s3fs — either
-  one more than doubles the install, and pyiceberg's own import would become the most expensive
-  in the tool, paid on every invocation including the ones that never touch a table.
-- **The lineage and the log answer different questions** — `snapshot-log` records every change of
-  the current pointer, while parent pointers record descent. A rollback appends a log entry naming
-  an older snapshot and changes nobody's parent, so the skipped commits stay in the log and leave
-  the lineage. `history` shows the log with an `ancestor` column, and that column is the only
-  place a rollback is visible.
-- **A `diff` that could not reach its base reports no commits at all** — an ancestry walk that
-  runs out has collected the target's whole lineage, and presenting that as "what ran between
-  them" would be a confident answer to a question with none. `linear` is false and the path is
-  empty.
+- **`UpdateJob` replaces the whole job definition**; it does not patch. `build_job_update`
+  rebuilds the update from the existing definition and overrides only what dectl manages, so
+  fields set outside dectl survive a deploy. Read its comments before touching it.
+- **`build_job_update` must not write into the definition it was handed.** That dict is the
+  before-image `job_definition_changes` diffs against, and the copy is shallow. Writing through a
+  nested dict such as `Command` makes the diff compare it with itself and skip `UpdateJob`.
+- **`JobUpdate.derived` tells the diff that a key the API forced out is not a change.** Its
+  docstring is the one copy of the mechanism. The `sizing_named` half of
+  `test_a_worker_sized_job_converges_after_one_deploy` catches an inverted read; its
+  `sizing_unmanaged` twin passes either way.
+- **`glue deploy` is two writes with different owners.** The script upload is always yours. The
+  job *definition* is Terraform's once a pipeline is established, but dectl can still write it
+  before then. So `deploy` diffs its computed update against the live definition, skips
+  `UpdateJob` when nothing differs, and otherwise renders the field-level diff and confirms.
+  `--plan` shows it and exits without uploading; `--yes` skips the prompt. The diff also reports
+  keys dectl *drops*.
+- **`DEFINITION_FIELDS` and `NESTED_DEFINITION_FIELDS` are the declared surface, not everything a
+  deploy writes.** `rg -n "job_update\['" src/dectl/commands/glue.py` returns the four written by
+  hand (`Role`, `Command`, `Connections`, `DefaultArguments`). An omitted declared key means
+  unmanaged, and the live value survives.
+- **`connections` is authoritative, not additive.** A union makes a stale entry immortal and
+  reattaches a connection renamed in Terraform. `None` (key absent) means unmanaged; `[]` detaches all.
+- **`glue run --follow` stops on its own and exits non-zero on failure.** `GlueRunWatcher.finished`
+  is the tailer's predicate, and a few drain passes run past the terminal state because CloudWatch
+  ingestion lags the run's end.
+
+**Lambda**
+
+- **`$LATEST` vs. published alias.** `deploy` without `--publish` only moves `$LATEST`, so
+  alias-following triggers keep running the old version until `--publish` moves `live_alias`.
+  `run` always targets `$LATEST`.
+- **`Invoke` is the one call AWS cannot take back, so `invoke.py` owns it and `make_session` never
+  sends it.** botocore's default retries re-send a long invoke, and the function's own
+  `MaximumRetryAttempts` cannot stop them, because Lambda never sees client HTTP retries. The
+  module docstring carries the rest.
+- **A wait is chosen per invocation, not per function.** A synchronous run waits on the function,
+  a durable one on the whole execution, and `--async` only on Lambda taking the event.
+  `invoke_read_timeout` tells them apart, which is why it resolves after `--async` is read.
+- **A durable Lambda's unit of work is the execution**, so `durable: true` *swaps* `run`/`logs`
+  for `executions`, `history` and `logs EXECUTION` (`add_durable_verbs`). `history` reads the
+  checkpoint log via `GetDurableExecutionHistory`; `logs` reads CloudWatch filtered on the
+  execution ARN. `GetDurableExecution` returns `Error` unwrapped, while history events wrap it in
+  a `Payload`/`Truncated` envelope.
+- **Invoking and listing need different qualifiers.** `invoke_qualifier` returns the alias, since
+  Lambda rejects an unqualified invoke of a durable function. `listing_qualifier` must return a
+  *version*: `ListDurableExecutionsByFunction` refuses an alias ("cannot filter durable executions
+  by alias"), whatever the API reference says. Merging the two functions reintroduces the bug.
+- **Resolving the alias scopes the listing to one deploy.** `sweep_executions` lists every version
+  up to `VERSION_SWEEP_DEPTH` and returns the versions it scanned, so callers report the span.
+  `executions --all-versions` uses it, and `resolve_execution` falls back to it.
+- **An execution's handle is a unique suffix of its name, never a row number.** A row number
+  names a different execution under every `--status`, `--qualifier` or `--all-versions`. The
+  table folds the name rather than truncating it, since the tail is what gets retyped.
+  `SUFFIX_SEARCH_LIMIT` is both the search window and the cap on `executions --limit`, so any
+  printed row is resolvable.
+- **`render_event` takes `hide_keys` with no default**, because a suppressed field leaves a record
+  that still reads as complete. Only the durable `logs` suppresses. `operation_tag` returns only
+  the keys it *rendered*, so no claimed key becomes unreachable.
+
+**S3 and Step Functions**
+
+- **`s3 export` and `s3 <alias> uri` must stay eval-safe.** `export` prints `export name='s3://…'`
+  lines for `eval "$(...)"` and `uri` prints a bare `s3://…`. Both use bare `print()`, so no
+  markup or ANSI escapes leak into command substitution.
+- **`s3 <alias> mount` is Linux-only.** It shells out to `mount-s3`, which is FUSE-based, and
+  refuses elsewhere with a pointer to `export`.
+- **Step Functions has two log sources.** `sfn <alias> logs` uses `GetExecutionHistory` (typed
+  transitions, Standard workflows only). `monitor` uses the state machine's CloudWatch log group so
+  it can merge with the Lambda groups, which is why a monitored state machine needs `log_group`.
+  Express workflows have no history API at all.
+- **Log tailing follows by time, not by stream.** Every tailer polls whole log groups through
+  `LogGroupCursor`. Lambda writes each execution environment to a new stream, and Glue creates its
+  error stream only on first stderr write. `tail_glue_run` isolates a run with
+  `logStreamNamePrefix=<run id>`. Waiting for streams via `describe_log_streams` costs minutes of
+  silence and misses a later-created error stream.
+
+**Config and output**
+
+- **`cfg is None` covers two states needing opposite answers**: no config (`config init`) and a
+  config that failed to load (`config edit`). `require_config` is the guard; it consults
+  `CONFIG_ERROR` first and returns the config.
+- **A config that does not load takes the whole pipeline tree with it.** `DectlGroup.get_command`
+  answers a pipeline name with the config failure instead of "No such command", only while
+  `cfg is None`.
+- **stdout is data and stderr is everything else.** Every refusal calls `output.error`, never
+  `console.print`. `success` and `info` stay on stdout because they are the answer.
+
+**Iceberg**
+
+- **A gzipped metadata file is named `<name>.gz.metadata.json`.** Java's `TableMetadataParser`
+  writes that form, and it is the only one pyiceberg decompresses. `.metadata.json.gz` is the
+  legacy spelling Java still reads. `GZIP_SUFFIXES` carries both, because the catalog decides which
+  one it points at.
+- **Every Iceberg summary counter is a string**, so `total-records` arrives as `'2000'`. Every read
+  goes through `summary_int`, and the fixtures write strings so a non-coercing reader fails.
+- **Glue holds a pointer, not the state.** `table_type` and `metadata_location` are all it knows. A
+  table missing either is not an Iceberg table, and dectl says so rather than raising a `KeyError`.
+- **The metadata file is the floor.** Everything below it is Avro, so `files` reports per-snapshot
+  summary counters. Reading Avro would mean pyiceberg plus pyarrow or s3fs, more than doubling the
+  install and slowing every invocation.
+- **The lineage and the log answer different questions.** A rollback appends a `snapshot-log`
+  entry and changes no parent pointer. `history`'s `ancestor` column is the only place it shows.
+- **A `diff` that could not reach its base reports no commits at all**: `linear` is false and the
+  path is empty.
 - **`compact`, `expire`, `orphans` and `rollback` are deliberately not here.** They are writes,
   and the mechanism is a real fork. pyiceberg reaches `expire` and `rollback` through
   `maintenance` and `manage_snapshots`, and as of 0.11.1 has no compaction or orphan removal at
@@ -440,25 +307,17 @@ and an eval'd `s3 export` stay clean.
 
 ## Tests
 
-`pytest` (`uv run pytest`). Unit tests mock boto3; command tests drive the real Typer apps via
-`typer.testing.CliRunner` against a factory-built app. Live AWS integration tests are marked
-`integration` and skipped unless `--run-integration` is passed — they create and delete real
-resources.
+`uv run pytest`. Unit tests mock boto3, and command tests drive the real Typer apps through
+`typer.testing.CliRunner`. Live AWS tests are marked `integration` and run only with
+`--run-integration`, because they create and delete real resources.
 
-**Anything that writes to AWS gets a live test, and the bar for leaving one out is high.**
-dectl is driven where a failure is read once, from its output, with no way to attach a debugger
-and no second attempt — so a write whose only evidence is a fake is a write nobody has seen
-work. The two exemptions are real cost and setup so extensive it would not be worth maintaining;
-neither is "the fake covers it", because the questions that matter here are the service's rules
-and a fake only holds the ones somebody already knew.
+**Anything that writes to AWS gets a live test.** A failure here is read once, from output, with
+no debugger and no second attempt, and a fake holds only the service rules somebody already knew.
+The exemptions are real cost and setup too extensive to maintain, never "the fake covers it".
 
-**Every resource under test is created and deleted by the test.** Never point one at a real
-pipeline's job: a test that depends on infrastructure it did not create fails on someone else's
-change and reports that as dectl being broken.
-
-A role is the exception, because it is a precondition rather than a subject — the same category
-as credentials and a region. `DECTL_IT_ROLE_ARN` names one, and the fixture creates its own when
-it is unset. That choice is what the suite's permissions turn on:
+**Every resource under test is created and deleted by the test**, never a real pipeline's job. A
+role is the exception, as a precondition like credentials. `DECTL_IT_ROLE_ARN` names one, and the
+fixture in `conftest.py` creates its own when it is unset:
 
 ```bash
 # Least privilege: glue:*, logs:*, s3:*, and iam:PassRole on that one role
@@ -468,57 +327,26 @@ DECTL_IT_ROLE_ARN=<arn> DECTL_IT_REGION=<region> uv run pytest --run-integration
 DECTL_IT_AWS_PROFILE=<profile> DECTL_IT_REGION=<region> uv run pytest --run-integration
 ```
 
-Prefer the first. A principal that can create a role and attach a policy to it can grant itself
-anything, so `iam:CreateRole` is an escalation path and delegating it safely takes a permissions
-boundary and a name condition — where passing one inert role to one service takes neither. It is
-also about two minutes faster per module, since IAM is eventually consistent and a fresh role is
-not immediately assumable by Glue.
-
-**Both fixtures live in `conftest.py`.** They were copied into each live module, and the copy is
-what let `DECTL_IT_ROLE_ARN` reach one module and not the other — a suite that half-honored the
-variable and failed on `iam:CreateRole` for the rest.
+Prefer the first. `iam:CreateRole` is an escalation path, and a fresh role costs about two minutes
+per module because IAM is eventually consistent.
 
 **What live Glue does that no fake would have told you.** Version 2.0 is retired and `CreateJob`
 refuses it outright. A job asking for `MaxCapacity` alongside version 3.0 or 4.0 comes back
-carrying `WorkerType` as well, already worker-sized. A DPU-only Spark job is still creatable, by
-omitting `GlueVersion` entirely, and that is the only way to build the fixture a
-DPU-to-worker migration needs.
+carrying `WorkerType` as well, already worker-sized. A DPU-only Spark job is still creatable by
+omitting `GlueVersion` entirely, which is the only way to build a DPU-to-worker migration fixture.
 
-**A fake enforces the service's constraints rather than replaying responses.** The constraints
-this repo's fakes encode: `FakeCloudWatchLogs` applies `startTime`, `endTime`,
-`logStreamNamePrefix` and `filterPattern` for real and *raises* on a `filter_log_events` with no
-`startTime`; `test_durable.py`'s Lambda fake raises on a `Qualifier` that is an alias.
-`test_iceberg.py`'s Glue fake raises `EntityNotFoundException` for an unknown table and can
-serve a table carrying neither Iceberg parameter, and its S3 fake hands back a stream rather
-than bytes and gzips the names *Iceberg* gzips. `test_lambda.py`'s session hands out a client
-bound to the botocore `Config` it was built with, and that client raises on an `Invoke` whose
-config still permits a retry. When you learn a new constraint from the real API, encode it in
-the fake.
+**A fake enforces the service's constraints rather than replaying responses.** `FakeCloudWatchLogs`
+applies `startTime`, `endTime`, `logStreamNamePrefix` and `filterPattern`, and raises on a
+`filter_log_events` with no `startTime`. The Lambda fakes raise on an alias `Qualifier` and on an
+`Invoke` whose client config still permits a retry. When you learn a new constraint from the real
+API, encode it in the fake. `FakeS3.ICEBERG_GZIP_SUFFIXES` is read off the writers (Java's
+`TableMetadataParser`, pyiceberg's `serializers.py`), not off `iceberg.GZIP_SUFFIXES`, so it
+covers a spelling the reader can miss.
 
-**botocore's retry loop sits below the client object, so no fake can reach it.** A duplicate
-invoke is issued without the code under test being called twice, which makes every fake-level
-assertion here a statement about the config rather than about the behavior. `test_invoke.py`
-closes that gap against a socket that accepts connections and answers none, which is what a
-still-running function looks like to botocore: it counts the requests that actually arrive. Every
-other assertion in the repo rests on `total_max_attempts: 1` meaning exactly one request, and
-those two tests are the only place that is established — in requests, which no client object can
-show. Neither needs AWS, and both run in about a second.
+**botocore's retry loop sits below the client object, so no fake reaches it.** `test_invoke.py`
+counts the requests arriving at a socket that accepts connections and never answers. It is the
+only place `total_max_attempts: 1` is shown to mean one request, and it needs no AWS.
 
-**`FakeS3.ICEBERG_GZIP_SUFFIXES` is read off the writers** — Java's `TableMetadataParser` and
-pyiceberg's `serializers.py` — rather than off `iceberg.GZIP_SUFFIXES`. That is what makes it
-cover a spelling the reader can miss. A fake restating the implementation's rule is that rule
-written twice, and it leaves something worse than a permissive fake: a green test named for the
-property, exercising it, and passing on the one input the code happens to get right. The tell is
-greppable, the same expression on both sides of the boundary.
-
-*Proposed, not settled.* That this generalizes to every fake here is an open standards proposal
-and Chris has not ruled on it. It describes the code above, so follow it in this file's
-fakes. Do not carry it elsewhere as approved policy, and do not cite it as a rule.
-
-**Some failures are invisible to any fake.** The two Glue tailing bugs both produced *correct*
-output, just minutes late: one waited on a log stream that a fake creates instantly, the other
-scanned a shared group from the start of its retention, which is fast when the fake holds three
-events. Latency against real data volume is not simulable, so `test_glue_run_integration.py`
-runs a real Python Shell job and asserts against a wall-clock budget. That module is the only
-one that costs money (a 1/16-DPU run, a fraction of a cent); the deploy integration test
-deliberately never starts a run.
+**Latency is invisible to any fake.** `test_glue_run_integration.py` runs a real Python Shell job
+against a wall-clock budget, and it is the only module that costs money. The deploy integration
+test never starts a run.
