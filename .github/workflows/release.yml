@@ -23,24 +23,9 @@ jobs:
 
   release:
     needs: validate
-    runs-on: ubuntu-latest
+    uses: datapointchris/reusable-workflows/.github/workflows/python-semantic-release.yml@v1
     permissions:
       contents: write
-    outputs:
-      released: ${{ steps.release.outputs.released }}
-      tag: ${{ steps.release.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: python-semantic-release/python-semantic-release@v9
-        id: release
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          # The GitHub release body is the changelog. python-semantic-release
-          # builds those notes from the same commits, and by a path independent
-          # of the changelog file, so no CHANGELOG.md is written or tracked.
-          changelog: "false"
 
   # A separate job in the same workflow, gated on the one above.
   #
