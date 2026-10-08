@@ -1,6 +1,6 @@
+import datetime as dt
 import json
 import time
-from datetime import datetime
 
 import pytest
 
@@ -167,7 +167,7 @@ def test_lambda_tail_does_not_reprint_boundary_events():
 def test_render_history_event_shows_type_and_state_name():
     event = {
         'type': 'TaskStateEntered',
-        'timestamp': datetime(2026, 7, 13, 12),
+        'timestamp': dt.datetime(2026, 7, 13, 12),
         'stateEnteredEventDetails': {'name': 'Transform'},
     }
     output = capture_history_event(event)
@@ -178,7 +178,7 @@ def test_render_history_event_shows_type_and_state_name():
 def test_render_history_event_surfaces_error_and_cause():
     event = {
         'type': 'ExecutionFailed',
-        'timestamp': datetime(2026, 7, 13, 12),
+        'timestamp': dt.datetime(2026, 7, 13, 12),
         'executionFailedEventDetails': {'error': 'States.TaskFailed', 'cause': 'lambda blew up'},
     }
     output = capture_history_event(event)
@@ -188,7 +188,7 @@ def test_render_history_event_surfaces_error_and_cause():
 
 
 def test_tail_execution_history_stops_at_terminal_event():
-    timestamp = datetime(2026, 7, 13, 12)
+    timestamp = dt.datetime(2026, 7, 13, 12)
     events = [
         {'id': 1, 'type': 'ExecutionStarted', 'timestamp': timestamp},
         {'id': 2, 'type': 'TaskStateEntered', 'timestamp': timestamp, 'stateEnteredEventDetails': {'name': 'Do'}},

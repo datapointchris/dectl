@@ -1,7 +1,7 @@
+import datetime as dt
 import io
 import json
 import zipfile
-from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -34,8 +34,8 @@ DURABLE_EXECUTION = {
     'DurableExecutionArn': DURABLE_ARN,
     'DurableExecutionName': 'order-1',
     'Status': 'SUCCEEDED',
-    'StartTimestamp': datetime(2026, 7, 30, 12),
-    'EndTimestamp': datetime(2026, 7, 30, 12, 1),
+    'StartTimestamp': dt.datetime(2026, 7, 30, 12),
+    'EndTimestamp': dt.datetime(2026, 7, 30, 12, 1),
 }
 
 

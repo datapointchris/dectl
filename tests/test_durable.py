@@ -1,5 +1,4 @@
-from datetime import datetime
-from datetime import timedelta
+import datetime as dt
 
 import pytest
 import typer
@@ -23,7 +22,7 @@ from dectl.durable import version_of
 from dectl.output import console
 from dectl.output import stderr_console
 
-STARTED = datetime(2026, 7, 30, 12)
+STARTED = dt.datetime(2026, 7, 30, 12)
 
 
 class FakeLambdaClient:
@@ -86,7 +85,7 @@ class FakeLambdaClient:
         return {'Events': []}
 
 
-def execution(name: str, status: str = 'SUCCEEDED', ended: datetime | None = None, version: str = '7', started=STARTED) -> dict:
+def execution(name: str, status: str = 'SUCCEEDED', ended: dt.datetime | None = None, version: str = '7', started=STARTED) -> dict:
     return {
         'DurableExecutionArn': f'arn:aws:lambda:us-east-2:1:function:fn:{version}/durable-execution/{name}/x',
         'DurableExecutionName': name,
@@ -167,8 +166,8 @@ def test_sweep_merges_versions_newest_execution_first():
     # executions under the old one; a sweep is what finds them again.
     client = FakeLambdaClient(
         [
-            execution('old-run', version='6', started=datetime(2026, 7, 30, 10)),
-            execution('new-run', started=datetime(2026, 7, 30, 12)),
+            execution('old-run', version='6', started=dt.datetime(2026, 7, 30, 10)),
+            execution('new-run', started=dt.datetime(2026, 7, 30, 12)),
         ],
         versions=['$LATEST', '6', '7'],
     )
@@ -229,11 +228,11 @@ def test_resolve_execution_exits_when_nothing_matches():
 def test_format_duration_covers_a_suspended_workflow():
     # Elapsed time spans durable waits, so it runs from seconds to months. Days are their own
     # unit for that reason: a wait of a quarter reported in hours is a number nobody can read.
-    assert format_duration(STARTED, STARTED + timedelta(seconds=4.2)) == '4.2s'
-    assert format_duration(STARTED, STARTED + timedelta(minutes=3, seconds=7)) == '3m07s'
-    assert format_duration(STARTED, STARTED + timedelta(hours=5, minutes=5)) == '5h05m'
-    assert format_duration(STARTED, STARTED + timedelta(hours=26, minutes=5)) == '1d02h'
-    assert format_duration(STARTED, STARTED + timedelta(days=91)) == '91d00h'
+    assert format_duration(STARTED, STARTED + dt.timedelta(seconds=4.2)) == '4.2s'
+    assert format_duration(STARTED, STARTED + dt.timedelta(minutes=3, seconds=7)) == '3m07s'
+    assert format_duration(STARTED, STARTED + dt.timedelta(hours=5, minutes=5)) == '5h05m'
+    assert format_duration(STARTED, STARTED + dt.timedelta(hours=26, minutes=5)) == '1d02h'
+    assert format_duration(STARTED, STARTED + dt.timedelta(days=91)) == '91d00h'
     assert format_duration(STARTED, None) == ''
 
 
@@ -287,7 +286,7 @@ def test_render_durable_event_shows_a_wait_duration():
 
 def test_render_execution_header_surfaces_the_failure_reason():
     # GetDurableExecution returns Error unwrapped, unlike the history events' Payload envelope.
-    failed = execution('order-9', status='FAILED', ended=STARTED + timedelta(seconds=5))
+    failed = execution('order-9', status='FAILED', ended=STARTED + dt.timedelta(seconds=5))
     failed['Error'] = {'ErrorType': 'RuntimeError', 'ErrorMessage': 'step exhausted retries'}
 
     with console.capture() as capture:
