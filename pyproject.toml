@@ -118,11 +118,12 @@ ignore = ["FURB184"]
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]
 commit_message = "build(release): {version}"
-build_command = """
-    pip install uv
+# Reads the uv-lock hook's rev, the one uv release every uv.lock writer runs.
+build_command = '''
+    pip install "uv==$(python -c 'import re; print(re.search(r"uv-pre-commit\s+rev: \"?([\w.]+)", open(".pre-commit-config.yaml").read())[1])')"
     uv lock --upgrade-package dectl
     git add uv.lock
-"""
+'''
 
 [tool.pyright]
 typeCheckingMode = "standard"
