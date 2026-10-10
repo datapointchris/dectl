@@ -39,7 +39,7 @@ jobs:
   publish:
     needs: release
     if: needs.release.outputs.released == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -48,7 +48,7 @@ jobs:
           # past what was released.
           ref: ${{ needs.release.outputs.tag }}
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
 
       # The version is static in pyproject.toml and python-semantic-release
       # wrote it into the tagged commit, so building here reads the released
