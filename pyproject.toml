@@ -3,7 +3,7 @@ name = "dectl"
 version = "4.1.1"
 description = "Data engineering control CLI for managing AWS pipelines"
 authors = [{ name = "Chris Birch", email = "datapointchris@gmail.com" }]
-license = { text = "MIT" }
+license = "MIT"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
