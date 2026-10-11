@@ -13,6 +13,4 @@ build/
 .coverage
 htmlcov/
 .DS_Store
-.planning/
-.planning
 coverage.xml
