@@ -1,6 +1,6 @@
 [project]
 name = "dectl"
-version = "4.1.1"
+dynamic = ["version"]
 description = "Data engineering control CLI for managing AWS pipelines"
 authors = [{ name = "Chris Birch", email = "datapointchris@gmail.com" }]
 license = "MIT"
@@ -34,13 +34,27 @@ dev = [
     "ruff==0.12.5",
 ]
 
-[build-system]
-requires = ["uv_build>=0.12.2,<0.13.0"]
-build-backend = "uv_build"
+# The release tag is the version. python-semantic-release finds no file to
+# stamp, so it tags the merge commit itself and writes no release commit.
+# uv_build cannot do this: its metadata has no dynamic version field.
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
 
-[tool.uv.build-backend]
-module-name = "dectl"
-module-root = "src"
+[tool.uv-dynamic-versioning]
+style = "semver"
+
+# A new commit or tag changes the version, so it has to invalidate uv's cache.
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { git = { commit = true, tags = true } }]
+
+# The published sdist holds the package and its metadata, and none of the
+# repo's tooling or tests, as uv_build's did.
+[tool.hatch.build.targets.sdist]
+only-include = ["src"]
+
+[build-system]
+requires = ["hatchling", "uv-dynamic-versioning"]
+build-backend = "hatchling.build"
 
 [tool.ruff]
 line-length = 140
@@ -124,16 +138,6 @@ uri-ignore-words-list = "*"
 [tool.refurb]
 enable_all = true
 ignore = ["FURB184"]
-
-[tool.semantic_release]
-version_toml = ["pyproject.toml:project.version"]
-commit_message = "build(release): {version}"
-# Reads the uv-lock hook's rev, the one uv release every uv.lock writer runs.
-build_command = '''
-    pip install "uv==$(python -c 'import re; print(re.search(r"uv-pre-commit\s+rev: \"?([\w.]+)", open(".pre-commit-config.yaml").read())[1])')"
-    uv lock --upgrade-package dectl
-    git add uv.lock
-'''
 
 [tool.pyright]
 typeCheckingMode = "standard"

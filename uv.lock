@@ -163,7 +163,6 @@ wheels = [
 
 [[package]]
 name = "dectl"
-version = "4.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
