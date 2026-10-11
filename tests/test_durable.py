@@ -5,6 +5,7 @@ import typer
 from botocore.exceptions import ClientError
 
 from dectl.config import LambdaConfig
+from dectl.durable import SUFFIX_SEARCH_LIMIT
 from dectl.durable import epoch_millis
 from dectl.durable import execution_by_suffix
 from dectl.durable import execution_to_dict
@@ -408,8 +409,6 @@ def test_the_executions_table_does_not_truncate_the_name():
 def test_the_suffix_window_covers_everything_the_listing_can_show():
     # The two numbers are one number: a tail is typed off a listing, so a row the table can print
     # and the resolver cannot reach is an ambiguity nobody sees.
-    from dectl.durable import SUFFIX_SEARCH_LIMIT
-
     listed = [execution(f'run-{index:03d}') for index in range(SUFFIX_SEARCH_LIMIT)]
     client = FakeLambdaClient(listed, versions=['$LATEST', '7'])
 

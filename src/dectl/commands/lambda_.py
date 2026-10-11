@@ -29,6 +29,11 @@ from dectl.durable import sweep_executions
 from dectl.durable import tail_durable_history
 from dectl.env import render_env_model
 from dectl.env import substitute_env
+from dectl.invoke import invoke_read_timeout
+from dectl.invoke import issue_invoke
+from dectl.invoke import make_invoke_client
+from dectl.invoke import timed_out_message
+from dectl.invoke import unreachable_message
 from dectl.logs import DURABLE_OPERATION_ID_KEYS
 from dectl.logs import tail_lambda_logs
 from dectl.output import console
@@ -37,6 +42,7 @@ from dectl.output import error
 from dectl.output import info
 from dectl.output import success
 from dectl.payloads import read_payload
+from dectl.session import make_session
 from dectl.values import FAULT_WORDING
 from dectl.values import SHOW_RESOLVED
 from dectl.values import PathKind
@@ -146,7 +152,6 @@ def make_lambda_function_app(
         new code. Editing $LATEST alone never changes a published version, which
         is why an alias-triggered function keeps running old code.
         """
-        from dectl.session import make_session
 
         # Before the refusal, because it is what raises the env-effect warning. A `--env` that
         # changed no AWS name is exactly what a reader needs to know about a deploy, and a
@@ -231,12 +236,6 @@ def add_standard_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, conf
         The wait is the function's own Timeout plus a margin, and a call that does
         not answer within it is reported rather than retried.
         """
-        from dectl.invoke import invoke_read_timeout
-        from dectl.invoke import issue_invoke
-        from dectl.invoke import make_invoke_client
-        from dectl.invoke import timed_out_message
-        from dectl.invoke import unreachable_message
-        from dectl.session import make_session
 
         fn = resolved()
         payload = read_payload(payload_file)
@@ -261,7 +260,6 @@ def add_standard_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, conf
         follow: Annotated[bool, typer.Option('--follow', '-f', help='Keep tailing new log events (Ctrl-C to stop).')] = False,
     ) -> None:
         """Show CloudWatch logs for a Lambda function's recent activity (add --follow to tail)."""
-        from dectl.session import make_session
 
         fn = resolved()
         logs_client = make_session(config).client('logs')
@@ -308,12 +306,6 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         code. Synchronous invocation waits for the whole execution and is capped at 15 minutes —
         use --async for anything longer. A wait that expires is reported rather than retried.
         """
-        from dectl.invoke import invoke_read_timeout
-        from dectl.invoke import issue_invoke
-        from dectl.invoke import make_invoke_client
-        from dectl.invoke import timed_out_message
-        from dectl.invoke import unreachable_message
-        from dectl.session import make_session
 
         fn = resolved()
         payload = read_payload(payload_file)
@@ -395,7 +387,6 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         listing to the new version and leaves earlier runs under the old one; `--all-versions`
         merges recent versions to find them.
         """
-        from dectl.session import make_session
 
         fn = resolved()
         client = make_session(config).client('lambda')
@@ -448,7 +439,6 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         actually did — which step failed, what it returned, how long a wait suspended for. The
         `logs` verb is the complement: what the function's own logger printed while doing it.
         """
-        from dectl.session import make_session
 
         fn = resolved()
         client = make_session(config).client('lambda')
@@ -500,7 +490,6 @@ def add_durable_verbs(fn_app: typer.Typer, pipeline_name: str, alias: str, confi
         folded away: the operation shows as a tag beside the level, and the rest is behind
         --context. `--all` keeps the execution ARN, since across executions it varies.
         """
-        from dectl.session import make_session
 
         fn = resolved()
         session = make_session(config)

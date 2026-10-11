@@ -21,6 +21,7 @@ from dectl.output import error
 from dectl.output import info
 from dectl.output import success
 from dectl.prompt import confirm_or_exit
+from dectl.session import make_session
 from dectl.values import join_key
 from dectl.values import join_uri
 from dectl.values import refuse_unusable_values
@@ -484,7 +485,6 @@ def make_glue_job_app(
         Changes to the job definition itself — every field the config names — are shown
         and confirmed before they are applied, since Terraform owns those once a pipeline is
         established. When nothing differs, the definition is left untouched."""
-        from dectl.session import make_session
 
         job = resolved()
         # Resolve and check before anything reaches AWS, so --plan refuses what deploy refuses.
@@ -502,7 +502,6 @@ def make_glue_job_app(
         follow: Annotated[bool, typer.Option('--follow', '-f', help="Tail the run's logs until it finishes.")] = False,
     ) -> None:
         """Start the Glue job. Prints the run id; add --follow to stream its output and error logs."""
-        from dectl.session import make_session
 
         start_glue_run(make_session(config), resolved(), follow=follow)
 
@@ -518,7 +517,6 @@ def make_glue_job_app(
         follow: Annotated[bool, typer.Option('--follow', '-f', help='Keep tailing while the run is still going.')] = False,
     ) -> None:
         """Show CloudWatch output and error logs for a Glue job run (defaults to the latest run)."""
-        from dectl.session import make_session
 
         job = resolved()
         session = make_session(config)
@@ -545,7 +543,6 @@ def make_glue_job_app(
         as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
     ) -> None:
         """List recent runs of this Glue job with their state and timing."""
-        from dectl.session import make_session
 
         job = resolved()
         glue = make_session(config).client('glue')

@@ -3,6 +3,7 @@ import re
 import time
 from typing import Annotated
 
+import httpx2
 import typer
 
 from dectl.config import CONFIG_PATH
@@ -26,8 +27,6 @@ def resolve_env(value: str) -> str:
 
 
 def jenkins_request(config: DectlConfig, method: str, path: str, **kwargs):
-    import httpx2
-
     jenkins = config.jenkins
     if not jenkins:
         error(f'no jenkins config in {CONFIG_PATH}')

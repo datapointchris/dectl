@@ -193,9 +193,7 @@ class FakeSession:
 
 def patch_session(monkeypatch, lambda_client, logs_client=None) -> FakeSession:
     session = FakeSession(lambda_client, logs_client)
-    # The command lazy-imports make_session inside the function, so patching the source binding
-    # takes effect at call time.
-    monkeypatch.setattr('dectl.session.make_session', lambda config: session)
+    monkeypatch.setattr('dectl.commands.lambda_.make_session', lambda config: session)
     return session
 
 
@@ -514,7 +512,7 @@ def deploy_app(monkeypatch, tmp_path, client, source_dir: str = 'code'):
             },
         }
     )
-    monkeypatch.setattr('dectl.session.make_session', lambda _config: FakeSession(client))
+    monkeypatch.setattr('dectl.commands.lambda_.make_session', lambda _config: FakeSession(client))
     return make_lambda_app('proj', config.pipelines['proj'], config)
 
 
@@ -558,7 +556,7 @@ def test_lambda_deploy_reports_the_config_fault_before_building_a_session(monkey
     def refuse(_config):
         raise RuntimeError('ProfileNotFound: the config profile (no-such-profile) could not be found')
 
-    monkeypatch.setattr('dectl.session.make_session', refuse)
+    monkeypatch.setattr('dectl.commands.lambda_.make_session', refuse)
     config = DectlConfig.model_validate(
         {
             'defaults': {'account_id': '1'},

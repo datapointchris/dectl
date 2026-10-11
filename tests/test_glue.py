@@ -1052,7 +1052,7 @@ def test_a_refused_definition_change_uploads_nothing(monkeypatch, tmp_path):
     (tmp_path / 'copy.py').write_text('x')
     config = deploy_config(tmp_path, max_capacity=1)
     session = FakeDeploySession({'Name': 'my-job', 'Role': 'old-role', 'WorkerType': 'G.1X', 'NumberOfWorkers': 2})
-    monkeypatch.setattr('dectl.session.make_session', lambda _config: session)
+    monkeypatch.setattr('dectl.commands.glue.make_session', lambda _config: session)
 
     result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy', '--yes'])
 
@@ -1067,7 +1067,7 @@ def test_a_refused_confirmation_uploads_nothing(monkeypatch, tmp_path):
     (tmp_path / 'copy.py').write_text('x')
     config = deploy_config(tmp_path)
     session = FakeDeploySession({'Name': 'my-job', 'Role': 'old-role'})
-    monkeypatch.setattr('dectl.session.make_session', lambda _config: session)
+    monkeypatch.setattr('dectl.commands.glue.make_session', lambda _config: session)
 
     result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy'])
 
@@ -1081,7 +1081,7 @@ def test_plan_refuses_a_missing_script_rather_than_reporting_a_clean_diff(monkey
     # makes the one command run to answer "will this work" the one that cannot.
     config = deploy_config(tmp_path)
     session = FakeDeploySession({'Name': 'my-job', 'Role': 'old-role'})
-    monkeypatch.setattr('dectl.session.make_session', lambda _config: session)
+    monkeypatch.setattr('dectl.commands.glue.make_session', lambda _config: session)
 
     result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy', '--plan'])
 
@@ -1116,7 +1116,7 @@ def test_deploy_handles_a_script_whose_name_carries_the_env_token(monkeypatch, t
         }
     )
     session = FakeDeploySession({'Name': 'my-job', 'Role': 'old-role'})
-    monkeypatch.setattr('dectl.session.make_session', lambda _config: session)
+    monkeypatch.setattr('dectl.commands.glue.make_session', lambda _config: session)
 
     result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy', '--yes'])
 
@@ -1131,7 +1131,7 @@ def test_deploy_uploads_every_script_and_writes_the_definition(monkeypatch, tmp_
     (tmp_path / 'copy.py').write_text('x')
     config = deploy_config(tmp_path)
     session = FakeDeploySession({'Name': 'my-job', 'Role': 'old-role'})
-    monkeypatch.setattr('dectl.session.make_session', lambda _config: session)
+    monkeypatch.setattr('dectl.commands.glue.make_session', lambda _config: session)
 
     result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy', '--yes'])
 

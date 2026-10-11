@@ -17,6 +17,11 @@ import re
 # is the direction every assertion here already reads.
 os.environ.pop('FORCE_COLOR', None)
 
+import json
+import time
+import uuid
+
+import boto3
 import pytest
 from botocore.exceptions import ClientError
 from typer.testing import CliRunner
@@ -199,7 +204,6 @@ def session():
 
     Region and profile come from the standard AWS environment, with `DECTL_IT_AWS_PROFILE` and
     `DECTL_IT_REGION` overriding when a specific account is wanted."""
-    import boto3
 
     profile = os.environ.get('DECTL_IT_AWS_PROFILE')
     region = os.environ.get('DECTL_IT_REGION') or os.environ.get('AWS_REGION') or os.environ.get('AWS_DEFAULT_REGION')
@@ -237,9 +241,6 @@ def glue_role_arn(session):
 
     A supplied role has to carry `AWSGlueServiceRole` or its equivalent, because the run module's
     job reads its script from S3."""
-    import json
-    import time
-    import uuid
 
     supplied = os.environ.get('DECTL_IT_ROLE_ARN')
     if supplied:

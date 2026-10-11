@@ -336,7 +336,8 @@ def test_a_zero_limit_is_answered_without_reaching_aws(monkeypatch):
         }
     )
     pipeline = config.pipelines['proj']
-    monkeypatch.setattr('dectl.session.make_session', lambda _config: RefusingSession())
+    monkeypatch.setattr('dectl.commands.glue.make_session', lambda _config: RefusingSession())
+    monkeypatch.setattr('dectl.commands.lambda_.make_session', lambda _config: RefusingSession())
     monkeypatch.setattr('dectl.commands.stepfunctions.make_session', lambda _config: RefusingSession())
 
     invocations = [
