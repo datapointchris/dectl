@@ -166,7 +166,7 @@ pipelines:
     # what they post. Needs the top-level `jenkins` block as well; either one missing and the
     # command is not built.
     jenkins:
-      job_path: data-engineering/job/example-pipeline-deploy
+      job_path: data-engineering/example-pipeline-deploy
       parameters:
         ENVIRONMENT: "{env}"
 """
