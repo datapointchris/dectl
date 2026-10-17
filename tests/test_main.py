@@ -299,7 +299,7 @@ def reference_instance_verbs() -> set[tuple[str, str]]:
 
 def test_the_reference_names_every_instance_verb():
     # A verb the reference omits is invisible on a fresh machine, where --help shows no pipeline.
-    # Derived from the tree, so a verb added to any resource has to reach the reference too.
+    # Equal rather than contained, so a dropped verb and a stale reference row both fail here.
     tree = whole_tree()
     verbs = {
         (resource, verb)
@@ -308,8 +308,7 @@ def test_the_reference_names_every_instance_verb():
         for verb in getattr(alias, 'commands', {})
     }
 
-    assert ('sfn', 'deploy') in verbs
-    assert verbs - reference_instance_verbs() == set()
+    assert verbs == reference_instance_verbs()
 
 
 def test_every_limit_in_the_binary_refuses_a_negative():

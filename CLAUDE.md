@@ -24,11 +24,13 @@ type, you touch two places: the resource's own `make_*_app` module, and the pipe
 The command shape is `dectl PIPELINE RESOURCE ALIAS VERB [OPTIONS]` — the **verb is last** so a
 deploy → run → logs loop on one resource changes only the trailing word. One rule governs the
 whole surface: **aliased = one thing, unaliased = the set/pipeline.** Instance verbs take an
-alias (`glue JOB run`, `s3 BUCKET mount`); set verbs take none (`s3 export`, `release`, `list`,
-`monitor`). Scope is structural: the argument's presence selects it, never a flag.
-`dectl reference` is the static-grammar command a config-assembled tree needs, and `--json` on
-reads goes through
-`output.emit_json` — bare-print, so pipes stay clean.
+alias (`glue JOB run`, `s3 BUCKET mount`); set verbs take none (`s3 export`, `jenkins status`,
+`list`, `monitor`). Scope is structural: the argument's presence selects it, never a flag.
+Whether a command writes is structural too: a write's rehearsal is a `plan` verb beside it,
+never a flag on the write, and no namespace acts bare. `glue` and `sfn` `plan` write nothing.
+A resource is named for the system it drives, so the Jenkins job is `jenkins`, never a word
+for what its builds do. `dectl reference` is the static-grammar command a config-assembled tree
+needs, and `--json` on reads goes through `output.emit_json` — bare-print, so pipes stay clean.
 
 ## Shortcuts: one stroke for a whole path
 
@@ -69,9 +71,14 @@ names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
   the `s3` app itself, beside the per-bucket alias sub-apps.
 - `lambda`/`sfn` `run` take payloads through `payloads.read_payload`: from `--payload-file F` or
   from stdin as `-`, never from an inline string argument.
-- `sfn` `deploy` exists only for a machine naming a `definition_file`: config decides whether the
-  verb is there, as `durable` does for the lambda verbs. Rendering a definition lives in
-  `src/dectl/asl.py`.
+- `sfn` `plan` and `deploy` exist only for a machine naming a `definition_file`: config decides
+  whether the verbs are there, as `durable` does for the lambda verbs. Both run one `prepare`, so
+  `plan` refuses what `deploy` refuses. Rendering a definition lives in `src/dectl/asl.py`.
+- `jenkins` has no aliases, since a pipeline has one job. Its writes are the keys of the job's
+  `actions`, each posting `parameters` with its own on top, beside `status` and `logs`. dectl
+  names no action itself: what `ACTION=dry_run` does is the Jenkinsfile's, which dectl never
+  sees, so a verb dectl named would be a guess at it. Every action queues a build, whatever it
+  is called, and that build is the one `status` and `logs` then read.
 - `monitor` is a **pipeline-level** command registered on `pipeline_app`, because it spans
   several resources. It tails every resource its `monitor` config block selects as one
   time-ordered stream via `logs.tail_log_groups`.
@@ -87,7 +94,10 @@ repoints. Its `durable` flag selects the durable verb set and is the invocation 
 source. `step_functions` maps alias → `{name, log_group, definition_file,
 definition_substitutions, live_alias}`; the log group is needed only for `monitor`, and the other
 three only for `deploy`. `iceberg_tables` maps alias → `{database, table}`, both carrying
-`{env}`. `monitor` is its own block listing which lambdas and state machines to tail.
+`{env}`. `monitor` is its own block listing which lambdas and state machines to tail. A
+pipeline's `jenkins` names a `job_path` (`folder/job`, which `job_url_path` expands), the
+`parameters` every build posts, and `actions`. An action cannot be named `status` or `logs`,
+because it would share that command's name and only one of the two would survive.
 
 **`TEMPLATE_CONFIG` is the single source for the example config.** `config init` writes it and
 `config example` prints it (highlighted on a TTY, plain when piped). It exercises every option, and
@@ -152,8 +162,8 @@ environment's own name carries the token.
 `test_every_site_composing_a_script_destination_substitutes_exactly_once` drives all four.
 
 `deploy` runs everything that can refuse before it writes anything: `resolve_scripts`, then
-`plan_glue_job_update`, then the upload, then `apply_glue_job_update`. A refusal after the upload
-leaves `ScriptLocation` pointing at code the user was just told not to deploy. A config naming
+`confirm_glue_job_update`, then the upload, then `apply_glue_job_update`. A refusal after the
+upload leaves `ScriptLocation` pointing at code the user was just told not to deploy. A config naming
 both sizing models, or half the worker pair, is refused by `GlueJobConfig` itself. That is a fact
 about the config alone, so it is a field validator rather than one of `values.py`'s faults.
 
@@ -211,8 +221,8 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
   job *definition* is Terraform's once a pipeline is established, but dectl can still write it
   before then. So `deploy` diffs its computed update against the live definition, skips
   `UpdateJob` when nothing differs, and otherwise renders the field-level diff and confirms.
-  `--plan` shows it and exits without uploading; `--yes` skips the prompt. The diff also reports
-  keys dectl *drops*.
+  `plan` shows it through `diff_glue_job_update` and uploads nothing; `deploy --yes` skips the
+  prompt. The diff also reports keys dectl *drops*.
 - **`DEFINITION_FIELDS` and `NESTED_DEFINITION_FIELDS` are the declared surface, not everything a
   deploy writes.** `rg -n "job_update\['" src/dectl/commands/glue.py` returns the four written by
   hand (`Role`, `Command`, `Connections`, `DefaultArguments`). An omitted declared key means

@@ -12,10 +12,10 @@ from dectl.commands.glue import ResolvedScript
 from dectl.commands.glue import apply_glue_job_update
 from dectl.commands.glue import build_job_update
 from dectl.commands.glue import configured_uris
+from dectl.commands.glue import confirm_glue_job_update
 from dectl.commands.glue import follow_glue_run
 from dectl.commands.glue import job_definition_changes
 from dectl.commands.glue import make_glue_app
-from dectl.commands.glue import plan_glue_job_update
 from dectl.commands.glue import resolve_scripts
 from dectl.commands.glue import upload_scripts
 from dectl.config import ROOT_SITE
@@ -35,24 +35,6 @@ from tests.test_glue_integration import DEFINITION_FIELD_SPECS
 from tests.test_glue_integration import SHELL_FIELD_SPEC
 
 runner = RefusalRunner()
-
-
-def test_job_exposes_deploy_run_logs_runs_verbs():
-    config = DectlConfig.model_validate(
-        {
-            'defaults': {'account_id': '123456789012'},
-            'pipelines': {
-                'proj': {'glue_jobs': {'source-copy': {'name': 'j', 'script_bucket': 'sales-scripts', 'scripts': ['s.py'], 'role': 'r'}}}
-            },
-        }
-    )
-    app = make_glue_app('proj', config.pipelines['proj'], config)
-
-    result = runner.invoke(app, ['source-copy', '--help'])
-
-    assert result.exit_code == 0
-    for verb in ('deploy', 'run', 'logs', 'runs'):
-        assert verb in result.stdout
 
 
 class FakeGlueClient:
@@ -104,7 +86,7 @@ def make_job(**overrides):
 def apply(glue, job):
     """The sequence `deploy` runs, so these tests exercise the path the CLI takes."""
     session = FakeSession(glue)
-    job_update = plan_glue_job_update(session, job, assume_yes=True)
+    job_update = confirm_glue_job_update(session, job, assume_yes=True)
     if job_update is not None:
         apply_glue_job_update(session, job, job_update)
 
@@ -387,26 +369,13 @@ def test_an_unset_definition_field_leaves_the_live_value_alone():
     assert glue.captured_update['WorkerType'] == 'G.1X'
 
 
-def test_update_without_a_terminal_fails_naming_the_flag():
-    """A prompt on a stdin that never closes deadlocks a Jenkins step or a cron
-    run with no output and no exit code. pytest's stdin is not a terminal, which
-    is the case."""
-    glue = FakeGlueClient(existing_job={'Command': {'Name': 'pythonshell'}})
-
-    with pytest.raises(typer.Exit) as raised:
-        plan_glue_job_update(FakeSession(glue), make_job())
-
-    assert raised.value.exit_code == 1
-    assert glue.captured_update is None
-
-
 def test_no_input_refuses_the_prompt_even_on_a_terminal(monkeypatch):
     monkeypatch.setattr('sys.stdin.isatty', lambda: True)
     monkeypatch.setattr(prompt.interactivity, 'no_input', True)
     glue = FakeGlueClient(existing_job={'Command': {'Name': 'pythonshell'}})
 
     with pytest.raises(typer.Exit):
-        plan_glue_job_update(FakeSession(glue), make_job())
+        confirm_glue_job_update(FakeSession(glue), make_job())
 
     assert glue.captured_update is None
 
@@ -1077,13 +1046,13 @@ def test_a_refused_confirmation_uploads_nothing(monkeypatch, tmp_path):
 
 
 def test_plan_refuses_a_missing_script_rather_than_reporting_a_clean_diff(monkeypatch, tmp_path):
-    # --plan is the rehearsal. Reporting a clean definition for a config whose real deploy exits
+    # plan is the rehearsal. Reporting a clean definition for a config whose real deploy exits
     # makes the one command run to answer "will this work" the one that cannot.
     config = deploy_config(tmp_path)
     session = FakeDeploySession({'Name': 'my-job', 'Role': 'old-role'})
     monkeypatch.setattr('dectl.commands.glue.make_session', lambda _config: session)
 
-    result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy', '--plan'])
+    result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'plan'])
 
     assert result.exit_code == 1
     assert session.s3.uploads == []

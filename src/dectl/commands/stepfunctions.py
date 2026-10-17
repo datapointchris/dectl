@@ -4,6 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated
 from typing import Any
+from typing import NamedTuple
 from typing import NoReturn
 
 import typer
@@ -128,7 +129,7 @@ def refuse_invalid_definition(client, definition: str, machine_type: str) -> Non
     """Refuse a definition Step Functions would reject, and print any warning it raises.
 
     `UpdateStateMachine` refuses an invalid definition itself. Validating first is what gives
-    `--plan` the same refusal. A principal without the permission is warned rather than stopped,
+    `plan` the same refusal. A principal without the permission is warned rather than stopped,
     because the write still checks."""
     try:
         response = client.validate_state_machine_definition(definition=definition, type=machine_type, severity='WARNING')
@@ -198,7 +199,19 @@ def publish_and_move_alias(client, sfn: StepFunctionConfig, machine_arn: str, re
     success(f'published {sfn.name} version {version}: alias {sfn.live_alias} -> version {version}')
 
 
-def add_deploy_verb(
+class PreparedDefinition(NamedTuple):
+    """A rendered definition that passed every refusal, beside the live state it was diffed against."""
+
+    client: Any
+    sfn: StepFunctionConfig
+    machine_arn: str
+    text: str
+    changed: bool
+    revision_id: str | None
+    routing: list[dict]
+
+
+def add_definition_verbs(
     sfn_app: typer.Typer,
     pipeline_name: str,
     alias: str,
@@ -207,32 +220,9 @@ def add_deploy_verb(
     config: DectlConfig,
     resolved: Callable[[], StepFunctionConfig],
 ) -> None:
-    """`deploy`, for a machine whose config names the file its definition is rendered from."""
+    """`plan` and `deploy`, for a machine whose config names the file its definition is rendered from."""
 
-    @sfn_app.command(
-        epilog=(
-            'Examples:\n\n'
-            f'dectl {pipeline_name} sfn {alias} deploy — render the definition file and make it the live definition\n\n'
-            f'dectl {pipeline_name} sfn {alias} deploy --plan — show the diff, write nothing\n\n'
-            f'dectl {pipeline_name} sfn {alias} deploy --publish — also publish a version and move the live alias'
-        ),
-    )
-    def deploy(
-        plan: Annotated[bool, typer.Option('--plan', help='Show the definition diff and exit without writing.')] = False,
-        publish: Annotated[
-            bool,
-            typer.Option('--publish', '-p', help='Publish the definition as a version and move the configured live_alias to it.'),
-        ] = False,
-    ) -> None:
-        """Render the definition file and make it the state machine's definition (starts no execution).
-
-        Only the definition is written: the role, logging and tracing stay as Terraform set them.
-        When the rendered definition matches the live one byte for byte, nothing is written. An
-        execution started within a few seconds of a deploy may still run the previous definition.
-
-        `run` starts the latest definition, so it picks up a deploy without --publish. Anything
-        starting executions through an alias keeps the old one until --publish moves that alias."""
-
+    def prepare(publish: bool) -> PreparedDefinition:
         # Before the refusal, because it is what raises the env-effect warning, as at the lambda
         # and glue doors.
         sfn = resolved()
@@ -267,25 +257,69 @@ def add_deploy_verb(
             info(f'{sfn.name}: the definition differs in formatting only, with no change to its meaning')
         else:
             print_definition_diff(definition_diff(live_definition, rendered, f'{sfn.name} (live)', str(source)))
+        return PreparedDefinition(client, sfn, machine_arn, rendering.text, changed, live.get('revisionId'), routing)
 
-        if plan:
-            if publish:
-                moves = (
-                    f'move alias {sfn.live_alias} off {describe_routing(routing)}'
-                    if sfn.live_alias
-                    else 'move no alias (live_alias is unset)'
-                )
-                info(f'--publish would publish a version of this definition and {moves}')
+    @sfn_app.command(
+        epilog=(
+            'Examples:\n\n'
+            f'dectl {pipeline_name} sfn {alias} plan — show the diff against the live definition\n\n'
+            f'dectl {pipeline_name} sfn {alias} plan --publish — also say which version the live alias would leave'
+        ),
+    )
+    def plan(
+        publish: Annotated[
+            bool,
+            typer.Option('--publish', '-p', help='Also say which version deploy --publish would move the live_alias off.'),
+        ] = False,
+    ) -> None:
+        """Render the definition file and show what deploy would change, writing nothing.
+
+        It refuses every definition deploy refuses, so a clean plan is a deploy that will run."""
+
+        prepared = prepare(publish)
+        if not publish:
             return
+        sfn = prepared.sfn
+        moves = (
+            f'move alias {sfn.live_alias} off {describe_routing(prepared.routing)}'
+            if sfn.live_alias
+            else 'move no alias (live_alias is unset)'
+        )
+        info(f'deploy --publish would publish a version of this definition and {moves}')
 
-        revision_id = live.get('revisionId')
-        if changed:
+    @sfn_app.command(
+        epilog=(
+            'Examples:\n\n'
+            f'dectl {pipeline_name} sfn {alias} deploy — render the definition file and make it the live definition\n\n'
+            f'dectl {pipeline_name} sfn {alias} deploy --publish — also publish a version and move the live alias'
+        ),
+    )
+    def deploy(
+        publish: Annotated[
+            bool,
+            typer.Option('--publish', '-p', help='Publish the definition as a version and move the configured live_alias to it.'),
+        ] = False,
+    ) -> None:
+        """Render the definition file and make it the state machine's definition (starts no execution).
+
+        Only the definition is written: the role, logging and tracing stay as Terraform set them.
+        When the rendered definition matches the live one byte for byte, nothing is written. An
+        execution started within a few seconds of a deploy may still run the previous definition.
+        `plan` shows the same diff and writes nothing.
+
+        `run` starts the latest definition, so it picks up a deploy without --publish. Anything
+        starting executions through an alias keeps the old one until --publish moves that alias."""
+
+        prepared = prepare(publish)
+        revision_id = prepared.revision_id
+        if prepared.changed:
             # The rendered text rather than a re-serialization of it: Terraform compares the live
             # string with its own rendering, so these bytes are what keeps its next plan clean.
-            revision_id = client.update_state_machine(stateMachineArn=machine_arn, definition=rendering.text)['revisionId']
-            success(f'updated the definition of {sfn.name}')
+            update = prepared.client.update_state_machine(stateMachineArn=prepared.machine_arn, definition=prepared.text)
+            revision_id = update['revisionId']
+            success(f'updated the definition of {prepared.sfn.name}')
         if publish:
-            publish_and_move_alias(client, sfn, machine_arn, revision_id)
+            publish_and_move_alias(prepared.client, prepared.sfn, prepared.machine_arn, revision_id)
 
 
 def make_sfn_machine_app(
@@ -293,9 +327,9 @@ def make_sfn_machine_app(
 ) -> typer.Typer:
     """Build the per-machine sub-app: `dectl PIPELINE sfn <alias> <verb>`.
 
-    `deploy` is added only for a machine naming a `definition_file`, since it has nothing to send
-    without one. The panel shows the config as written, because it is built before `--env` is
-    parsed."""
+    `plan` and `deploy` are added only for a machine naming a `definition_file`, since they have
+    nothing to render without one. The panel shows the config as written, because it is built
+    before `--env` is parsed."""
     panel = [f'State machine [bold]{alias}[/bold] → {sfn_config.name}']
     if sfn_config.definition_file is not None:
         panel.append(f'Definition rendered from: {sfn_config.definition_file}')
@@ -309,7 +343,7 @@ def make_sfn_machine_app(
         return render_env_model(sfn_config)
 
     if sfn_config.definition_file is not None:
-        add_deploy_verb(sfn_app, pipeline_name, alias, sfn_config.definition_file, pipeline, config, resolved)
+        add_definition_verbs(sfn_app, pipeline_name, alias, sfn_config.definition_file, pipeline, config, resolved)
 
     @sfn_app.command(
         epilog=(

@@ -20,13 +20,13 @@ day, a command that finds a newer release prints a one-line notice to stderr;
 
 Commands follow the shape `dectl PIPELINE RESOURCE ALIAS VERB [OPTIONS]` — **the verb comes
 last**, so a deploy → run → logs loop on one resource changes only the final word. Pipelines
-and their resources (`glue`, `lambda`, `sfn`, `s3`, `iceberg`, `release`) are built from your config.
+and their resources (`glue`, `lambda`, `sfn`, `s3`, `iceberg`, `jenkins`) are built from your config.
 Every level is self-documenting — run any partial command or add `--help` to see what's next,
 including the live list of aliases. `dectl reference` prints the whole grammar independent of
 your config.
 
 **One rule: aliased vs. set.** Acting on one thing takes an alias (`glue JOB run`,
-`s3 BUCKET mount`); acting on the whole set takes none (`s3 export`, `release`, `list`,
+`s3 BUCKET mount`); acting on the whole set takes none (`s3 export`, `jenkins status`, `list`,
 `monitor`).
 
 ```bash
@@ -39,7 +39,7 @@ dectl salesdata glue source-copy   # this job's verbs (deploy/run/logs/runs) + w
 ```
 
 Every read command takes `--json` for a stable, machine-readable shape on stdout (`list`,
-`config show`, `search`, the per-resource `runs`, `lambda ... run`, `release status`, and every
+`config show`, `search`, the per-resource `runs`, `lambda ... run`, `jenkins status`, and every
 `iceberg` verb).
 
 ## Environments
@@ -75,7 +75,7 @@ dectl env
 ## Glue: deploying without the Terraform loop
 
 ```bash
-dectl salesdata glue conform deploy --plan   # what would change; touches nothing
+dectl salesdata glue conform plan            # what would change; touches nothing
 dectl salesdata glue conform deploy          # upload, show the diff, confirm
 dectl salesdata glue conform run --follow    # start it and tail both log streams
 dectl salesdata glue conform runs            # recent runs, --json to script them
@@ -85,7 +85,8 @@ A deploy is two writes with different owners. The script upload is always yours.
 *definition* is Terraform's once a pipeline is established, and dectl keeps write access to it
 because that is the point before Terraform exists — change a worker type and run it, instead of
 commit → Jenkins → apply. So `deploy` diffs its computed definition against the live one and
-confirms before applying. `--plan` shows the diff and exits, `--yes` skips the prompt.
+confirms before applying. `plan` shows the same diff and writes nothing, and `deploy --yes`
+skips the prompt.
 
 ### Three kinds of field, and the difference matters
 
@@ -153,7 +154,7 @@ that gets a job back to DPU sizing.
 One row you will not see: a Spark job's derived `MaxCapacity`. `JobUpdate` in
 `src/dectl/commands/glue.py` carries why.
 
-## Lambda dev loop vs release
+## Lambda dev loop vs the Jenkins build
 
 Aliases are the short config keys, not the full AWS names. The verb is last, so the
 deploy → run → logs loop only changes the trailing word.
@@ -170,9 +171,15 @@ echo '{"key": "value"}' | dectl salesdata lambda error-notifier run --payload-fi
 # updates $LATEST, publishes an immutable version, moves the configured live alias
 dectl salesdata lambda error-notifier deploy --publish
 
-# Canonical release through Jenkins + Terraform
-dectl salesdata release                                   # add --plan for terraform plan only
+# The canonical path: a build of the pipeline's Jenkins job, one verb per configured action
+dectl salesdata jenkins apply                             # posts ACTION=deploy in the example config
+dectl salesdata jenkins plan                              # posts ACTION=dry_run
+dectl salesdata jenkins status                            # the last build's result
 ```
+
+The `jenkins` verbs other than `status` and `logs` are the keys of the job's `actions` in
+config. Each posts the job's `parameters` with its own on top, so what a build does is the
+job's to decide.
 
 `--publish` requires a `live_alias` on the function in config; without it, deploy only ever
 touches `$LATEST` and alias-triggered functions keep running old code. `run` always targets
@@ -288,7 +295,7 @@ step_functions:
 ```
 
 ```bash
-dectl salesdata sfn ingest deploy --plan      # diff against the live definition, write nothing
+dectl salesdata sfn ingest plan               # diff against the live definition, write nothing
 dectl salesdata sfn ingest deploy             # replace the live definition
 dectl salesdata sfn ingest deploy --publish   # ...and publish a version, moving live_alias to it
 ```

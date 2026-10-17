@@ -30,11 +30,11 @@ def make_config(step_functions: dict) -> DectlConfig:
     ('machine', 'verbs'),
     [
         ({'name': 'my-flow'}, {'run', 'logs', 'runs'}),
-        ({'name': 'my-flow', 'definition_file': 'flow.asl.json'}, {'deploy', 'run', 'logs', 'runs'}),
+        ({'name': 'my-flow', 'definition_file': 'flow.asl.json'}, {'plan', 'deploy', 'run', 'logs', 'runs'}),
     ],
     ids=['no-definition-file', 'definition-file'],
 )
-def test_deploy_exists_only_for_a_machine_naming_its_definition_file(machine, verbs):
+def test_plan_and_deploy_exist_only_for_a_machine_naming_its_definition_file(machine, verbs):
     config = make_config({'flow': machine})
     tree = typer.main.get_command(make_sfn_app('proj', config.pipelines['proj'], config))
 
@@ -265,18 +265,18 @@ def test_a_formatting_only_edit_is_written_and_identical_bytes_are_not(monkeypat
 @pytest.mark.parametrize(
     ('argv', 'deploy_kwargs', 'aliases', 'exit_code'),
     [
-        (['--plan', '--publish'], {}, ('live',), 0),
-        ([], {'template': '{"States": {}}'}, (), 1),
-        ([], {'substitutions': {}}, (), 1),
-        (['--publish'], {}, (), 1),
+        (['plan', '--publish'], {}, ('live',), 0),
+        (['deploy'], {'template': '{"States": {}}'}, (), 1),
+        (['deploy'], {'substitutions': {}}, (), 1),
+        (['deploy', '--publish'], {}, (), 1),
     ],
     ids=['plan', 'invalid-definition', 'missing-substitution', 'missing-alias'],
 )
-def test_a_rehearsed_or_refused_deploy_writes_nothing(monkeypatch, tmp_path, argv, deploy_kwargs, aliases, exit_code):
+def test_a_plan_or_a_refused_deploy_writes_nothing(monkeypatch, tmp_path, argv, deploy_kwargs, aliases, exit_code):
     client = FakeStepFunctions(MACHINE_ARN, OLD_DEFINITION, aliases=aliases)
     app = deploy_app(monkeypatch, tmp_path, client, **deploy_kwargs)
 
-    result = runner.invoke(app, ['flow', 'deploy', *argv])
+    result = runner.invoke(app, ['flow', *argv])
 
     assert result.exit_code == exit_code
     assert client.writes == []

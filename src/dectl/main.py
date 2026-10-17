@@ -16,9 +16,9 @@ from typer.core import TyperGroup
 from dectl.commands.config_cmd import config_app
 from dectl.commands.glue import make_glue_app
 from dectl.commands.iceberg import make_iceberg_app
+from dectl.commands.jenkins import make_jenkins_app
 from dectl.commands.lambda_ import make_lambda_app
 from dectl.commands.monitor import run_monitor
-from dectl.commands.release import make_release_app
 from dectl.commands.s3 import make_s3_app
 from dectl.commands.search import run_search
 from dectl.commands.stepfunctions import make_sfn_app
@@ -136,7 +136,8 @@ if cfg:
         if pipeline.iceberg_tables:
             resources.append(f'iceberg ({", ".join(pipeline.iceberg_tables)})')
         if pipeline.jenkins and cfg.jenkins:
-            resources.append('release (jenkins)')
+            actions = pipeline.jenkins.actions
+            resources.append(f'jenkins ({", ".join(actions)})' if actions else 'jenkins')
         summary = ' · '.join(resources) if resources else 'none configured'
         pipeline_app = typer.Typer(
             no_args_is_help=True,
@@ -159,7 +160,7 @@ if cfg:
             pipeline_app.add_typer(make_iceberg_app(name, pipeline, cfg), name='iceberg', rich_help_panel='Resources')
             has_commands = True
         if pipeline.jenkins and cfg.jenkins:
-            pipeline_app.add_typer(make_release_app(name, pipeline.jenkins, cfg), name='release', rich_help_panel='Pipeline')
+            pipeline_app.add_typer(make_jenkins_app(name, pipeline.jenkins, cfg), name='jenkins', rich_help_panel='Pipeline')
             has_commands = True
         has_monitor = bool(pipeline.monitor.lambdas or pipeline.monitor.step_functions)
         if has_monitor:
@@ -195,10 +196,10 @@ if cfg:
 # The option-syntax brackets ([--follow], [OPTIONS], ...) would be parsed as rich style tags, so
 # these lines are printed with markup disabled; section headers get their style via a style arg.
 REFERENCE_INSTANCE_VERBS = [
-    'glue    ALIAS  deploy · run [--follow] · logs [RUN_ID] [--follow] · runs [--limit N] [--json]',
+    'glue    ALIAS  plan · deploy [--yes] · run [--follow] · logs [RUN_ID] [--follow] · runs [--limit N] [--json]',
     'lambda  ALIAS  deploy [--publish] · run [--payload-file F|-] [--json] · logs [--follow]',
     'sfn     ALIAS  run [--payload-file F|-] [--follow] · logs [ARN] [--follow] · runs [--limit N] [--json]',
-    '               deploy [--plan] [--publish]   (a machine configured with definition_file)',
+    '               plan [--publish] · deploy [--publish]   (a machine configured with definition_file)',
     's3      ALIAS  mount · unmount · uri',
     'iceberg ALIAS  snapshots [--limit N] [--json] · history [--limit N] [--json]',
     '               files [SNAPSHOT] [--limit N] [--json] · branches [--limit N] [--json]',
@@ -215,7 +216,8 @@ REFERENCE_DURABLE_VERBS = [
 ]
 REFERENCE_SET_VERBS = [
     's3 export [--prefix STR]',
-    'release [--plan] [--follow] · release status [--json] · release logs [--follow]',
+    'jenkins ACTION [--follow] · jenkins status [--json] · jenkins logs [--follow]',
+    "        (ACTION: a key of the job's actions in config)",
     'list [--json] · monitor',
 ]
 REFERENCE_GLOBAL = [
@@ -258,7 +260,7 @@ def reference() -> None:
             kinds.update(resource_types(pipeline))
         configured = sorted(kinds)
         if cfg.jenkins and any(p.jenkins for p in cfg.pipelines.values()):
-            configured.append('release')
+            configured.append('jenkins')
         info(f'Configured on this machine: {", ".join(configured) or "(none)"}')
     else:
         info('No config on this machine yet — run "dectl config init".')
@@ -350,7 +352,7 @@ def main(
 
     [bold]One rule: aliased vs. set.[/bold] Acting on one thing takes an alias
     ([bold]glue JOB run[/bold], [bold]s3 BUCKET mount[/bold]); acting on the whole set takes none
-    ([bold]s3 export[/bold], [bold]release[/bold], [bold]list[/bold], [bold]monitor[/bold]).
+    ([bold]s3 export[/bold], [bold]jenkins status[/bold], [bold]list[/bold], [bold]monitor[/bold]).
 
     Pipelines and their resources come from your config. Every level is self-documenting: run
     any partial command with no arguments or [bold]--help[/bold] to see what is next. Aliases are

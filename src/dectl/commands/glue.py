@@ -72,10 +72,10 @@ def configured_uris(glue_job: GlueJobConfig) -> str:
 def resolve_scripts(pipeline_name: str, pipeline: PipelineConfig, alias: str) -> list[ResolvedScript]:
     """Every script of one job as a substituted name and a file on disk, or exit naming what is wrong.
 
-    Run before anything is uploaded and before the definition diff, so `deploy` and `deploy
-    --plan` refuse the same configs. A `--plan` that could not see a missing script would report
-    a clean definition on a config whose real deploy exits, which is the one question `--plan` is
-    run to answer.
+    Run before anything is uploaded and before the definition diff, so `deploy` and `plan`
+    refuse the same configs. A `plan` that could not see a missing script would report a clean
+    definition on a config whose real deploy exits, which is the one question `plan` is run to
+    answer.
 
     The faults come from `pipeline_value_faults`, scoped by argument, so this door and `config
     validate` report one failure the same way rather than each describing it its own. Scoping
@@ -330,7 +330,25 @@ def render_job_changes(job_name: str, changes: list[tuple[str, str, str]]) -> No
     console.print(table)
 
 
-def plan_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig, assume_yes: bool = False, plan: bool = False) -> dict | None:
+def diff_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig) -> dict | None:
+    """Build the definition update and print what it changes, or None when nothing dectl manages differs.
+
+    Reads the live job and writes nothing. Callers run `resolve_scripts` first, so a rehearsal
+    refuses every config a deploy refuses."""
+    glue = session.client('glue')
+    existing = glue.get_job(JobName=glue_job.name)['Job']
+    update = build_job_update(existing, glue_job)
+
+    changes = job_definition_changes(existing, update)
+    if not changes:
+        info(f'{glue_job.name}: job definition unchanged')
+        return None
+
+    render_job_changes(glue_job.name, changes)
+    return update.definition
+
+
+def confirm_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig, assume_yes: bool = False) -> dict | None:
     """Everything about a definition update that can refuse: build it, show it, confirm it.
 
     Terraform owns these jobs once a pipeline is established, so an UpdateJob that silently
@@ -342,22 +360,10 @@ def plan_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig, assume
     refusals out of the way before it writes anything. `build_job_update` exits on a sizing
     model Glue would reject, and the confirmation can be declined; either landing after a
     script upload leaves ScriptLocation pointing at code the user was then told not to deploy."""
-    glue = session.client('glue')
-    existing = glue.get_job(JobName=glue_job.name)['Job']
-    update = build_job_update(existing, glue_job)
-
-    changes = job_definition_changes(existing, update)
-    if not changes:
-        info(f'{glue_job.name}: job definition unchanged')
-        return None
-
-    render_job_changes(glue_job.name, changes)
-
-    if plan:
-        return None
-    if not assume_yes:
+    job_update = diff_glue_job_update(session, glue_job)
+    if job_update is not None and not assume_yes:
         confirm_or_exit('apply these job definition changes?')
-    return update.definition
+    return job_update
 
 
 def apply_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig, job_update: dict) -> None:
@@ -468,31 +474,38 @@ def make_glue_job_app(
     def resolved() -> GlueJobConfig:
         return render_env_model(job_config)
 
+    @job_app.command(epilog=f'Example:\n\ndectl {pipeline_name} glue {alias} plan')
+    def plan() -> None:
+        """Show what deploy would change in the job definition, uploading and writing nothing.
+
+        It refuses every config deploy refuses, so a clean plan is a deploy that will run."""
+
+        job = resolved()
+        resolve_scripts(pipeline_name, pipeline, alias)
+        diff_glue_job_update(make_session(config), job)
+
     @job_app.command(
         epilog=(
             'Examples:\n\n'
             f'dectl {pipeline_name} glue {alias} deploy — upload scripts, confirm any definition changes\n\n'
-            f'dectl {pipeline_name} glue {alias} deploy --plan — show what would change, touch nothing\n\n'
             f'dectl {pipeline_name} glue {alias} deploy --yes — no prompt, for the pre-Terraform loop'
         ),
     )
     def deploy(
-        plan: Annotated[bool, typer.Option('--plan', help='Show pending job definition changes and exit without applying.')] = False,
         yes: Annotated[bool, typer.Option('--yes', '-y', help='Apply job definition changes without confirming.')] = False,
     ) -> None:
         """Upload the job's scripts to S3 and point the Glue job at them (does not run it).
 
         Changes to the job definition itself — every field the config names — are shown
         and confirmed before they are applied, since Terraform owns those once a pipeline is
-        established. When nothing differs, the definition is left untouched."""
+        established. When nothing differs, the definition is left untouched. `plan` shows the
+        same changes and writes nothing."""
 
         job = resolved()
-        # Resolve and check before anything reaches AWS, so --plan refuses what deploy refuses.
+        # Resolve and check before anything reaches AWS, so plan refuses what deploy refuses.
         sources = resolve_scripts(pipeline_name, pipeline, alias)
         session = make_session(config)
-        job_update = plan_glue_job_update(session, job, assume_yes=yes, plan=plan)
-        if plan:
-            return
+        job_update = confirm_glue_job_update(session, job, assume_yes=yes)
         upload_scripts(session, job, sources)
         if job_update is not None:
             apply_glue_job_update(session, job, job_update)
