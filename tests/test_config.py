@@ -460,6 +460,7 @@ UNCHECKED_FIELDS = {
     (JenkinsConfig, 'token'): 'a Jenkins API token; Jenkins authenticates it',
     (JenkinsJobConfig, 'job_path'): 'a path within Jenkins, not on this machine or in S3',
     (JenkinsJobConfig, 'parameters'): 'build parameters posted to Jenkins verbatim; Jenkins rejects a name its job does not take',
+    (JenkinsJobConfig, 'actions'): 'per-action build parameters posted to Jenkins verbatim; Jenkins rejects a name its job does not take',
     (GlueJobConfig, 'name'): 'a Glue job name; GetJob is what says whether it exists',
     (GlueJobConfig, 'role'): 'an IAM role ARN; UpdateJob validates it',
     (GlueJobConfig, 'arguments'): 'Glue job arguments, passed through; Glue validates them',

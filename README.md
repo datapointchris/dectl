@@ -20,13 +20,13 @@ day, a command that finds a newer release prints a one-line notice to stderr;
 
 Commands follow the shape `dectl PIPELINE RESOURCE ALIAS VERB [OPTIONS]` — **the verb comes
 last**, so a deploy → run → logs loop on one resource changes only the final word. Pipelines
-and their resources (`glue`, `lambda`, `sfn`, `s3`, `iceberg`, `release`) are built from your config.
+and their resources (`glue`, `lambda`, `sfn`, `s3`, `iceberg`, `jenkins`) are built from your config.
 Every level is self-documenting — run any partial command or add `--help` to see what's next,
 including the live list of aliases. `dectl reference` prints the whole grammar independent of
 your config.
 
 **One rule: aliased vs. set.** Acting on one thing takes an alias (`glue JOB run`,
-`s3 BUCKET mount`); acting on the whole set takes none (`s3 export`, `release deploy`, `list`,
+`s3 BUCKET mount`); acting on the whole set takes none (`s3 export`, `jenkins status`, `list`,
 `monitor`).
 
 ```bash
@@ -39,7 +39,7 @@ dectl salesdata glue source-copy   # this job's verbs (deploy/run/logs/runs) + w
 ```
 
 Every read command takes `--json` for a stable, machine-readable shape on stdout (`list`,
-`config show`, `search`, the per-resource `runs`, `lambda ... run`, `release status`, and every
+`config show`, `search`, the per-resource `runs`, `lambda ... run`, `jenkins status`, and every
 `iceberg` verb).
 
 ## Environments
@@ -154,7 +154,7 @@ that gets a job back to DPU sizing.
 One row you will not see: a Spark job's derived `MaxCapacity`. `JobUpdate` in
 `src/dectl/commands/glue.py` carries why.
 
-## Lambda dev loop vs release
+## Lambda dev loop vs the Jenkins build
 
 Aliases are the short config keys, not the full AWS names. The verb is last, so the
 deploy → run → logs loop only changes the trailing word.
@@ -171,10 +171,15 @@ echo '{"key": "value"}' | dectl salesdata lambda error-notifier run --payload-fi
 # updates $LATEST, publishes an immutable version, moves the configured live alias
 dectl salesdata lambda error-notifier deploy --publish
 
-# Canonical release through Jenkins + Terraform
-dectl salesdata release deploy                            # terraform apply
-dectl salesdata release plan                              # terraform plan only, on a queued build
+# The canonical path: a build of the pipeline's Jenkins job, one verb per configured action
+dectl salesdata jenkins apply                             # posts ACTION=deploy in the example config
+dectl salesdata jenkins plan                              # posts ACTION=dry_run
+dectl salesdata jenkins status                            # the last build's result
 ```
+
+The `jenkins` verbs other than `status` and `logs` are the keys of the job's `actions` in
+config. Each posts the job's `parameters` with its own on top, so what a build does is the
+job's to decide.
 
 `--publish` requires a `live_alias` on the function in config; without it, deploy only ever
 touches `$LATEST` and alias-triggered functions keep running old code. `run` always targets

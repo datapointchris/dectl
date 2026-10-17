@@ -166,10 +166,12 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
         's3': {alias: {'bucket': substitute_env(bucket)} for alias, bucket in pipeline.buckets.items()},
         # Aliases into this pipeline rather than AWS names, so nothing here is substituted.
         # Both blocks have behavior behind them — `monitor` decides which log groups are
-        # tailed, `jenkins` whether a `release` command exists — and a reader could see neither
-        # resolved anywhere.
+        # tailed, `jenkins` whether a `jenkins` command exists and which verbs it has — and a
+        # reader could see neither resolved anywhere.
         'monitor': {'lambdas': list(pipeline.monitor.lambdas), 'step_functions': list(pipeline.monitor.step_functions)},
-        'jenkins': None if pipeline.jenkins is None else {'job_path': substitute_env(pipeline.jenkins.job_path)},
+        'jenkins': None
+        if pipeline.jenkins is None
+        else {'job_path': substitute_env(pipeline.jenkins.job_path), 'actions': list(pipeline.jenkins.actions)},
         'iceberg': {
             alias: {
                 'database': substitute_env(table.database),
@@ -234,5 +236,6 @@ def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
     if monitored:
         info(f'  monitor: {", ".join(monitored)}')
     if pipeline.jenkins is not None:
-        info(f'  release: {substitute_env(pipeline.jenkins.job_path)}')
+        actions = f' (actions: {", ".join(pipeline.jenkins.actions)})' if pipeline.jenkins.actions else ''
+        info(f'  jenkins: {substitute_env(pipeline.jenkins.job_path)}{actions}')
     info('')

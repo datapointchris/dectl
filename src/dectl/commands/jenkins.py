@@ -46,12 +46,16 @@ def job_url_path(job: JenkinsJobConfig) -> str:
     return '/job/' + job.job_path.replace('/', '/job/')
 
 
-def make_release_app(pipeline_name: str, job_config: JenkinsJobConfig, config: DectlConfig) -> typer.Typer:
-    release_app = typer.Typer(
+def make_jenkins_app(pipeline_name: str, job_config: JenkinsJobConfig, config: DectlConfig) -> typer.Typer:
+    """Build `dectl PIPELINE jenkins`: one verb per configured action, then `status` and `logs`.
+
+    What a build does is the job's business, so dectl names no action itself. The panel and each
+    verb's help show the config as written, because they are built before `--env` is parsed."""
+    jenkins_app = typer.Typer(
         help=(
-            f'Release [bold]{pipeline_name}[/bold] through Jenkins + Terraform (the production path).\n\n'
-            '"deploy" queues a release build and "plan" a terraform plan build. "status" and "logs" '
-            'inspect the last build without starting a new one.'
+            f'Build the Jenkins job of [bold]{pipeline_name}[/bold]: {job_config.job_path}\n\n'
+            'Each action from the config queues a build posting its own parameters. "status" and '
+            '"logs" read the last build without starting a new one.'
         ),
         no_args_is_help=True,
     )
@@ -62,11 +66,11 @@ def make_release_app(pipeline_name: str, job_config: JenkinsJobConfig, config: D
 
     def queue_build(action: str, follow: bool) -> None:
         job = resolved()
-        params = {**job.parameters, 'ACTION': action}
+        params = {**job.parameters, **job.actions[action]}
         resp = jenkins_request(config, 'POST', f'{job_url_path(job)}/buildWithParameters', data=params)
 
         if resp.status_code == 201:
-            info(f'build queued for {pipeline_name} (action={action})')
+            info(f'build queued for {pipeline_name} ({action})')
         else:
             error(f'failed to queue build: {resp.status_code} {resp.text}')
             raise typer.Exit(1)
@@ -75,28 +79,24 @@ def make_release_app(pipeline_name: str, job_config: JenkinsJobConfig, config: D
             time.sleep(3)
             stream_console(job)
 
-    @release_app.command(epilog=f'Example:\n\ndectl {pipeline_name} release deploy --follow')
-    def deploy(
-        follow: Annotated[bool, typer.Option('--follow', '-f', help='Stream console output after triggering')] = False,
-    ) -> None:
-        """Queue a Jenkins build that runs terraform apply for this pipeline.
+    def add_action_verb(action: str, own_parameters: dict[str, str]) -> None:
+        posted = ', '.join(f'{name}={value}' for name, value in own_parameters.items())
+        summary = f'posting {posted} on top of its parameters' if posted else 'posting its parameters alone'
 
-        This is the canonical release path: it publishes the real function versions and moves
-        aliases through Terraform. Use "dectl PIPELINE lambda <alias> deploy --publish" for fast
-        local iteration between releases."""
-        queue_build('deploy', follow)
+        @jenkins_app.command(
+            name=action,
+            help=f'Queue a build of the job, {summary}.',
+            epilog=f'Example:\n\ndectl {pipeline_name} jenkins {action} --follow',
+        )
+        def queue(
+            follow: Annotated[bool, typer.Option('--follow', '-f', help='Stream console output after triggering')] = False,
+        ) -> None:
+            queue_build(action, follow)
 
-    @release_app.command(epilog=f'Example:\n\ndectl {pipeline_name} release plan --follow')
-    def plan(
-        follow: Annotated[bool, typer.Option('--follow', '-f', help='Stream console output after triggering')] = False,
-    ) -> None:
-        """Queue a Jenkins build that runs terraform plan only, applying nothing.
+    for action, own_parameters in job_config.actions.items():
+        add_action_verb(action, own_parameters)
 
-        The plan runs on Jenkins, so this queues a build like deploy does, and that build is the
-        one status and logs then report."""
-        queue_build('dry_run', follow)
-
-    @release_app.command()
+    @jenkins_app.command()
     def status(
         as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
     ) -> None:
@@ -124,7 +124,7 @@ def make_release_app(pipeline_name: str, job_config: JenkinsJobConfig, config: D
         else:
             error(f'{display} - {result}')
 
-    @release_app.command()
+    @jenkins_app.command()
     def logs(
         follow: Annotated[bool, typer.Option('--follow', '-f', help='Keep tailing while the build is still running')] = False,
     ) -> None:
@@ -161,4 +161,4 @@ def make_release_app(pipeline_name: str, job_config: JenkinsJobConfig, config: D
             offset = new_offset
             time.sleep(2)
 
-    return release_app
+    return jenkins_app

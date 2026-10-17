@@ -12,6 +12,7 @@ from pydantic import BeforeValidator
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import ValidationError
+from pydantic import field_validator
 from pydantic import model_validator
 
 from dectl.asl import template_text
@@ -51,7 +52,7 @@ defaults:
   environment: dev
   aws_profile: ""
 
-# The Jenkins dectl reaches for `release`. Both this block and a pipeline's own `jenkins` below
+# The Jenkins dectl reaches for `jenkins`. Both this block and a pipeline's own `jenkins` below
 # have to be present for the command to appear at all, because the whole tree is assembled from
 # what the config declares.
 jenkins:
@@ -162,13 +163,18 @@ pipelines:
         - my-function
       step_functions:
         - my-flow
-    # Which Jenkins job `dectl example-pipeline release deploy` and `release plan` build, and
-    # what they post. Needs the top-level `jenkins` block as well; either one missing and the
-    # command is not built.
+    # Which Jenkins job `dectl example-pipeline jenkins` builds. Every build posts `parameters`.
+    # Each action is a verb posting its own on top, so `jenkins plan` here sends ACTION=dry_run.
+    # Needs the top-level `jenkins` block as well; either one missing and the command is not built.
     jenkins:
       job_path: data-engineering/example-pipeline-deploy
       parameters:
         ENVIRONMENT: "{env}"
+      actions:
+        apply:
+          ACTION: deploy
+        plan:
+          ACTION: dry_run
 """
 
 
@@ -206,9 +212,23 @@ class JenkinsConfig(StrictModel):
     token: str
 
 
+JENKINS_READ_VERBS = frozenset({'status', 'logs'})
+
+
 class JenkinsJobConfig(StrictModel):
     job_path: str
     parameters: dict[str, str] = {}
+    # Each key is a verb on `dectl PIPELINE jenkins`, posting `parameters` with its own on top.
+    actions: dict[str, dict[str, str]] = {}
+
+    @field_validator('actions')
+    @classmethod
+    def refuse_actions_named_like_a_read(cls, actions: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+        """An action named `status` or `logs` would replace that command, so it is refused by name."""
+        taken = sorted(set(actions) & JENKINS_READ_VERBS)
+        if taken:
+            raise ValueError(f'{", ".join(taken)} already names a jenkins command; give the action another name')
+        return actions
 
 
 class GlueJobConfig(ResourceModel):

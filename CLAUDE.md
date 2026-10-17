@@ -24,14 +24,13 @@ type, you touch two places: the resource's own `make_*_app` module, and the pipe
 The command shape is `dectl PIPELINE RESOURCE ALIAS VERB [OPTIONS]` — the **verb is last** so a
 deploy → run → logs loop on one resource changes only the trailing word. One rule governs the
 whole surface: **aliased = one thing, unaliased = the set/pipeline.** Instance verbs take an
-alias (`glue JOB run`, `s3 BUCKET mount`); set verbs take none (`s3 export`, `release deploy`,
+alias (`glue JOB run`, `s3 BUCKET mount`); set verbs take none (`s3 export`, `jenkins status`,
 `list`, `monitor`). Scope is structural: the argument's presence selects it, never a flag.
 Whether a command writes is structural too: a write's rehearsal is a `plan` verb beside it,
 never a flag on the write, and no namespace acts bare. `glue` and `sfn` `plan` write nothing.
-`release plan` is the one rehearsal that writes remotely. The plan runs on Jenkins, so it
-queues a build, and that build is the one `release status` then reports. `dectl reference` is
-the static-grammar command a config-assembled tree needs, and `--json` on reads goes through
-`output.emit_json` — bare-print, so pipes stay clean.
+A resource is named for the system it drives, so the Jenkins job is `jenkins`, never a word
+for what its builds do. `dectl reference` is the static-grammar command a config-assembled tree
+needs, and `--json` on reads goes through `output.emit_json` — bare-print, so pipes stay clean.
 
 ## Shortcuts: one stroke for a whole path
 
@@ -75,6 +74,11 @@ names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
 - `sfn` `plan` and `deploy` exist only for a machine naming a `definition_file`: config decides
   whether the verbs are there, as `durable` does for the lambda verbs. Both run one `prepare`, so
   `plan` refuses what `deploy` refuses. Rendering a definition lives in `src/dectl/asl.py`.
+- `jenkins` has no aliases, since a pipeline has one job. Its writes are the keys of the job's
+  `actions`, each posting `parameters` with its own on top, beside `status` and `logs`. dectl
+  names no action itself: what `ACTION=dry_run` does is the Jenkinsfile's, which dectl never
+  sees, so a verb dectl named would be a guess at it. Every action queues a build, whatever it
+  is called, and that build is the one `status` and `logs` then read.
 - `monitor` is a **pipeline-level** command registered on `pipeline_app`, because it spans
   several resources. It tails every resource its `monitor` config block selects as one
   time-ordered stream via `logs.tail_log_groups`.
@@ -90,7 +94,10 @@ repoints. Its `durable` flag selects the durable verb set and is the invocation 
 source. `step_functions` maps alias → `{name, log_group, definition_file,
 definition_substitutions, live_alias}`; the log group is needed only for `monitor`, and the other
 three only for `deploy`. `iceberg_tables` maps alias → `{database, table}`, both carrying
-`{env}`. `monitor` is its own block listing which lambdas and state machines to tail.
+`{env}`. `monitor` is its own block listing which lambdas and state machines to tail. A
+pipeline's `jenkins` names a `job_path` (`folder/job`, which `job_url_path` expands), the
+`parameters` every build posts, and `actions`. An action cannot be named `status` or `logs`,
+because it would replace that command.
 
 **`TEMPLATE_CONFIG` is the single source for the example config.** `config init` writes it and
 `config example` prints it (highlighted on a TTY, plain when piped). It exercises every option, and
