@@ -188,9 +188,7 @@ def log_event(event_id: str, timestamp: int, message: str, stream: str = 'stream
 
 
 # What every live AWS module needs before it can do anything: a session, and a role its service
-# will assume. Here rather than per module because both were copied into each one, and a copy is
-# what made `DECTL_IT_ROLE_ARN` reach the deploy module and not the run module — a suite that
-# half-honored the variable and failed on `iam:CreateRole` for the other half.
+# will assume. Here once, so each role variable reaches every live module that needs that role.
 GLUE_MANAGED_POLICY = 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
 
 

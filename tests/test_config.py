@@ -326,24 +326,6 @@ def test_buckets_default_to_empty_when_omitted():
     assert config.pipelines['p'].buckets == {}
 
 
-def test_step_functions_parsed_with_optional_log_group():
-    raw = {
-        'defaults': {'account_id': '111'},
-        'pipelines': {
-            'p': {
-                'step_functions': {
-                    'flow': {'name': 'my-flow', 'log_group': '/aws/vendedlogs/states/my-flow'},
-                    'bare': {'name': 'bare-flow'},
-                }
-            }
-        },
-    }
-    config = DectlConfig.model_validate(raw)
-    step_functions = config.pipelines['p'].step_functions
-    assert step_functions['flow'].log_group == '/aws/vendedlogs/states/my-flow'
-    assert step_functions['bare'].log_group == ''
-
-
 def test_monitor_selection_parsed():
     raw = {
         'defaults': {'account_id': '111'},

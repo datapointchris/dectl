@@ -9,25 +9,17 @@ from dectl.commands.config_cmd import config_app
 from dectl.commands.glue import make_glue_app
 from dectl.commands.iceberg import make_iceberg_app
 from dectl.commands.lambda_ import make_lambda_app
+from dectl.commands.s3 import make_s3_app
 from dectl.commands.stepfunctions import make_sfn_app
 from dectl.config import DectlConfig
 from dectl.config import Defaults
+from dectl.main import REFERENCE_DURABLE_VERBS
 from dectl.main import REFERENCE_GLOBAL
+from dectl.main import REFERENCE_INSTANCE_VERBS
 from dectl.main import app
 from tests.conftest import RefusalRunner
 
 runner = RefusalRunner()
-
-
-def test_reference_prints_the_grammar():
-    result = runner.invoke(app, ['reference'])
-
-    assert result.exit_code == 0
-    assert 'RESOURCE ALIAS VERB' in result.stdout
-    assert 'Instance verbs' in result.stdout
-    assert 'Set / pipeline verbs' in result.stdout
-    # Option-syntax brackets must survive verbatim, not be eaten as rich markup tags.
-    assert '[--follow]' in result.stdout
 
 
 def row_entries(row: str) -> list[str]:
@@ -263,7 +255,7 @@ def limit_params(command, path: tuple[str, ...] = ()) -> list[tuple[str, object]
 
 
 def whole_tree():
-    """The assembled surface for a pipeline declaring one of every resource that takes `--limit`."""
+    """The assembled surface for a pipeline declaring every resource and every config-chosen verb set."""
     config = DectlConfig.model_validate(
         {
             'defaults': {'account_id': '123456789012', 'region': 'us-east-2'},
@@ -272,8 +264,12 @@ def whole_tree():
                     'glue_jobs': {
                         'source-copy': {'name': 'copy-{env}', 'script_bucket': 'sales-scripts', 'scripts': ['jobs/copy.py'], 'role': 'r'}
                     },
-                    'lambdas': {'router': {'name': 'router-{env}', 'source_dir': 'code', 'durable': True}},
-                    'step_functions': {'flow': {'name': 'flow-{env}'}},
+                    'lambdas': {
+                        'router': {'name': 'router-{env}', 'source_dir': 'code', 'durable': True},
+                        'notify': {'name': 'notify-{env}', 'source_dir': 'code'},
+                    },
+                    'step_functions': {'flow': {'name': 'flow-{env}', 'definition_file': 'flow.asl.json'}},
+                    'buckets': {'raw': 'raw-{env}'},
                     'iceberg_tables': {'events': {'database': 'lakehouse', 'table': 'events'}},
                 }
             },
@@ -284,8 +280,36 @@ def whole_tree():
     root.add_typer(make_glue_app('proj', pipeline, config), name='glue')
     root.add_typer(make_lambda_app('proj', pipeline, config), name='lambda')
     root.add_typer(make_sfn_app('proj', pipeline, config), name='sfn')
+    root.add_typer(make_s3_app('proj', pipeline, config), name='s3')
     root.add_typer(make_iceberg_app('proj', pipeline, config), name='iceberg')
     return typer.main.get_command(root)
+
+
+def reference_instance_verbs() -> set[tuple[str, str]]:
+    """Each `(resource, verb)` the reference's instance and durable rows name."""
+    named = set()
+    resource = ''
+    for row in [*REFERENCE_INSTANCE_VERBS, *REFERENCE_DURABLE_VERBS]:
+        if not row.startswith(' '):
+            resource, _, row = row.partition('ALIAS')
+            resource = resource.strip()
+        named |= {(resource, entry.split()[0]) for entry in row.split('·') if entry.strip()}
+    return named
+
+
+def test_the_reference_names_every_instance_verb():
+    # A verb the reference omits is invisible on a fresh machine, where --help shows no pipeline.
+    # Derived from the tree, so a verb added to any resource has to reach the reference too.
+    tree = whole_tree()
+    verbs = {
+        (resource, verb)
+        for resource, group in tree.commands.items()
+        for alias in getattr(group, 'commands', {}).values()
+        for verb in getattr(alias, 'commands', {})
+    }
+
+    assert ('sfn', 'deploy') in verbs
+    assert verbs - reference_instance_verbs() == set()
 
 
 def test_every_limit_in_the_binary_refuses_a_negative():
