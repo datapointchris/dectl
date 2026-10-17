@@ -224,7 +224,7 @@ class JenkinsJobConfig(StrictModel):
     @field_validator('actions')
     @classmethod
     def refuse_actions_named_like_a_read(cls, actions: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
-        """An action named `status` or `logs` would replace that command, so it is refused by name."""
+        """An action named `status` or `logs` would share that command's name, and only one survives."""
         taken = sorted(set(actions) & JENKINS_READ_VERBS)
         if taken:
             raise ValueError(f'{", ".join(taken)} already names a jenkins command; give the action another name')

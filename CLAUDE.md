@@ -97,7 +97,7 @@ three only for `deploy`. `iceberg_tables` maps alias → `{database, table}`, bo
 `{env}`. `monitor` is its own block listing which lambdas and state machines to tail. A
 pipeline's `jenkins` names a `job_path` (`folder/job`, which `job_url_path` expands), the
 `parameters` every build posts, and `actions`. An action cannot be named `status` or `logs`,
-because it would replace that command.
+because it would share that command's name and only one of the two would survive.
 
 **`TEMPLATE_CONFIG` is the single source for the example config.** `config init` writes it and
 `config example` prints it (highlighted on a TTY, plain when piped). It exercises every option, and
