@@ -24,12 +24,13 @@ type, you touch two places: the resource's own `make_*_app` module, and the pipe
 The command shape is `dectl PIPELINE RESOURCE ALIAS VERB [OPTIONS]` — the **verb is last** so a
 deploy → run → logs loop on one resource changes only the trailing word. One rule governs the
 whole surface: **aliased = one thing, unaliased = the set/pipeline.** Instance verbs take an
-alias (`glue JOB run`, `s3 BUCKET mount`); set verbs take none (`s3 export`, `release`, `list`,
-`monitor`). Scope is structural: the argument's presence selects it, never a flag. Whether a
-command writes is structural too: a write's rehearsal is the read verb `plan` beside it
-(`glue JOB plan`, `sfn MACHINE plan`, `release plan`), never a flag on the write.
-`dectl reference` is the static-grammar command a config-assembled tree needs, and `--json` on
-reads goes through
+alias (`glue JOB run`, `s3 BUCKET mount`); set verbs take none (`s3 export`, `release deploy`,
+`list`, `monitor`). Scope is structural: the argument's presence selects it, never a flag.
+Whether a command writes is structural too: a write's rehearsal is a `plan` verb beside it,
+never a flag on the write, and no namespace acts bare. `glue` and `sfn` `plan` write nothing.
+`release plan` is the one rehearsal that writes remotely. The plan runs on Jenkins, so it
+queues a build, and that build is the one `release status` then reports. `dectl reference` is
+the static-grammar command a config-assembled tree needs, and `--json` on reads goes through
 `output.emit_json` — bare-print, so pipes stay clean.
 
 ## Shortcuts: one stroke for a whole path

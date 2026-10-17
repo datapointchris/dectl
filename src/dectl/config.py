@@ -162,8 +162,9 @@ pipelines:
         - my-function
       step_functions:
         - my-flow
-    # Which Jenkins job `dectl example-pipeline release` builds, and what it posts. Needs the
-    # top-level `jenkins` block as well; either one missing and the command is not built.
+    # Which Jenkins job `dectl example-pipeline release deploy` and `release plan` build, and
+    # what they post. Needs the top-level `jenkins` block as well; either one missing and the
+    # command is not built.
     jenkins:
       job_path: data-engineering/job/example-pipeline-deploy
       parameters:

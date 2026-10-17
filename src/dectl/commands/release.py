@@ -41,23 +41,29 @@ def jenkins_request(config: DectlConfig, method: str, path: str, **kwargs):
         return resp
 
 
+def job_url_path(job: JenkinsJobConfig) -> str:
+    """The job's URL path on the Jenkins server, from a `folder/job` path."""
+    return '/job/' + job.job_path.replace('/', '/job/')
+
+
 def make_release_app(pipeline_name: str, job_config: JenkinsJobConfig, config: DectlConfig) -> typer.Typer:
     release_app = typer.Typer(
         help=(
             f'Release [bold]{pipeline_name}[/bold] through Jenkins + Terraform (the production path).\n\n'
-            'Running this with no subcommand triggers a release build, and "plan" a terraform plan '
-            'build. Use "status" and "logs" to inspect the last build without starting a new one.'
+            '"deploy" queues a release build and "plan" a terraform plan build. "status" and "logs" '
+            'inspect the last build without starting a new one.'
         ),
+        no_args_is_help=True,
     )
 
-    def queue_build(action: str, follow: bool) -> None:
-        # {env} substituted at call time like every other config value, because --env is not
-        # parsed until the command runs.
-        params = dict(render_env_model(job_config).parameters)
-        params['ACTION'] = action
+    def resolved() -> JenkinsJobConfig:
+        # Per call rather than once, because --env is not parsed until the command runs.
+        return render_env_model(job_config)
 
-        job_path = job_config.job_path.replace('/', '/job/')
-        resp = jenkins_request(config, 'POST', f'/job/{job_path}/buildWithParameters', data=params)
+    def queue_build(action: str, follow: bool) -> None:
+        job = resolved()
+        params = {**job.parameters, 'ACTION': action}
+        resp = jenkins_request(config, 'POST', f'{job_url_path(job)}/buildWithParameters', data=params)
 
         if resp.status_code == 201:
             info(f'build queued for {pipeline_name} (action={action})')
@@ -67,35 +73,27 @@ def make_release_app(pipeline_name: str, job_config: JenkinsJobConfig, config: D
 
         if follow:
             time.sleep(3)
-            stream_console(config, job_config)
+            stream_console(job)
 
-    @release_app.callback(
-        invoke_without_command=True,
-        epilog=(
-            'Examples:\n\n'
-            f'dectl {pipeline_name} release — trigger a release\n\n'
-            f'dectl {pipeline_name} release --follow — trigger a release and stream the console\n\n'
-            f'dectl {pipeline_name} release status — show the last build result'
-        ),
-    )
-    def release(
-        ctx: typer.Context,
+    @release_app.command(epilog=f'Example:\n\ndectl {pipeline_name} release deploy --follow')
+    def deploy(
         follow: Annotated[bool, typer.Option('--follow', '-f', help='Stream console output after triggering')] = False,
     ) -> None:
-        """Trigger a Jenkins Terraform release build for this pipeline.
+        """Queue a Jenkins build that runs terraform apply for this pipeline.
 
-        This is the canonical release path: it publishes the real function
-        versions and moves aliases through Terraform. Use "dectl PIPELINE lambda
-        <alias> deploy --publish" for fast local iteration between releases.
-        """
-        if ctx.invoked_subcommand is None:
-            queue_build('deploy', follow)
+        This is the canonical release path: it publishes the real function versions and moves
+        aliases through Terraform. Use "dectl PIPELINE lambda <alias> deploy --publish" for fast
+        local iteration between releases."""
+        queue_build('deploy', follow)
 
     @release_app.command(epilog=f'Example:\n\ndectl {pipeline_name} release plan --follow')
     def plan(
         follow: Annotated[bool, typer.Option('--follow', '-f', help='Stream console output after triggering')] = False,
     ) -> None:
-        """Trigger a Jenkins build that runs terraform plan only, applying nothing."""
+        """Queue a Jenkins build that runs terraform plan only, applying nothing.
+
+        The plan runs on Jenkins, so this queues a build like deploy does, and that build is the
+        one status and logs then report."""
         queue_build('dry_run', follow)
 
     @release_app.command()
@@ -103,8 +101,7 @@ def make_release_app(pipeline_name: str, job_config: JenkinsJobConfig, config: D
         as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
     ) -> None:
         """Show the result of the most recent Jenkins build for this pipeline."""
-        job_path = job_config.job_path.replace('/', '/job/')
-        resp = jenkins_request(config, 'GET', f'/job/{job_path}/lastBuild/api/json')
+        resp = jenkins_request(config, 'GET', f'{job_url_path(resolved())}/lastBuild/api/json')
 
         if resp.status_code != 200:
             error(f'failed to get build status: {resp.status_code}')
@@ -132,19 +129,18 @@ def make_release_app(pipeline_name: str, job_config: JenkinsJobConfig, config: D
         follow: Annotated[bool, typer.Option('--follow', '-f', help='Keep tailing while the build is still running')] = False,
     ) -> None:
         """Show (and optionally tail) console output from the most recent build."""
-        stream_console(config, job_config, follow=follow)
+        stream_console(resolved(), follow=follow)
 
     def strip_jenkins_noise(text: str) -> str:
         text = re.sub(r'\x1b\[8m.*?\x1b\[0m', '', text)
         lines = text.splitlines(keepends=True)
         return ''.join(line for line in lines if not line.strip().startswith('[Pipeline]'))
 
-    def stream_console(cfg: DectlConfig, jc: JenkinsJobConfig, follow: bool = True) -> None:
-        job_path = jc.job_path.replace('/', '/job/')
+    def stream_console(job: JenkinsJobConfig, follow: bool = True) -> None:
         offset = 0
 
         while True:
-            resp = jenkins_request(cfg, 'GET', f'/job/{job_path}/lastBuild/logText/progressiveText?start={offset}')
+            resp = jenkins_request(config, 'GET', f'{job_url_path(job)}/lastBuild/logText/progressiveText?start={offset}')
 
             if resp.status_code != 200:
                 error(f'failed to get logs: {resp.status_code}')

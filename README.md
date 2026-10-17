@@ -26,7 +26,7 @@ including the live list of aliases. `dectl reference` prints the whole grammar i
 your config.
 
 **One rule: aliased vs. set.** Acting on one thing takes an alias (`glue JOB run`,
-`s3 BUCKET mount`); acting on the whole set takes none (`s3 export`, `release`, `list`,
+`s3 BUCKET mount`); acting on the whole set takes none (`s3 export`, `release deploy`, `list`,
 `monitor`).
 
 ```bash
@@ -172,8 +172,8 @@ echo '{"key": "value"}' | dectl salesdata lambda error-notifier run --payload-fi
 dectl salesdata lambda error-notifier deploy --publish
 
 # Canonical release through Jenkins + Terraform
-dectl salesdata release                                   # terraform apply
-dectl salesdata release plan                              # terraform plan only
+dectl salesdata release deploy                            # terraform apply
+dectl salesdata release plan                              # terraform plan only, on a queued build
 ```
 
 `--publish` requires a `live_alias` on the function in config; without it, deploy only ever

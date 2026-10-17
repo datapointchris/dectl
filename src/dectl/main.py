@@ -215,7 +215,7 @@ REFERENCE_DURABLE_VERBS = [
 ]
 REFERENCE_SET_VERBS = [
     's3 export [--prefix STR]',
-    'release [--follow] · release plan [--follow] · release status [--json] · release logs [--follow]',
+    'release deploy [--follow] · release plan [--follow] · release status [--json] · release logs [--follow]',
     'list [--json] · monitor',
 ]
 REFERENCE_GLOBAL = [
@@ -350,7 +350,7 @@ def main(
 
     [bold]One rule: aliased vs. set.[/bold] Acting on one thing takes an alias
     ([bold]glue JOB run[/bold], [bold]s3 BUCKET mount[/bold]); acting on the whole set takes none
-    ([bold]s3 export[/bold], [bold]release[/bold], [bold]list[/bold], [bold]monitor[/bold]).
+    ([bold]s3 export[/bold], [bold]release deploy[/bold], [bold]list[/bold], [bold]monitor[/bold]).
 
     Pipelines and their resources come from your config. Every level is self-documenting: run
     any partial command with no arguments or [bold]--help[/bold] to see what is next. Aliases are
