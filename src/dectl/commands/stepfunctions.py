@@ -305,6 +305,7 @@ def add_definition_verbs(
         Only the definition is written: the role, logging and tracing stay as Terraform set them.
         When the rendered definition matches the live one byte for byte, nothing is written. An
         execution started within a few seconds of a deploy may still run the previous definition.
+        `plan` shows the same diff and writes nothing.
 
         `run` starts the latest definition, so it picks up a deploy without --publish. Anything
         starting executions through an alias keeps the old one until --publish moves that alias."""
