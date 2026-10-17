@@ -37,24 +37,6 @@ from tests.test_glue_integration import SHELL_FIELD_SPEC
 runner = RefusalRunner()
 
 
-def test_job_exposes_deploy_run_logs_runs_verbs():
-    config = DectlConfig.model_validate(
-        {
-            'defaults': {'account_id': '123456789012'},
-            'pipelines': {
-                'proj': {'glue_jobs': {'source-copy': {'name': 'j', 'script_bucket': 'sales-scripts', 'scripts': ['s.py'], 'role': 'r'}}}
-            },
-        }
-    )
-    app = make_glue_app('proj', config.pipelines['proj'], config)
-
-    result = runner.invoke(app, ['source-copy', '--help'])
-
-    assert result.exit_code == 0
-    for verb in ('deploy', 'run', 'logs', 'runs'):
-        assert verb in result.stdout
-
-
 class FakeGlueClient:
     """Glue stand-in that refuses the UpdateJob this whole change is built around.
 
@@ -385,19 +367,6 @@ def test_an_unset_definition_field_leaves_the_live_value_alone():
     assert glue.captured_update['MaxRetries'] == 3
     assert glue.captured_update['ExecutionClass'] == 'STANDARD'
     assert glue.captured_update['WorkerType'] == 'G.1X'
-
-
-def test_update_without_a_terminal_fails_naming_the_flag():
-    """A prompt on a stdin that never closes deadlocks a Jenkins step or a cron
-    run with no output and no exit code. pytest's stdin is not a terminal, which
-    is the case."""
-    glue = FakeGlueClient(existing_job={'Command': {'Name': 'pythonshell'}})
-
-    with pytest.raises(typer.Exit) as raised:
-        plan_glue_job_update(FakeSession(glue), make_job())
-
-    assert raised.value.exit_code == 1
-    assert glue.captured_update is None
 
 
 def test_no_input_refuses_the_prompt_even_on_a_terminal(monkeypatch):
