@@ -69,6 +69,8 @@ names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
   the `s3` app itself, beside the per-bucket alias sub-apps.
 - `lambda`/`sfn` `run` take payloads through `payloads.read_payload`: from `--payload-file F` or
   from stdin as `-`, never from an inline string argument.
+- `sfn` `deploy` exists only for a machine naming a `definition_file`, the same config-assembled
+  swap as the durable lambda verbs. Rendering a definition lives in `src/dectl/asl.py`.
 - `monitor` is a **pipeline-level** command registered on `pipeline_app`, because it spans
   several resources. It tails every resource its `monitor` config block selects as one
   time-ordered stream via `logs.tail_log_groups`.
@@ -81,9 +83,10 @@ the variable is honored rather than `~/.config` being hardcoded. `buckets`, `glu
 `lambdas` are all `alias -> real-name` mappings. A lambda's `live_alias` (not `alias`, which would
 collide with the CLI's "alias" = the config key) is the AWS Lambda alias that `deploy --publish`
 repoints. Its `durable` flag selects the durable verb set and is the invocation qualifier's
-source. `step_functions` maps alias → `{name, log_group}`; the log group is needed only for
-`monitor`. `iceberg_tables` maps alias → `{database, table}`, both carrying `{env}`. `monitor` is
-its own block listing which lambdas and state machines to tail.
+source. `step_functions` maps alias → `{name, log_group, definition_file,
+definition_substitutions, live_alias}`; the log group is needed only for `monitor`, and the other
+three only for `deploy`. `iceberg_tables` maps alias → `{database, table}`, both carrying
+`{env}`. `monitor` is its own block listing which lambdas and state machines to tail.
 
 **`TEMPLATE_CONFIG` is the single source for the example config.** `config init` writes it and
 `config example` prints it (highlighted on a TTY, plain when piped). It exercises every option, and
@@ -263,6 +266,26 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
   transitions, Standard workflows only). `monitor` uses the state machine's CloudWatch log group so
   it can merge with the Lambda groups, which is why a monitored state machine needs `log_group`.
   Express workflows have no history API at all.
+- **`sfn deploy` sends the rendered text, never a re-serialization of it.** The AWS provider
+  stores the live definition verbatim on refresh and compares it with `templatefile`'s output
+  unnormalized. Identical bytes are what make Terraform's next plan over the same file report no
+  change, and anything else shows as a whitespace diff on every plan. Whether to write is decided
+  on the parsed JSON, so a definition equal to the live one is not written.
+- **`render_definition` substitutes a bare `${name}` and nothing else.** A directive, an
+  expression or a strip marker is a `TemplateFault` rather than an approximation, because a
+  near-miss renders a definition Terraform would not. `TEMPLATE_SEQUENCE` tries the escapes first
+  at each position, which is how Terraform scans a run of `$`.
+- **`{env}` is substituted in `definition_substitutions`, never in the file.** `substitute_env`
+  replaces the literal `{env}`, so run over the template it would turn a Terraform `${env}` into
+  `$dev`.
+- **`UpdateStateMachine` patches; it is not Glue's `UpdateJob`.** Sending `definition` alone
+  leaves the role, logging and tracing as they are, so there is no `build_job_update` here. There
+  is no confirm prompt either: the definition is the code being iterated on, so a prompt would fire
+  on every deploy, and the diff is printed every time instead.
+- **`deploy --publish` publishes the current revision, changed or not.**
+  `PublishStateMachineVersion` is idempotent per revision, and the `revisionId` it is handed makes
+  Step Functions refuse a revision someone else wrote since dectl read or updated it. `run` starts
+  the unqualified machine, which is the latest revision, so it never needs `--publish`.
 - **Log tailing follows by time, not by stream.** Every tailer polls whole log groups through
   `LogGroupCursor`. Lambda writes each execution environment to a new stream, and Glue creates its
   error stream only on first stderr write. `tail_glue_run` isolates a run with
@@ -316,12 +339,13 @@ no debugger and no second attempt, and a fake holds only the service rules someb
 The exemptions are real cost and setup too extensive to maintain, never "the fake covers it".
 
 **Every resource under test is created and deleted by the test**, never a real pipeline's job. A
-role is the exception, as a precondition like credentials. `DECTL_IT_ROLE_ARN` names one, and the
-fixture in `conftest.py` creates its own when it is unset:
+role is the exception, as a precondition like credentials. `DECTL_IT_ROLE_ARN` names the Glue one
+and `DECTL_IT_STATES_ROLE_ARN` the Step Functions one, and the fixtures in `conftest.py` create
+their own when either is unset:
 
 ```bash
-# Least privilege: glue:*, logs:*, s3:*, and iam:PassRole on that one role
-DECTL_IT_ROLE_ARN=<arn> DECTL_IT_REGION=<region> uv run pytest --run-integration
+# Least privilege: glue:*, logs:*, s3:*, states:*, and iam:PassRole on those two roles
+DECTL_IT_ROLE_ARN=<arn> DECTL_IT_STATES_ROLE_ARN=<arn> DECTL_IT_REGION=<region> uv run pytest --run-integration
 
 # No setup, broader credentials: the fixture creates and deletes a role, needing iam:CreateRole
 DECTL_IT_AWS_PROFILE=<profile> DECTL_IT_REGION=<region> uv run pytest --run-integration
@@ -334,6 +358,11 @@ per module because IAM is eventually consistent.
 refuses it outright. A job asking for `MaxCapacity` alongside version 3.0 or 4.0 comes back
 carrying `WorkerType` as well, already worker-sized. A DPU-only Spark job is still creatable by
 omitting `GlueVersion` entirely, which is the only way to build a DPU-to-worker migration fixture.
+
+**What live Step Functions does that no fake would have told you.** A machine never updated
+carries no `revisionId` at all. `DescribeStateMachine` returns the definition byte for byte as it
+was sent. `DescribeStateMachineAlias` lags `UpdateStateMachineAlias` by seconds, returning the
+old routing when read at once, so a test reading an alias back polls for it.
 
 **A fake enforces the service's constraints rather than replaying responses.** `FakeCloudWatchLogs`
 applies `startTime`, `endTime`, `logStreamNamePrefix` and `filterPattern`, and raises on a

@@ -187,15 +187,40 @@ def log_event(event_id: str, timestamp: int, message: str, stream: str = 'stream
     return {'eventId': event_id, 'timestamp': timestamp, 'message': message, 'logStreamName': stream}
 
 
-# What every live AWS module needs before it can do anything: a session, and a role Glue will
-# assume. Here rather than per module because both were copied into each one, and a copy is what
-# made `DECTL_IT_ROLE_ARN` reach the deploy module and not the run module — a suite that
+# What every live AWS module needs before it can do anything: a session, and a role its service
+# will assume. Here rather than per module because both were copied into each one, and a copy is
+# what made `DECTL_IT_ROLE_ARN` reach the deploy module and not the run module — a suite that
 # half-honored the variable and failed on `iam:CreateRole` for the other half.
 GLUE_MANAGED_POLICY = 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
-GLUE_TRUST_POLICY = {
-    'Version': '2012-10-17',
-    'Statement': [{'Effect': 'Allow', 'Principal': {'Service': 'glue.amazonaws.com'}, 'Action': 'sts:AssumeRole'}],
-}
+
+
+def trust_policy(service: str) -> dict:
+    return {
+        'Version': '2012-10-17',
+        'Statement': [{'Effect': 'Allow', 'Principal': {'Service': service}, 'Action': 'sts:AssumeRole'}],
+    }
+
+
+@contextlib.contextmanager
+def service_role(session, supplied_variable: str, service: str, managed_policies: tuple[str, ...] = ()):
+    """The role `supplied_variable` names, or one created for `service` and deleted afterwards."""
+    supplied = os.environ.get(supplied_variable)
+    if supplied:
+        yield supplied
+        return
+
+    iam = session.client('iam')
+    role_name = f'dectl-it-{service.split(".")[0]}-{uuid.uuid4().hex[:8]}'
+    created = iam.create_role(RoleName=role_name, AssumeRolePolicyDocument=json.dumps(trust_policy(service)))
+    for policy in managed_policies:
+        iam.attach_role_policy(RoleName=role_name, PolicyArn=policy)
+    time.sleep(10)
+    try:
+        yield created['Role']['Arn']
+    finally:
+        for policy in managed_policies:
+            iam.detach_role_policy(RoleName=role_name, PolicyArn=policy)
+        iam.delete_role(RoleName=role_name)
 
 
 @pytest.fixture(scope='module')
@@ -241,22 +266,18 @@ def glue_role_arn(session):
 
     A supplied role has to carry `AWSGlueServiceRole` or its equivalent, because the run module's
     job reads its script from S3."""
+    with service_role(session, 'DECTL_IT_ROLE_ARN', 'glue.amazonaws.com', (GLUE_MANAGED_POLICY,)) as arn:
+        yield arn
 
-    supplied = os.environ.get('DECTL_IT_ROLE_ARN')
-    if supplied:
-        yield supplied
-        return
 
-    iam = session.client('iam')
-    role_name = f'dectl-it-glue-{uuid.uuid4().hex[:8]}'
-    created = iam.create_role(RoleName=role_name, AssumeRolePolicyDocument=json.dumps(GLUE_TRUST_POLICY))
-    iam.attach_role_policy(RoleName=role_name, PolicyArn=GLUE_MANAGED_POLICY)
-    time.sleep(10)
-    try:
-        yield created['Role']['Arn']
-    finally:
-        iam.detach_role_policy(RoleName=role_name, PolicyArn=GLUE_MANAGED_POLICY)
-        iam.delete_role(RoleName=role_name)
+@pytest.fixture(scope='module')
+def states_role_arn(session):
+    """A role Step Functions can assume: the one `DECTL_IT_STATES_ROLE_ARN` names, or one created.
+
+    Its own role rather than the Glue one with a second trusted service, so each stays the least
+    a supplied role has to be. A machine of Pass states calls nothing, so it needs no policy."""
+    with service_role(session, 'DECTL_IT_STATES_ROLE_ARN', 'states.amazonaws.com') as arn:
+        yield arn
 
 
 def pytest_addoption(parser):

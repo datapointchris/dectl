@@ -60,9 +60,9 @@ jenkins:
 
 pipelines:
   example-pipeline:
-    # The directory the relative paths below resolve from — every glue `scripts` entry and every
-    # lambda `source_dir` — so a deploy reaches the same files from any directory. Absolute or
-    # ~-rooted; a relative value is rejected.
+    # The directory the relative paths below resolve from — every glue `scripts` entry, lambda
+    # `source_dir` and step function `definition_file` — so a deploy reaches the same files from
+    # any directory. Absolute or ~-rooted; a relative value is rejected.
     #
     # Left out, those paths resolve from the directory dectl is run in, so a deploy has to be run
     # from the checkout. Set it and `config validate` checks the directory and every path
@@ -131,6 +131,18 @@ pipelines:
       my-flow:
         name: my-{env}-state-machine
         log_group: /aws/vendedlogs/states/my-{env}-state-machine
+        # The definition Terraform renders with templatefile(). Setting it adds `deploy`, which
+        # renders the file the same way and replaces only the definition: the role and logging
+        # stay as Terraform set them.
+        definition_file: modules/step_functions/my_flow.asl.json
+        # One entry per ${name} in that file, with {env} where the environment goes. The {env}
+        # token is substituted here and never in the file itself.
+        definition_substitutions:
+          process_function_arn: arn:aws:lambda:us-east-2:123456789012:function:my-{env}-lambda-function
+          copy_job_name: my-{env}-source-copy-job
+        # The alias `deploy --publish` moves to the version it publishes. Leave it out and
+        # --publish still publishes a version, moving nothing.
+        live_alias: live
     buckets:
       raw: my-{env}-raw-data-bucket
       curated: my-{env}-curated-data-bucket
@@ -302,11 +314,22 @@ class LambdaConfig(ResourceModel):
 
 class StepFunctionConfig(ResourceModel):
     RESOURCE: ClassVar[str] = 'sfn'
+    PATH_FIELDS: ClassVar[Mapping[str, PathKind]] = {'definition_file': PathKind.FILE}
 
     name: str
     # CloudWatch log group the state machine logs to. Required only to include this state
     # machine in `monitor`; `sfn logs` reads the execution history API and needs no log group.
     log_group: str = ''
+    # The ASL file Terraform renders with templatefile(), and the one field `deploy` needs, so
+    # setting it is what adds the verb. Sent as the definition with no key derived from it, so
+    # like a lambda source_dir it may sit outside the pipeline's root.
+    definition_file: str | None = None
+    # Template variable -> value, one per ${name} in definition_file. CloudFormation and SAM give
+    # this map the same name, for the same ${name} syntax.
+    definition_substitutions: dict[str, str] = {}
+    # The state machine alias `deploy --publish` moves to the version it publishes. Named as the
+    # lambda one is, and for the same reason: "alias" is already the config key you type.
+    live_alias: str | None = None
 
 
 class IcebergTableConfig(ResourceModel):
@@ -341,9 +364,10 @@ class PipelineConfig(ResourceModel):
     FIELD_RESOURCE: ClassVar[Mapping[str, str]] = {'buckets': 's3'}
 
     # Directory holding this pipeline's code. Every relative path in the block below — a lambda's
-    # source_dir, a glue job's scripts — resolves against it, so a deploy targets the same files
-    # from any working directory. Left unset they resolve against the process's working
-    # directory, so a config that names none has to be run from the pipeline's checkout.
+    # source_dir, a glue job's scripts, a state machine's definition_file — resolves against it,
+    # so a deploy targets the same files from any working directory. Left unset they resolve
+    # against the process's working directory, so a config that names none has to be run from
+    # the pipeline's checkout.
     resolve_paths_from: str | None = None
     glue_jobs: dict[str, GlueJobConfig] = {}
     lambdas: dict[str, LambdaConfig] = {}
