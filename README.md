@@ -270,6 +270,50 @@ dectl salesdata sfn ingest runs                                  # recent execut
 (`TaskStateEntered`, `LambdaFunctionScheduled`, `ExecutionSucceeded`, …) — using
 the `GetExecutionHistory` API, so no CloudWatch logging setup is required.
 
+### Deploying a definition Terraform templates
+
+A definition kept as an `.asl.json` file that Terraform renders with `templatefile()` can be
+pushed straight from your checkout, the way a Glue script or Lambda code is. Name the file and
+give a value for each `${name}` placeholder in it:
+
+```yaml
+step_functions:
+  ingest:
+    name: salesdata-{env}-ingest
+    definition_file: modules/step_functions/ingest.asl.json
+    definition_substitutions:
+      notify_arn: arn:aws:lambda:us-east-2:123456789012:function:salesdata-{env}-notify
+      copy_job: salesdata-{env}-copy
+    live_alias: live            # optional; what deploy --publish moves
+```
+
+```bash
+dectl salesdata sfn ingest deploy --plan      # diff against the live definition, write nothing
+dectl salesdata sfn ingest deploy             # replace the live definition
+dectl salesdata sfn ingest deploy --publish   # ...and publish a version, moving live_alias to it
+```
+
+`deploy` renders the file exactly as Terraform would, byte for byte, then validates it with
+Step Functions. It replaces only the definition. The role, logging and tracing stay as Terraform
+set them, and a definition identical to the live one, byte for byte, is not written at all. A
+placeholder with no entry is refused with its line, and with the value the live definition holds
+where it sits. That value is printed as the config entry, with `{env}` in place of the active
+environment's name.
+
+Commit the same file and Terraform's next plan reports no change. Don't, and the next
+`terraform apply` puts the committed definition back.
+
+- **Only `${name}` is substituted.** `$${` and `%%{` escape as Terraform escapes them. A
+  `%{ if }` directive or an expression such as `${jsonencode(x)}` is refused rather than guessed
+  at.
+- **A number or boolean renders as Terraform renders it.** `timeout: 300` fills an unquoted
+  `"TimeoutSeconds": ${timeout}`, and `2.0` renders as `2`.
+- **`{env}` belongs to the values, never the file.** A template's own `${env}` is a Terraform
+  variable like any other and needs an entry, such as `env: "{env}"`.
+- **`run` starts the latest definition, and an alias does not follow it.** Anything triggering
+  executions through an alias keeps the old version until `deploy --publish`. For a few seconds
+  after either write, a new execution may still get the previous one.
+
 ## Monitor a whole pipeline
 
 `monitor` tails several resources at once as a single time-ordered stream, so you

@@ -154,6 +154,11 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
             alias: {
                 'name': substitute_env(sfn.name),
                 'log_group': substitute_env(sfn.log_group),
+                'definition_file': substitute_env(sfn.definition_file) if sfn.definition_file is not None else None,
+                # What a deploy writes into the definition under this environment, which is the
+                # thing to check before deploying to a new one.
+                'definition_substitutions': {name: substitute_env(value) for name, value in sfn.definition_substitutions.items()},
+                'live_alias': substitute_env(sfn.live_alias) if sfn.live_alias else None,
                 'paths': resolved.get(('sfn', alias), {}),
             }
             for alias, sfn in pipeline.step_functions.items()
@@ -214,6 +219,10 @@ def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
         print_paths('lambda', alias)
     for alias, sfn in pipeline.step_functions.items():
         info(f'  sfn/{alias}: {substitute_env(sfn.name)}')
+        for name, value in sfn.definition_substitutions.items():
+            info(f'    ${{{name}}}: {substitute_env(value)}')
+        if sfn.live_alias:
+            info(f'    live alias: {substitute_env(sfn.live_alias)}')
         print_paths('sfn', alias)
     for alias, bucket in pipeline.buckets.items():
         info(f'  s3/{alias}: {substitute_env(bucket)}')

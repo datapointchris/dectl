@@ -198,6 +198,7 @@ REFERENCE_INSTANCE_VERBS = [
     'glue    ALIAS  deploy · run [--follow] · logs [RUN_ID] [--follow] · runs [--limit N] [--json]',
     'lambda  ALIAS  deploy [--publish] · run [--payload-file F|-] [--json] · logs [--follow]',
     'sfn     ALIAS  run [--payload-file F|-] [--follow] · logs [ARN] [--follow] · runs [--limit N] [--json]',
+    '               deploy [--plan] [--publish]   (a machine configured with definition_file)',
     's3      ALIAS  mount · unmount · uri',
     'iceberg ALIAS  snapshots [--limit N] [--json] · history [--limit N] [--json]',
     '               files [SNAPSHOT] [--limit N] [--json] · branches [--limit N] [--json]',

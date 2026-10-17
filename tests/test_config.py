@@ -326,24 +326,6 @@ def test_buckets_default_to_empty_when_omitted():
     assert config.pipelines['p'].buckets == {}
 
 
-def test_step_functions_parsed_with_optional_log_group():
-    raw = {
-        'defaults': {'account_id': '111'},
-        'pipelines': {
-            'p': {
-                'step_functions': {
-                    'flow': {'name': 'my-flow', 'log_group': '/aws/vendedlogs/states/my-flow'},
-                    'bare': {'name': 'bare-flow'},
-                }
-            }
-        },
-    }
-    config = DectlConfig.model_validate(raw)
-    step_functions = config.pipelines['p'].step_functions
-    assert step_functions['flow'].log_group == '/aws/vendedlogs/states/my-flow'
-    assert step_functions['bare'].log_group == ''
-
-
 def test_monitor_selection_parsed():
     raw = {
         'defaults': {'account_id': '111'},
@@ -490,6 +472,11 @@ UNCHECKED_FIELDS = {
     (LambdaConfig, 'live_alias'): 'a Lambda alias; update_alias validates it',
     (StepFunctionConfig, 'name'): 'a state machine name; the API is what says whether it exists',
     (StepFunctionConfig, 'log_group'): 'a CloudWatch log group; monitor reports it unset',
+    (
+        StepFunctionConfig,
+        'definition_substitutions',
+    ): 'values written into the definition; ValidateStateMachineDefinition judges the result',
+    (StepFunctionConfig, 'live_alias'): 'a state machine alias; deploy --publish reports it absent before writing anything',
     (IcebergTableConfig, 'database'): 'a Glue Data Catalog database; GetTable reports its absence',
     (IcebergTableConfig, 'table'): 'a Glue Data Catalog table; GetTable reports its absence',
     (MonitorConfig, 'lambdas'): 'aliases into this pipeline; build_monitor_sources warns on a dangling one',
@@ -611,7 +598,7 @@ def test_every_declared_path_field_reaches_declared_paths():
             'resolve_paths_from': '/srv/salesdata',
             'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'sales-scripts', 'scripts': ['x.py'], 'role': 'r'}},
             'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}},
-            'step_functions': {'flow': {'name': 'm'}},
+            'step_functions': {'flow': {'name': 'm', 'definition_file': 'flow.asl.json'}},
             'buckets': {'raw': 'sales-raw'},
             'iceberg_tables': {'events': {'database': 'd', 'table': 't'}},
         }

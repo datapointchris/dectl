@@ -361,11 +361,11 @@ def test_every_resolved_path_reaches_both_renderers(capsys, monkeypatch, kind, o
     writes a `paths` key per section and `render_pipeline` calls `print_paths` once per kind;
     either one missing leaves a path resolved and shown by the other door alone.
 
-    A declaration is injected on each kind rather than relying on the ones that exist. `sfn` and
-    `iceberg` declare no path field today, so a test reading only what they already resolve
-    loops over nothing — which is how the `--json` half passed with both its `paths` keys
-    pointed at the wrong resource. The assertion that the loop found something is what makes
-    the injection load-bearing rather than decorative."""
+    A declaration is injected on each kind rather than relying on the ones that exist. `iceberg`
+    declares no path field, and `sfn`'s is optional and unset here, so a test reading only what
+    they already resolve loops over nothing — which is how the `--json` half passed with both
+    its `paths` keys pointed at the wrong resource. The assertion that the loop found something
+    is what makes the injection load-bearing rather than decorative."""
     monkeypatch.setattr(owner, 'PATH_FIELDS', {field: PathKind.FILE})
     pipeline = paths_pipeline()
     resolved = resolved_paths(pipeline)

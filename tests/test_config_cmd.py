@@ -36,13 +36,13 @@ def test_path_prints_config_path(monkeypatch, tmp_path):
     assert str(config_path) in result.stdout
 
 
-def test_example_prints_every_option():
-    # CliRunner output is not a TTY, so the plain-text branch runs and emits raw YAML.
+def test_piped_example_is_the_template():
+    # `dectl config example > config.yaml` writes a config, so piped output is the template
+    # itself. CliRunner output is not a TTY, which selects the piped branch.
     result = runner.invoke(config_app, ['example'])
 
     assert result.exit_code == 0
-    for option in ('glue_jobs', 'lambdas', 'step_functions', 'buckets', 'monitor'):
-        assert option in result.stdout
+    assert result.stdout == TEMPLATE_CONFIG
 
 
 def test_validate_accepts_the_template(monkeypatch, tmp_path):
