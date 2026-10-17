@@ -236,6 +236,6 @@ def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
     if monitored:
         info(f'  monitor: {", ".join(monitored)}')
     if pipeline.jenkins is not None:
-        actions = f' (actions: {", ".join(pipeline.jenkins.actions)})' if pipeline.jenkins.actions else ''
-        info(f'  jenkins: {substitute_env(pipeline.jenkins.job_path)}{actions}')
+        actions = ', '.join(pipeline.jenkins.actions) or 'none, so nothing queues a build'
+        info(f'  jenkins: {substitute_env(pipeline.jenkins.job_path)} (actions: {actions})')
     info('')

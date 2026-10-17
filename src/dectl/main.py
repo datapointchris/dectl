@@ -136,7 +136,8 @@ if cfg:
         if pipeline.iceberg_tables:
             resources.append(f'iceberg ({", ".join(pipeline.iceberg_tables)})')
         if pipeline.jenkins and cfg.jenkins:
-            resources.append('jenkins')
+            actions = pipeline.jenkins.actions
+            resources.append(f'jenkins ({", ".join(actions)})' if actions else 'jenkins')
         summary = ' · '.join(resources) if resources else 'none configured'
         pipeline_app = typer.Typer(
             no_args_is_help=True,

@@ -51,11 +51,18 @@ def make_jenkins_app(pipeline_name: str, job_config: JenkinsJobConfig, config: D
 
     What a build does is the job's business, so dectl names no action itself. The panel and each
     verb's help show the config as written, because they are built before `--env` is parsed."""
+    if job_config.actions:
+        verbs = 'Each action from the config queues a build posting its own parameters.'
+    else:
+        verbs = (
+            'No actions are configured, so nothing here queues a build. Each key under this '
+            "pipeline's jenkins.actions becomes a verb, posting its own parameters on top of the "
+            'job\'s, as "dectl config example" shows.'
+        )
     jenkins_app = typer.Typer(
         help=(
             f'Build the Jenkins job of [bold]{pipeline_name}[/bold]: {job_config.job_path}\n\n'
-            'Each action from the config queues a build posting its own parameters. "status" and '
-            '"logs" read the last build without starting a new one.'
+            f'{verbs} "status" and "logs" read the last build without starting a new one.'
         ),
         no_args_is_help=True,
     )
