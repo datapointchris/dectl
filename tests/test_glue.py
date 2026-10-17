@@ -12,10 +12,10 @@ from dectl.commands.glue import ResolvedScript
 from dectl.commands.glue import apply_glue_job_update
 from dectl.commands.glue import build_job_update
 from dectl.commands.glue import configured_uris
+from dectl.commands.glue import confirm_glue_job_update
 from dectl.commands.glue import follow_glue_run
 from dectl.commands.glue import job_definition_changes
 from dectl.commands.glue import make_glue_app
-from dectl.commands.glue import plan_glue_job_update
 from dectl.commands.glue import resolve_scripts
 from dectl.commands.glue import upload_scripts
 from dectl.config import ROOT_SITE
@@ -86,7 +86,7 @@ def make_job(**overrides):
 def apply(glue, job):
     """The sequence `deploy` runs, so these tests exercise the path the CLI takes."""
     session = FakeSession(glue)
-    job_update = plan_glue_job_update(session, job, assume_yes=True)
+    job_update = confirm_glue_job_update(session, job, assume_yes=True)
     if job_update is not None:
         apply_glue_job_update(session, job, job_update)
 
@@ -375,7 +375,7 @@ def test_no_input_refuses_the_prompt_even_on_a_terminal(monkeypatch):
     glue = FakeGlueClient(existing_job={'Command': {'Name': 'pythonshell'}})
 
     with pytest.raises(typer.Exit):
-        plan_glue_job_update(FakeSession(glue), make_job())
+        confirm_glue_job_update(FakeSession(glue), make_job())
 
     assert glue.captured_update is None
 

@@ -22,7 +22,7 @@ import botocore.exceptions
 import pytest
 
 from dectl.commands.glue import apply_glue_job_update
-from dectl.commands.glue import plan_glue_job_update
+from dectl.commands.glue import confirm_glue_job_update
 from dectl.config import GlueJobConfig
 
 pytestmark = pytest.mark.integration
@@ -92,7 +92,7 @@ def test_deploy_preserves_existing_job_definition(session, glue_role_arn, capaci
             role=glue_role_arn,
             arguments={'new-flag': 'on'},
         )
-        job_update = plan_glue_job_update(session, glue_job, assume_yes=True)
+        job_update = confirm_glue_job_update(session, glue_job, assume_yes=True)
         if job_update is not None:
             apply_glue_job_update(session, glue_job, job_update)
 
@@ -135,9 +135,9 @@ def live_job(session, **create_kwargs):
 def deploy_definition(session, glue_job):
     """The definition half of `deploy`, and whether it had anything to do.
 
-    False means `plan_glue_job_update` found nothing to change, which is the state the whole
+    False means `confirm_glue_job_update` found nothing to change, which is the state the whole
     diff exists to reach: a deploy that is a pure script push with no drift surface."""
-    job_update = plan_glue_job_update(session, glue_job, assume_yes=True)
+    job_update = confirm_glue_job_update(session, glue_job, assume_yes=True)
     if job_update is None:
         return False
     apply_glue_job_update(session, glue_job, job_update)

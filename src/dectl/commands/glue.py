@@ -333,7 +333,8 @@ def render_job_changes(job_name: str, changes: list[tuple[str, str, str]]) -> No
 def diff_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig) -> dict | None:
     """Build the definition update and print what it changes, or None when nothing dectl manages differs.
 
-    The whole of `plan`, and the part of `deploy` before its confirmation."""
+    Reads the live job and writes nothing. Callers run `resolve_scripts` first, so a rehearsal
+    refuses every config a deploy refuses."""
     glue = session.client('glue')
     existing = glue.get_job(JobName=glue_job.name)['Job']
     update = build_job_update(existing, glue_job)
@@ -347,7 +348,7 @@ def diff_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig) -> dic
     return update.definition
 
 
-def plan_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig, assume_yes: bool = False) -> dict | None:
+def confirm_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig, assume_yes: bool = False) -> dict | None:
     """Everything about a definition update that can refuse: build it, show it, confirm it.
 
     Terraform owns these jobs once a pipeline is established, so an UpdateJob that silently
@@ -504,7 +505,7 @@ def make_glue_job_app(
         # Resolve and check before anything reaches AWS, so plan refuses what deploy refuses.
         sources = resolve_scripts(pipeline_name, pipeline, alias)
         session = make_session(config)
-        job_update = plan_glue_job_update(session, job, assume_yes=yes)
+        job_update = confirm_glue_job_update(session, job, assume_yes=yes)
         upload_scripts(session, job, sources)
         if job_update is not None:
             apply_glue_job_update(session, job, job_update)

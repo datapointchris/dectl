@@ -155,8 +155,8 @@ environment's own name carries the token.
 `test_every_site_composing_a_script_destination_substitutes_exactly_once` drives all four.
 
 `deploy` runs everything that can refuse before it writes anything: `resolve_scripts`, then
-`plan_glue_job_update`, then the upload, then `apply_glue_job_update`. A refusal after the upload
-leaves `ScriptLocation` pointing at code the user was just told not to deploy. A config naming
+`confirm_glue_job_update`, then the upload, then `apply_glue_job_update`. A refusal after the
+upload leaves `ScriptLocation` pointing at code the user was just told not to deploy. A config naming
 both sizing models, or half the worker pair, is refused by `GlueJobConfig` itself. That is a fact
 about the config alone, so it is a field validator rather than one of `values.py`'s faults.
 
