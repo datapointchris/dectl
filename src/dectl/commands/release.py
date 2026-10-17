@@ -9,6 +9,7 @@ import typer
 from dectl.config import CONFIG_PATH
 from dectl.config import DectlConfig
 from dectl.config import JenkinsJobConfig
+from dectl.env import render_env_model
 from dectl.output import emit_json
 from dectl.output import error
 from dectl.output import info
@@ -50,7 +51,9 @@ def make_release_app(pipeline_name: str, job_config: JenkinsJobConfig, config: D
     )
 
     def queue_build(action: str, follow: bool) -> None:
-        params = dict(job_config.parameters)
+        # {env} substituted at call time like every other config value, because --env is not
+        # parsed until the command runs.
+        params = dict(render_env_model(job_config).parameters)
         params['ACTION'] = action
 
         job_path = job_config.job_path.replace('/', '/job/')
