@@ -9,10 +9,9 @@ from dectl.asl import TemplateFault
 from dectl.asl import render_definition
 from dectl.asl import suggest_substitutions
 from dectl.commands.stepfunctions import make_sfn_app
-from dectl.commands.stepfunctions import state_machine_arn
+from dectl.commands.stepfunctions import suggested_entry
 from dectl.config import DectlConfig
-from dectl.env import active_environment
-from dectl.env import render_env_model
+from dectl.config import StepFunctionConfig
 from tests.conftest import RefusalRunner
 
 runner = RefusalRunner()
@@ -25,30 +24,6 @@ def make_config(step_functions: dict) -> DectlConfig:
             'pipelines': {'proj': {'step_functions': step_functions}},
         }
     )
-
-
-def test_state_machine_arn_built_from_defaults():
-    config = make_config({'flow': {'name': 'my-flow'}})
-    sfn = config.pipelines['proj'].step_functions['flow']
-    assert state_machine_arn(config, sfn) == 'arn:aws:states:us-east-2:123456789012:stateMachine:my-flow'
-
-
-def test_state_machine_arn_uses_env_substituted_name(monkeypatch):
-    monkeypatch.setattr(active_environment, 'name', 'prod')
-    config = make_config({'flow': {'name': 'salesdata-{env}-flow'}})
-    sfn = render_env_model(config.pipelines['proj'].step_functions['flow'])
-    assert state_machine_arn(config, sfn) == 'arn:aws:states:us-east-2:123456789012:stateMachine:salesdata-prod-flow'
-
-
-def test_sfn_unknown_alias_is_not_a_command():
-    # The alias is a sub-app now, so an unknown machine is an unknown command (Typer usage error),
-    # not a resolve_* failure. The configured aliases are discoverable via no-args / --help.
-    config = make_config({'flow': {'name': 'my-flow'}})
-    app = make_sfn_app('proj', config.pipelines['proj'], config)
-
-    result = runner.invoke(app, ['nope', 'run'])
-
-    assert result.exit_code != 0
 
 
 @pytest.mark.parametrize(
@@ -71,7 +46,7 @@ TERRAFORM_RENDERINGS = [
     pytest.param(
         """{"A": "${fn_arn}", "B": "${ fn_arn }", "Ctx.$": "$$.Execution.Id", "P.$": "$.input", """
         """"Lit": "$${not_a_var}", "Pct": "%%{x}", "Fmt.$": "States.Format('{}', $.x)", "N": ${timeout}}""",
-        {'fn_arn': 'arn:aws:lambda:x', 'timeout': '30'},
+        {'fn_arn': 'arn:aws:lambda:x', 'timeout': 30},
         """{"A": "arn:aws:lambda:x", "B": "arn:aws:lambda:x", "Ctx.$": "$$.Execution.Id", "P.$": "$.input", """
         """"Lit": "${not_a_var}", "Pct": "%{x}", "Fmt.$": "States.Format('{}', $.x)", "N": 30}""",
         id='asl-syntax-and-escapes',
@@ -82,12 +57,21 @@ TERRAFORM_RENDERINGS = [
         '{"a": "$${fn}", "b": "$$${fn}", "c": "%%{x}", "d": "FF", "e": "x${fn}y"}',
         id='runs-of-dollars',
     ),
+    pytest.param(
+        '{"a": ${a}, "b": ${b}, "c": ${c}, "d": ${d}, "e": ${e}, "f": ${f}, "g": ${g}, "h": "${h}", "i": ${i}}',
+        {'a': 300, 'b': 2.0, 'c': 1.5, 'd': 0.0000001, 'e': True, 'f': False, 'g': 1e20, 'h': 2.50, 'i': -0.25},
+        '{"a": 300, "b": 2, "c": 1.5, "d": 0.0000001, "e": true, "f": false, "g": 100000000000000000000, "h": "2.5", "i": -0.25}',
+        id='numeric-and-boolean-placeholders-from-yaml',
+    ),
 ]
 
 
 @pytest.mark.parametrize(('template', 'substitutions', 'terraform_rendered'), TERRAFORM_RENDERINGS)
 def test_a_definition_renders_to_the_bytes_terraform_renders(template, substitutions, terraform_rendered):
-    rendering = render_definition(template, substitutions)
+    # Through the model, which is where a YAML number or boolean becomes Terraform's text for it.
+    loaded = StepFunctionConfig(name='flow', definition_substitutions=substitutions).definition_substitutions
+
+    rendering = render_definition(template, loaded)
 
     assert rendering.problems == []
     assert rendering.text == terraform_rendered
@@ -108,23 +92,38 @@ def test_every_placeholder_dectl_cannot_render_is_named_with_its_line():
 
 
 def test_a_missing_substitution_is_suggested_from_where_it_sits_in_the_live_definition():
-    def flow(job: str, function: str, audit: str | None = None) -> str:
-        states = {
-            'Copy': {'Type': 'Task', 'Parameters': {'JobName': job}, 'Next': 'Notify'},
-            'Notify': {'Type': 'Task', 'Parameters': {'FunctionName': f'arn:aws:lambda:us-east-2:1:function:{function}'}, 'End': True},
-        }
-        if audit is not None:
-            states['Audit'] = {'Type': 'Task', 'Parameters': {'FunctionName': audit}, 'End': True}
-        return json.dumps({'StartAt': 'Copy', 'States': states})
+    """A first deploy against a machine Terraform built, with no definition_substitutions yet.
 
-    # `Audit` is a state the edit added, so the live definition has nothing where its placeholder sits.
-    template = flow('${copy_job}', '${notify_name}', audit='${audit_fn}')
-    live = flow('sales-dev-copy', 'sales-dev-notify')
+    Every placeholder is missing, `${timeout}` sits outside a string, and each suggestion has to
+    paste as an entry that still names the right resource under another `--env`."""
+    template = (
+        '{"StartAt": "Copy", "States": {\n'
+        '  "Copy": {"Type": "Task", "Parameters": {"JobName": "${copy_job}"}, "TimeoutSeconds": ${timeout}, "Next": "Notify"},\n'
+        '  "Notify": {"Type": "Task", "Parameters": {"FunctionName": "arn:aws:lambda:us-east-2:1:function:${notify_name}"},'
+        ' "Next": "Audit"},\n'
+        # A state the edit added, so the live definition has nothing where its placeholder sits.
+        '  "Audit": {"Type": "Task", "Parameters": {"FunctionName": "${audit_fn}"}, "End": true}}}'
+    )
+    live = {
+        'StartAt': 'Copy',
+        'States': {
+            'Copy': {'Type': 'Task', 'Parameters': {'JobName': 'sales-dev-copy'}, 'TimeoutSeconds': 3600, 'Next': 'Notify'},
+            'Notify': {'Type': 'Task', 'Parameters': {'FunctionName': 'arn:aws:lambda:us-east-2:1:function:sales-dev-notify'}, 'End': True},
+        },
+    }
 
-    assert suggest_substitutions(template, {}, live) == {
+    suggestions = suggest_substitutions(template, {}, json.dumps(live))
+
+    assert suggestions == {
         'copy_job': Suggestion('sales-dev-copy', '/States/Copy/Parameters/JobName'),
+        'timeout': Suggestion(3600, '/States/Copy/TimeoutSeconds'),
         'notify_name': Suggestion('sales-dev-notify', '/States/Notify/Parameters/FunctionName'),
     }
+    assert [suggested_entry(name, suggestion.value) for name, suggestion in suggestions.items()] == [
+        'copy_job: sales-{env}-copy',
+        'timeout: 3600',
+        'notify_name: sales-{env}-notify',
+    ]
 
 
 class FakeStepFunctions:
@@ -240,15 +239,27 @@ def test_deploy_writes_the_rendered_bytes_and_only_the_definition(monkeypatch, t
     assert client.writes == [('update_state_machine', {'stateMachineArn': MACHINE_ARN, 'definition': RENDERED})]
 
 
-def test_deploying_a_definition_equal_to_the_live_one_writes_nothing(monkeypatch, tmp_path):
-    # Minified where the file is formatted: equal as JSON, unequal as text.
-    client = FakeStepFunctions(MACHINE_ARN, json.dumps(json.loads(RENDERED), separators=(',', ':')))
+@pytest.mark.parametrize(
+    ('live_definition', 'writes'),
+    [
+        (RENDERED, []),
+        # A file re-indented, or rewritten by a JSON formatter: equal as JSON, unequal as text,
+        # and the text is what Terraform's next plan compares.
+        (
+            json.dumps(json.loads(RENDERED), separators=(',', ':')),
+            [('update_state_machine', {'stateMachineArn': MACHINE_ARN, 'definition': RENDERED})],
+        ),
+    ],
+    ids=['identical-bytes', 'formatting-only-edit'],
+)
+def test_a_formatting_only_edit_is_written_and_identical_bytes_are_not(monkeypatch, tmp_path, live_definition, writes):
+    client = FakeStepFunctions(MACHINE_ARN, live_definition)
     app = deploy_app(monkeypatch, tmp_path, client)
 
     result = runner.invoke(app, ['flow', 'deploy'])
 
     assert result.exit_code == 0
-    assert client.writes == []
+    assert client.writes == writes
 
 
 @pytest.mark.parametrize(

@@ -69,8 +69,9 @@ names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
   the `s3` app itself, beside the per-bucket alias sub-apps.
 - `lambda`/`sfn` `run` take payloads through `payloads.read_payload`: from `--payload-file F` or
   from stdin as `-`, never from an inline string argument.
-- `sfn` `deploy` exists only for a machine naming a `definition_file`, the same config-assembled
-  swap as the durable lambda verbs. Rendering a definition lives in `src/dectl/asl.py`.
+- `sfn` `deploy` exists only for a machine naming a `definition_file`: config decides whether the
+  verb is there, as `durable` does for the lambda verbs. Rendering a definition lives in
+  `src/dectl/asl.py`.
 - `monitor` is a **pipeline-level** command registered on `pipeline_app`, because it spans
   several resources. It tails every resource its `monitor` config block selects as one
   time-ordered stream via `logs.tail_log_groups`.
@@ -270,14 +271,18 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
   stores the live definition verbatim on refresh and compares it with `templatefile`'s output
   unnormalized. Identical bytes are what make Terraform's next plan over the same file report no
   change, and anything else shows as a whitespace diff on every plan. Whether to write is decided
-  on the parsed JSON, so a definition equal to the live one is not written.
+  on the bytes, and the parsed JSON decides only whether the diff is semantic.
 - **`render_definition` substitutes a bare `${name}` and nothing else.** A directive, an
   expression or a strip marker is a `TemplateFault` rather than an approximation, because a
   near-miss renders a definition Terraform would not. `TEMPLATE_SEQUENCE` tries the escapes first
   at each position, which is how Terraform scans a run of `$`.
+- **A number or boolean substitution is held as Terraform's text for it.** `template_text` runs
+  as the model loads, so `2.0` renders as `2` and `true` as `true`, as `templatefile` writes them.
+  Python's `str` writes `2.0` and `True`, which are different definition strings.
 - **`{env}` is substituted in `definition_substitutions`, never in the file.** `substitute_env`
   replaces the literal `{env}`, so run over the template it would turn a Terraform `${env}` into
-  `$dev`.
+  `$dev`. The reverse holds for a suggestion: a live value names one environment, so
+  `suggested_entry` writes it back as `{env}` through `generalize_env` before printing it.
 - **`UpdateStateMachine` patches; it is not Glue's `UpdateJob`.** Sending `definition` alone
   leaves the role, logging and tracing as they are, so there is no `build_job_update` here. There
   is no confirm prompt either: the definition is the code being iterated on, so a prompt would fire

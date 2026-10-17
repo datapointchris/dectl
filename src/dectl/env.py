@@ -1,3 +1,4 @@
+import re
 from typing import Any
 
 import typer
@@ -50,6 +51,12 @@ def substitute_env(value: str) -> str:
     # Replace only the literal {env} token, leaving any other braces (JSON payloads, IAM policy
     # variables) untouched — which str.format would not.
     return value.replace(ENV_PLACEHOLDER, active_environment.name)
+
+
+def generalize_env(value: str) -> str:
+    """`substitute_env` reversed: the active env written back as {env} wherever it is a whole segment."""
+    segment = rf'(?<![A-Za-z0-9]){re.escape(active_environment.name)}(?![A-Za-z0-9])'
+    return re.sub(segment, ENV_PLACEHOLDER, value)
 
 
 def render_value(value: Any) -> Any:

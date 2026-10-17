@@ -295,8 +295,10 @@ dectl salesdata sfn ingest deploy --publish   # ...and publish a version, moving
 
 `deploy` renders the file exactly as Terraform would, byte for byte, then validates it with
 Step Functions. It replaces only the definition. The role, logging and tracing stay as Terraform
-set them, and a definition equal to the live one is not written at all. A placeholder with no
-entry is refused with its line, and with the value the live definition holds where it sits.
+set them, and a definition identical to the live one, byte for byte, is not written at all. A
+placeholder with no entry is refused with its line, and with the value the live definition holds
+where it sits. That value is printed as the config entry, with `{env}` in place of the active
+environment's name.
 
 Commit the same file and Terraform's next plan reports no change. Don't, and the next
 `terraform apply` puts the committed definition back.
@@ -304,6 +306,8 @@ Commit the same file and Terraform's next plan reports no change. Don't, and the
 - **Only `${name}` is substituted.** `$${` and `%%{` escape as Terraform escapes them. A
   `%{ if }` directive or an expression such as `${jsonencode(x)}` is refused rather than guessed
   at.
+- **A number or boolean renders as Terraform renders it.** `timeout: 300` fills an unquoted
+  `"TimeoutSeconds": ${timeout}`, and `2.0` renders as `2`.
 - **`{env}` belongs to the values, never the file.** A template's own `${env}` is a Terraform
   variable like any other and needs an entry, such as `env: "{env}"`.
 - **`run` starts the latest definition, and an alias does not follow it.** Anything triggering

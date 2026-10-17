@@ -1,4 +1,5 @@
 import json
+import math
 from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated
@@ -6,6 +7,7 @@ from typing import Any
 from typing import NoReturn
 
 import typer
+import yaml
 from botocore.exceptions import BotoCoreError
 from botocore.exceptions import ClientError
 from rich.markup import escape
@@ -23,6 +25,8 @@ from dectl.config import PipelineConfig
 from dectl.config import StepFunctionConfig
 from dectl.config import pipeline_value_faults
 from dectl.config import resolve_from_root
+from dectl.env import active_environment
+from dectl.env import generalize_env
 from dectl.env import render_env_model
 from dectl.env import substitute_env
 from dectl.logs import tail_execution_history
@@ -83,8 +87,23 @@ def refuse_template_problems(
         error(escape(f'  line {problem.line}: {problem.fragment} {TEMPLATE_FAULT_WORDING[problem.fault]}'))
         suggestion = suggestions.get(problem.name)
         if suggestion:
-            error(escape(f'    the live definition holds {suggestion.value} at {suggestion.location}'))
+            error(escape(f'    the live definition holds {suggestion.value} at {suggestion.location}. As config:'))
+            error(escape(f'      {suggested_entry(problem.name, suggestion.value)}'))
     raise typer.Exit(1)
+
+
+def suggested_entry(name: str, value: str | int | float | bool) -> str:
+    """The `definition_substitutions` line a suggestion pastes as, the active env written as {env}.
+
+    The live value names the environment it was deployed to, so pasted as read it would point
+    every other environment at this one's resources."""
+    note = ''
+    if isinstance(value, str):
+        general = generalize_env(value)
+        if general == value:
+            note = f'   (no {active_environment.name} segment in it to write as {{env}})'
+        value = general
+    return yaml.safe_dump({name: value}, allow_unicode=True, width=math.inf).strip() + note
 
 
 def parse_rendered(source: Path, text: str) -> Any:
@@ -208,8 +227,8 @@ def add_deploy_verb(
         """Render the definition file and make it the state machine's definition (starts no execution).
 
         Only the definition is written: the role, logging and tracing stay as Terraform set them.
-        When the rendered definition matches the live one, nothing is written. An execution
-        started within a few seconds of a deploy may still run the previous definition.
+        When the rendered definition matches the live one byte for byte, nothing is written. An
+        execution started within a few seconds of a deploy may still run the previous definition.
 
         `run` starts the latest definition, so it picks up a deploy without --publish. Anything
         starting executions through an alias keeps the old one until --publish moves that alias."""
@@ -237,12 +256,17 @@ def add_deploy_verb(
         refuse_invalid_definition(client, rendering.text, live['type'])
         routing = current_alias_routing(client, alias_arn(machine_arn, sfn.live_alias)) if publish and sfn.live_alias else []
 
+        # Decided on the bytes, because the AWS provider compares the raw strings: a definition
+        # differing only in formatting still shows as `~ definition` in Terraform's next plan.
+        # The parsed JSON decides only what the diff says.
+        changed = rendering.text != live['definition']
         live_definition = json.loads(live['definition'])
-        changed = rendered != live_definition
-        if changed:
-            print_definition_diff(definition_diff(live_definition, rendered, f'{sfn.name} (live)', str(source)))
-        else:
+        if not changed:
             info(f'{sfn.name}: definition unchanged')
+        elif rendered == live_definition:
+            info(f'{sfn.name}: the definition differs in formatting only, with no change to its meaning')
+        else:
+            print_definition_diff(definition_diff(live_definition, rendered, f'{sfn.name} (live)', str(source)))
 
         if plan:
             if publish:

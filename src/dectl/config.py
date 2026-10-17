@@ -1,17 +1,20 @@
 from collections.abc import Mapping
 from pathlib import Path
 from pathlib import PurePosixPath
+from typing import Annotated
 from typing import ClassVar
 from typing import get_args
 
 import yaml
 from pyclisteno.paths import config_home
 from pydantic import BaseModel
+from pydantic import BeforeValidator
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import ValidationError
 from pydantic import model_validator
 
+from dectl.asl import template_text
 from dectl.env import substitute_env
 from dectl.output import error
 from dectl.output import stderr_console
@@ -136,10 +139,12 @@ pipelines:
         # stay as Terraform set them.
         definition_file: modules/step_functions/my_flow.asl.json
         # One entry per ${name} in that file, with {env} where the environment goes. The {env}
-        # token is substituted here and never in the file itself.
+        # token is substituted here and never in the file itself. A number or boolean is written
+        # into the definition the way Terraform writes it.
         definition_substitutions:
           process_function_arn: arn:aws:lambda:us-east-2:123456789012:function:my-{env}-lambda-function
           copy_job_name: my-{env}-source-copy-job
+          copy_timeout_seconds: 3600
         # The alias `deploy --publish` moves to the version it publishes. Leave it out and
         # --publish still publishes a version, moving nothing.
         live_alias: live
@@ -325,8 +330,9 @@ class StepFunctionConfig(ResourceModel):
     # like a lambda source_dir it may sit outside the pipeline's root.
     definition_file: str | None = None
     # Template variable -> value, one per ${name} in definition_file. CloudFormation and SAM give
-    # this map the same name, for the same ${name} syntax.
-    definition_substitutions: dict[str, str] = {}
+    # this map the same name, for the same ${name} syntax. A number or boolean is held as the text
+    # Terraform renders for it, because a placeholder outside a JSON string takes one.
+    definition_substitutions: dict[str, Annotated[str, BeforeValidator(template_text)]] = {}
     # The state machine alias `deploy --publish` moves to the version it publishes. Named as the
     # lambda one is, and for the same reason: "alias" is already the config key you type.
     live_alias: str | None = None

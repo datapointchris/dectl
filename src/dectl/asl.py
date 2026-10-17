@@ -11,12 +11,14 @@ strip marker (`${~ x}`) is reported rather than approximated, because an approxi
 definition Terraform would not.
 """
 
+import bisect
 import difflib
 import json
 import re
 from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 from typing import NamedTuple
@@ -33,10 +35,17 @@ TEMPLATE_SEQUENCE = re.compile(
 # An HCL identifier, which may carry a dash, with the whitespace `${ name }` allows around it.
 BARE_NAME = re.compile(r'\s*([A-Za-z_][A-Za-z0-9_-]*)\s*')
 
-# Private-use code points, so a sentinel cannot collide with anything a definition holds.
-SENTINEL_OPEN = ''
-SENTINEL_CLOSE = ''
-SENTINEL = re.compile(f'{SENTINEL_OPEN}([^{SENTINEL_CLOSE}]*){SENTINEL_CLOSE}')
+# Private-use code points, so a sentinel cannot collide with anything a definition holds. A
+# missing placeholder inside a JSON string is spliced into it as an embedded sentinel. One outside
+# a string becomes a string holding only a bare sentinel, so the document still parses.
+EMBEDDED_OPEN = ''
+EMBEDDED_CLOSE = ''
+EMBEDDED = re.compile(f'{EMBEDDED_OPEN}([^{EMBEDDED_CLOSE}]*){EMBEDDED_CLOSE}')
+BARE_OPEN = ''
+BARE_CLOSE = ''
+BARE = re.compile(f'{BARE_OPEN}([^{BARE_CLOSE}]*){BARE_CLOSE}')
+
+ABSENT = object()
 
 
 class TemplateFault(StrEnum):
@@ -69,17 +78,33 @@ class Rendering(NamedTuple):
 
 
 class Suggestion(NamedTuple):
-    value: str
+    # A number or boolean where the placeholder sits outside a string, so it pastes as one.
+    value: str | int | float | bool
     # A JSON pointer, the form ValidateStateMachineDefinition reports locations in.
     location: str
 
 
+def template_text(value: Any) -> Any:
+    """A number or boolean as Terraform writes it into a template, and anything else untouched.
+
+    Terraform writes a number in plain decimal with no trailing zero, so `2.0` renders as `2` and
+    `1e-7` as `0.0000001`. Python's `str` writes neither that way."""
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return format(Decimal(repr(value)).normalize(), 'f')
+    return value
+
+
 def render_definition(template: str, substitutions: Mapping[str, str]) -> Rendering:
     """The template with every placeholder replaced, and every one that could not be."""
-    return render_with(template, substitutions.get)
+    return render_with(template, lambda name, _offset: substitutions.get(name))
 
 
-def render_with(template: str, lookup: Callable[[str], str | None]) -> Rendering:
+def render_with(template: str, lookup: Callable[[str, int], str | None]) -> Rendering:
+    """Render with `lookup`, which is handed each placeholder's name and its offset in the template."""
     problems: list[TemplateProblem] = []
 
     def replace(match: re.Match[str]) -> str:
@@ -94,7 +119,7 @@ def render_with(template: str, lookup: Callable[[str], str | None]) -> Rendering
             if bare is None:
                 problems.append(TemplateProblem(TemplateFault.NOT_A_BARE_NAME, fragment, line))
                 return fragment
-            value = lookup(bare[1])
+            value = lookup(bare[1], match.start())
             if value is None:
                 problems.append(TemplateProblem(TemplateFault.MISSING_SUBSTITUTION, fragment, line, bare[1]))
                 return fragment
@@ -114,11 +139,17 @@ def suggest_substitutions(template: str, substitutions: Mapping[str, str], live_
     edited to call a different function holds the old one there. That is why this only feeds a
     refusal the reader acts on, and never fills a value itself.
 
-    A placeholder outside a JSON string, or two with nothing between them, is skipped. Neither
-    can be told apart from its neighbors by matching."""
+    Two placeholders with nothing between them are skipped, because matching cannot tell where
+    one ends. A placeholder outside a string with anything beside it leaves the document
+    unparsable, and then nothing is suggested."""
+    strings = string_spans(template)
 
-    def lookup(name: str) -> str:
-        return substitutions.get(name, f'{SENTINEL_OPEN}{name}{SENTINEL_CLOSE}')
+    def lookup(name: str, offset: int) -> str:
+        if name in substitutions:
+            return substitutions[name]
+        if inside(strings, offset):
+            return f'{EMBEDDED_OPEN}{name}{EMBEDDED_CLOSE}'
+        return f'"{BARE_OPEN}{name}{BARE_CLOSE}"'
 
     try:
         rendered = json.loads(render_with(template, lookup).text)
@@ -128,14 +159,17 @@ def suggest_substitutions(template: str, substitutions: Mapping[str, str], live_
 
     found: dict[str, Suggestion] = {}
     for path, value in string_leaves(rendered):
-        parts = SENTINEL.split(value)
-        if len(parts) == 1:
+        live_value = value_at(live, path)
+        if live_value is ABSENT:
+            continue
+        if bare := BARE.fullmatch(value):
+            found.setdefault(bare[1], Suggestion(bare_value(live_value), json_pointer(path)))
+            continue
+        parts = EMBEDDED.split(value)
+        if len(parts) == 1 or not isinstance(live_value, str):
             continue
         literals, names = parts[0::2], parts[1::2]
         if any(not literal for literal in literals[1:-1]):
-            continue
-        live_value = value_at(live, path)
-        if not isinstance(live_value, str):
             continue
         pattern = '(.+?)'.join(re.escape(literal) for literal in literals)
         match = re.fullmatch(pattern, live_value, re.DOTALL)
@@ -144,6 +178,32 @@ def suggest_substitutions(template: str, substitutions: Mapping[str, str], live_
         for name, captured in zip(names, match.groups(), strict=True):
             found.setdefault(name, Suggestion(captured, json_pointer(path)))
     return found
+
+
+def bare_value(live_value: Any) -> str | int | float | bool:
+    """What a placeholder outside a string holds to render `live_value`: a number or boolean as
+    itself, and anything else as its JSON text."""
+    if isinstance(live_value, bool | int | float):
+        return live_value
+    return json.dumps(live_value, ensure_ascii=False)
+
+
+def string_spans(text: str) -> list[tuple[int, int]]:
+    """The offsets of each JSON string's opening and closing quote in `text`."""
+    spans = []
+    start = text.find('"')
+    while start != -1:
+        end = start + 1
+        while end < len(text) and text[end] != '"':
+            end += 2 if text[end] == '\\' else 1
+        spans.append((start, end))
+        start = text.find('"', end + 1)
+    return spans
+
+
+def inside(spans: list[tuple[int, int]], offset: int) -> bool:
+    index = bisect.bisect_right(spans, offset, key=lambda span: span[0]) - 1
+    return index >= 0 and offset < spans[index][1]
 
 
 def string_leaves(node: Any, path: tuple = ()) -> Iterator[tuple[tuple, str]]:
@@ -158,9 +218,10 @@ def string_leaves(node: Any, path: tuple = ()) -> Iterator[tuple[tuple, str]]:
 
 
 def value_at(node: Any, path: tuple) -> Any:
+    """The value at `path`, or `ABSENT`, since a JSON null is a value a path can hold."""
     for step in path:
         if not has_child(node, step):
-            return None
+            return ABSENT
         node = node[step]
     return node
 
