@@ -75,7 +75,7 @@ dectl env
 ## Glue: deploying without the Terraform loop
 
 ```bash
-dectl salesdata glue conform deploy --plan   # what would change; touches nothing
+dectl salesdata glue conform plan            # what would change; touches nothing
 dectl salesdata glue conform deploy          # upload, show the diff, confirm
 dectl salesdata glue conform run --follow    # start it and tail both log streams
 dectl salesdata glue conform runs            # recent runs, --json to script them
@@ -85,7 +85,8 @@ A deploy is two writes with different owners. The script upload is always yours.
 *definition* is Terraform's once a pipeline is established, and dectl keeps write access to it
 because that is the point before Terraform exists — change a worker type and run it, instead of
 commit → Jenkins → apply. So `deploy` diffs its computed definition against the live one and
-confirms before applying. `--plan` shows the diff and exits, `--yes` skips the prompt.
+confirms before applying. `plan` shows the same diff and writes nothing, and `deploy --yes`
+skips the prompt.
 
 ### Three kinds of field, and the difference matters
 
@@ -171,7 +172,8 @@ echo '{"key": "value"}' | dectl salesdata lambda error-notifier run --payload-fi
 dectl salesdata lambda error-notifier deploy --publish
 
 # Canonical release through Jenkins + Terraform
-dectl salesdata release                                   # add --plan for terraform plan only
+dectl salesdata release                                   # terraform apply
+dectl salesdata release plan                              # terraform plan only
 ```
 
 `--publish` requires a `live_alias` on the function in config; without it, deploy only ever
@@ -288,7 +290,7 @@ step_functions:
 ```
 
 ```bash
-dectl salesdata sfn ingest deploy --plan      # diff against the live definition, write nothing
+dectl salesdata sfn ingest plan               # diff against the live definition, write nothing
 dectl salesdata sfn ingest deploy             # replace the live definition
 dectl salesdata sfn ingest deploy --publish   # ...and publish a version, moving live_alias to it
 ```

@@ -195,10 +195,10 @@ if cfg:
 # The option-syntax brackets ([--follow], [OPTIONS], ...) would be parsed as rich style tags, so
 # these lines are printed with markup disabled; section headers get their style via a style arg.
 REFERENCE_INSTANCE_VERBS = [
-    'glue    ALIAS  deploy · run [--follow] · logs [RUN_ID] [--follow] · runs [--limit N] [--json]',
+    'glue    ALIAS  plan · deploy [--yes] · run [--follow] · logs [RUN_ID] [--follow] · runs [--limit N] [--json]',
     'lambda  ALIAS  deploy [--publish] · run [--payload-file F|-] [--json] · logs [--follow]',
     'sfn     ALIAS  run [--payload-file F|-] [--follow] · logs [ARN] [--follow] · runs [--limit N] [--json]',
-    '               deploy [--plan] [--publish]   (a machine configured with definition_file)',
+    '               plan [--publish] · deploy [--publish]   (a machine configured with definition_file)',
     's3      ALIAS  mount · unmount · uri',
     'iceberg ALIAS  snapshots [--limit N] [--json] · history [--limit N] [--json]',
     '               files [SNAPSHOT] [--limit N] [--json] · branches [--limit N] [--json]',
@@ -215,7 +215,7 @@ REFERENCE_DURABLE_VERBS = [
 ]
 REFERENCE_SET_VERBS = [
     's3 export [--prefix STR]',
-    'release [--plan] [--follow] · release status [--json] · release logs [--follow]',
+    'release [--follow] · release plan [--follow] · release status [--json] · release logs [--follow]',
     'list [--json] · monitor',
 ]
 REFERENCE_GLOBAL = [

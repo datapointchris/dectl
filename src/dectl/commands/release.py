@@ -44,23 +44,39 @@ def make_release_app(pipeline_name: str, job_config: JenkinsJobConfig, config: D
     release_app = typer.Typer(
         help=(
             f'Release [bold]{pipeline_name}[/bold] through Jenkins + Terraform (the production path).\n\n'
-            'Running this with no subcommand triggers a release build. Use "status" and "logs" '
-            'to inspect the last build without starting a new one.'
+            'Running this with no subcommand triggers a release build, and "plan" a terraform plan '
+            'build. Use "status" and "logs" to inspect the last build without starting a new one.'
         ),
     )
+
+    def queue_build(action: str, follow: bool) -> None:
+        params = dict(job_config.parameters)
+        params['ACTION'] = action
+
+        job_path = job_config.job_path.replace('/', '/job/')
+        resp = jenkins_request(config, 'POST', f'/job/{job_path}/buildWithParameters', data=params)
+
+        if resp.status_code == 201:
+            info(f'build queued for {pipeline_name} (action={action})')
+        else:
+            error(f'failed to queue build: {resp.status_code} {resp.text}')
+            raise typer.Exit(1)
+
+        if follow:
+            time.sleep(3)
+            stream_console(config, job_config)
 
     @release_app.callback(
         invoke_without_command=True,
         epilog=(
             'Examples:\n\n'
-            f'dectl {pipeline_name} release — trigger a release and stream the console\n\n'
-            f'dectl {pipeline_name} release --plan — run terraform plan only\n\n'
+            f'dectl {pipeline_name} release — trigger a release\n\n'
+            f'dectl {pipeline_name} release --follow — trigger a release and stream the console\n\n'
             f'dectl {pipeline_name} release status — show the last build result'
         ),
     )
     def release(
         ctx: typer.Context,
-        plan: Annotated[bool, typer.Option('--plan', help='Run terraform plan only, do not apply')] = False,
         follow: Annotated[bool, typer.Option('--follow', '-f', help='Stream console output after triggering')] = False,
     ) -> None:
         """Trigger a Jenkins Terraform release build for this pipeline.
@@ -69,24 +85,15 @@ def make_release_app(pipeline_name: str, job_config: JenkinsJobConfig, config: D
         versions and moves aliases through Terraform. Use "dectl PIPELINE lambda
         <alias> deploy --publish" for fast local iteration between releases.
         """
-        if ctx.invoked_subcommand is not None:
-            return
+        if ctx.invoked_subcommand is None:
+            queue_build('deploy', follow)
 
-        params = dict(job_config.parameters)
-        params['ACTION'] = 'dry_run' if plan else 'deploy'
-
-        job_path = job_config.job_path.replace('/', '/job/')
-        resp = jenkins_request(config, 'POST', f'/job/{job_path}/buildWithParameters', data=params)
-
-        if resp.status_code == 201:
-            info(f'build queued for {pipeline_name} (action={params["ACTION"]})')
-        else:
-            error(f'failed to queue build: {resp.status_code} {resp.text}')
-            raise typer.Exit(1)
-
-        if follow:
-            time.sleep(3)
-            stream_console(config, job_config)
+    @release_app.command(epilog=f'Example:\n\ndectl {pipeline_name} release plan --follow')
+    def plan(
+        follow: Annotated[bool, typer.Option('--follow', '-f', help='Stream console output after triggering')] = False,
+    ) -> None:
+        """Trigger a Jenkins build that runs terraform plan only, applying nothing."""
+        queue_build('dry_run', follow)
 
     @release_app.command()
     def status(

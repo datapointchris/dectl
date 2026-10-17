@@ -1077,13 +1077,13 @@ def test_a_refused_confirmation_uploads_nothing(monkeypatch, tmp_path):
 
 
 def test_plan_refuses_a_missing_script_rather_than_reporting_a_clean_diff(monkeypatch, tmp_path):
-    # --plan is the rehearsal. Reporting a clean definition for a config whose real deploy exits
+    # plan is the rehearsal. Reporting a clean definition for a config whose real deploy exits
     # makes the one command run to answer "will this work" the one that cannot.
     config = deploy_config(tmp_path)
     session = FakeDeploySession({'Name': 'my-job', 'Role': 'old-role'})
     monkeypatch.setattr('dectl.commands.glue.make_session', lambda _config: session)
 
-    result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy', '--plan'])
+    result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'plan'])
 
     assert result.exit_code == 1
     assert session.s3.uploads == []

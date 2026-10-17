@@ -25,7 +25,9 @@ The command shape is `dectl PIPELINE RESOURCE ALIAS VERB [OPTIONS]` — the **ve
 deploy → run → logs loop on one resource changes only the trailing word. One rule governs the
 whole surface: **aliased = one thing, unaliased = the set/pipeline.** Instance verbs take an
 alias (`glue JOB run`, `s3 BUCKET mount`); set verbs take none (`s3 export`, `release`, `list`,
-`monitor`). Scope is structural: the argument's presence selects it, never a flag.
+`monitor`). Scope is structural: the argument's presence selects it, never a flag. Whether a
+command writes is structural too: a write's rehearsal is the read verb `plan` beside it
+(`glue JOB plan`, `sfn MACHINE plan`, `release plan`), never a flag on the write.
 `dectl reference` is the static-grammar command a config-assembled tree needs, and `--json` on
 reads goes through
 `output.emit_json` — bare-print, so pipes stay clean.
@@ -69,9 +71,9 @@ names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
   the `s3` app itself, beside the per-bucket alias sub-apps.
 - `lambda`/`sfn` `run` take payloads through `payloads.read_payload`: from `--payload-file F` or
   from stdin as `-`, never from an inline string argument.
-- `sfn` `deploy` exists only for a machine naming a `definition_file`: config decides whether the
-  verb is there, as `durable` does for the lambda verbs. Rendering a definition lives in
-  `src/dectl/asl.py`.
+- `sfn` `plan` and `deploy` exist only for a machine naming a `definition_file`: config decides
+  whether the verbs are there, as `durable` does for the lambda verbs. Both run one `prepare`, so
+  `plan` refuses what `deploy` refuses. Rendering a definition lives in `src/dectl/asl.py`.
 - `monitor` is a **pipeline-level** command registered on `pipeline_app`, because it spans
   several resources. It tails every resource its `monitor` config block selects as one
   time-ordered stream via `logs.tail_log_groups`.
@@ -211,8 +213,8 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
   job *definition* is Terraform's once a pipeline is established, but dectl can still write it
   before then. So `deploy` diffs its computed update against the live definition, skips
   `UpdateJob` when nothing differs, and otherwise renders the field-level diff and confirms.
-  `--plan` shows it and exits without uploading; `--yes` skips the prompt. The diff also reports
-  keys dectl *drops*.
+  `plan` shows it through `diff_glue_job_update` and uploads nothing; `deploy --yes` skips the
+  prompt. The diff also reports keys dectl *drops*.
 - **`DEFINITION_FIELDS` and `NESTED_DEFINITION_FIELDS` are the declared surface, not everything a
   deploy writes.** `rg -n "job_update\['" src/dectl/commands/glue.py` returns the four written by
   hand (`Role`, `Command`, `Connections`, `DefaultArguments`). An omitted declared key means
