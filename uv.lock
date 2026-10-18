@@ -190,7 +190,7 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.35.0" },
     { name = "botocore", specifier = ">=1.35.0" },
     { name = "httpx2", specifier = ">=2.9.1" },
-    { name = "pyclisteno", specifier = ">=0.8.0" },
+    { name = "pyclisteno", specifier = ">=0.8.1" },
     { name = "pydantic", specifier = ">=2.6.0" },
     { name = "pyselfupdate", extras = ["typer"], specifier = ">=0.5.0" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -535,11 +535,11 @@ wheels = [
 
 [[package]]
 name = "pyclisteno"
-version = "0.8.0"
+version = "0.8.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/ce/b1/592eae0f2133bf795f5ed9f8cd9b1c8f7807e509db72ad3f7873a8e49064/pyclisteno-0.8.0.tar.gz", hash = "sha256:008fe34af25b006a34ca9dac7d692d67ecb40976af29ecf7151339876ae6125e", size = 22410, upload-time = "2026-08-07T01:50:42.957Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9e/e0/208f82a3305a80698f1ea2942aba4b2223a7cf12980e8c05a2cb34f2bf95/pyclisteno-0.8.1.tar.gz", hash = "sha256:eff43ab1ccb70124b2fe37888dc598e28b5c29c66b09a75a07ceaa05f67643f1", size = 23415, upload-time = "2026-10-18T02:21:14.087Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fc/24/e4fc47798462c0b0714209e5acaaa9a7e84a96dcc7f9b6605b134c0c7b83/pyclisteno-0.8.0-py3-none-any.whl", hash = "sha256:c134bead7fdd24401aadf59889ea75f11022b11f42c6558c5f650045241ab9fc", size = 27519, upload-time = "2026-08-07T01:50:41.637Z" },
+    { url = "https://files.pythonhosted.org/packages/ae/93/839899c83dad0fa1bbcad551cff8f162f940f9d1780c896e528bdacb13e6/pyclisteno-0.8.1-py3-none-any.whl", hash = "sha256:65cf71a4c1a143dfa9c035cc12c061afddbc06b7c47aaabfcd524d56372925c5", size = 28573, upload-time = "2026-10-18T02:21:13.281Z" },
 ]
 
 [[package]]
