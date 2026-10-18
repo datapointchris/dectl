@@ -337,12 +337,13 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
 - **A `diff` that could not reach its base reports no commits at all**: `linear` is false and the
   path is empty.
 - **`compact`, `expire`, `orphans` and `rollback` are deliberately not here.** They are writes,
-  and the mechanism is a real fork. pyiceberg reaches `expire` and `rollback` through
-  `maintenance` and `manage_snapshots`, and as of 0.11.1 has no compaction or orphan removal at
-  all; Athena reaches all four through `OPTIMIZE ... REWRITE DATA USING BIN_PACK` and `VACUUM`,
-  and needs a workgroup, an output location and a per-query cost. Neither covers all four for
-  free, so it is a dependency-versus-config decision rather than a detail. Do not add a stub for
-  one — a verb in the help that is not built is worse than an absent one.
+  and the mechanism is a real fork. pyiceberg reaches `rollback` through `manage_snapshots`, and
+  its `expire` only drops snapshots from the metadata, deleting no file. It has no compaction or
+  orphan removal. Athena compacts through `OPTIMIZE ... REWRITE DATA USING BIN_PACK`, and its
+  `VACUUM` expires snapshots and removes orphans in one statement that cannot run either alone.
+  It has no rollback, and it needs a workgroup, an output location and a per-query cost. No
+  engine covers all four, so it is a dependency-versus-config decision rather than a detail. Do
+  not add a stub for one — a verb in the help that is not built is worse than an absent one.
 
 ## Tests
 
