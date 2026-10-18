@@ -149,10 +149,10 @@ def config_validate(
     """Check the config parses, matches the schema, and that what it names can be used.
 
     A pipeline that names `resolve_paths_from` is checked all the way down: the directory
-    itself, every glue script, and every lambda source_dir. A pipeline that names none is still
-    checked for how its S3 keys are spelled and whether its bucket names are ones S3 accepts,
-    both answerable on any machine; its files are not, since they resolve from wherever you run
-    dectl.
+    itself, every glue script, every lambda source_dir and every sfn definition_file. A
+    pipeline that names none is still checked for how its S3 keys are spelled and whether its
+    bucket names are ones S3 accepts, both answerable on any machine; its files are not, since
+    they resolve from wherever you run dectl.
 
     --json emits an object carrying `outcome` and `unusable_values`. The outcome separates a
     clean config from one that could not be read at all, which an empty list alone folds

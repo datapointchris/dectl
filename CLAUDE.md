@@ -184,8 +184,9 @@ The active env is surfaced so you always know which one you are pointed at: bare
 The source label is exact — `main.py` reads Click's `ctx.get_parameter_source('env')` to tell flag
 from `DECTL_ENV` from config/default. (This is why the top-level app drops `no_args_is_help`: that
 flag would short-circuit to help before the callback could print the banner, so the callback prints
-help itself.) `--help` still shows Click's static `[default: dev]` regardless of the resolved env,
-which is why the banner and `dectl env` exist.
+help itself.) `--help` shows the config's `environment` as the default, read when the tree is
+built. A config naming `staging` shows `[default: staging]` even under `DECTL_ENV=prod`. That is
+why the banner and `dectl env` exist.
 
 Because substitution is a literal `{env}` replacement, a config that hardcodes its environment
 (`salesdata-dev-ds-thing`) ignores `--env`/`DECTL_ENV` entirely and acts on the wrong environment

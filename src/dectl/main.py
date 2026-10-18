@@ -279,7 +279,7 @@ def installed_commit() -> str | None:
     """The git commit dectl was installed from, when it was installed from a ref.
 
     uv records the resolved commit in `direct_url.json` for any git install, a pinned
-    tag included, which is how the fleet installs everything. A wheel from an index
+    tag included, which is the install the README gives. A wheel from an index
     carries no such file and gets None, so one implementation covers both."""
     try:
         text = importlib.metadata.distribution('dectl').read_text('direct_url.json')
@@ -397,12 +397,12 @@ def search(
 def show_env(
     as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
 ) -> None:
-    """Show the environment and AWS account every command below is pointed at.
+    """Show the active environment and where it was resolved from.
 
-    The active environment substituted for {env}, where it was resolved from, and the account,
-    region and profile the session is built with. --json carries every one of them, including
-    the resolved defaults that appear in `config show`'s human view and in no other machine
-    door — `aws_profile` decides which AWS account a deploy reaches.
+    The environment is what every command substitutes for {env}. --json adds the
+    config's other defaults as the file writes them: account_id, region and aws_profile. No
+    other machine-readable output carries them, and `aws_profile` decides which AWS account a
+    deploy reaches.
     """
     if not as_json:
         print_environment_banner()
