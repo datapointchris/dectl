@@ -13,16 +13,16 @@ job stays the canonical deploy, and dectl queues its builds without deciding wha
 ## Install
 
 ```bash
-tag=$(gh release view --repo datapointchris/dectl --json tagName --jq .tagName)
-uv tool install "git+https://github.com/datapointchris/dectl.git@$tag"
+uv tool install --index https://pypi.ichrisbirch.com/simple/ dectl
 dectl --version     # the release, and the commit it was built from
 ```
 
-Install from a release tag, not the default branch. A commit that cuts no release still lands on
-`main`, so the branch can be ahead of every release. `dectl update` also refuses an install that
-tracks a branch, because it has no version to compare.
+Every release is published to that package index, and nothing else is. Name it on the install.
+uv records it beside the tool, which is where `dectl update` and `uv tool upgrade dectl` read it
+back. Without it uv asks PyPI, which does not carry dectl. An install from a git branch or a local
+checkout carries no release version, so `dectl update` refuses it.
 
-`dectl update` installs the latest GitHub release over the running one. `dectl update --check` only
+`dectl update` installs the latest release over the running one. `dectl update --check` only
 reports whether there is one. Once a day, on a terminal, a command that finds a later release prints
 one line to stderr. Setting `NO_AUTO_UPDATE` or `DECTL_NO_AUTO_UPDATE` to anything turns that off.
 
