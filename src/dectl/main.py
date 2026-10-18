@@ -120,8 +120,10 @@ def resolve_env_source(ctx: typer.Context) -> str:
     return ENV_SOURCE_LABELS.get(source_name, 'config' if cfg else 'default')
 
 
-EXAMPLE_PIPELINE = next(iter(cfg.pipelines), 'my-pipeline') if cfg and cfg.pipelines else 'my-pipeline'
 DEFAULT_ENVIRONMENT = cfg.defaults.environment if cfg else 'dev'
+
+# A pipeline configuring no resource has no commands, so it is never attached to the tree.
+ATTACHED_PIPELINES: list[str] = []
 if cfg:
     for name, pipeline in cfg.pipelines.items():
         resources = []
@@ -191,6 +193,30 @@ if cfg:
                 register_monitor_command(pipeline_app, pipeline, cfg)
 
             app.add_typer(pipeline_app, name=name, rich_help_panel='Pipelines')
+            ATTACHED_PIPELINES.append(name)
+
+
+def root_examples(config: DectlConfig | None, attached: list[str]) -> str:
+    """The root screen's examples, spelled with the config's own names so each runs as typed."""
+    if config is None or not attached:
+        return (
+            'Examples:\n\ndectl config init — write a starting config that shows every option\n\ndectl reference — the full command grammar'
+        )
+    pipelines = {name: config.pipelines[name] for name in attached}
+    lines = [f'dectl {attached[0]} list — the aliases this pipeline takes, and the AWS names behind them']
+    job = next(((name, alias) for name, pipeline in pipelines.items() for alias in pipeline.glue_jobs), None)
+    if job:
+        lines.append(f'dectl {job[0]} glue {job[1]} deploy — upload the script, confirming any change to the job first')
+        lines.append(f'dectl {job[0]} glue {job[1]} run --follow — start the job and tail it until it ends')
+    function = next(
+        ((name, alias) for name, pipeline in pipelines.items() for alias, fn in pipeline.lambdas.items() if fn.live_alias), None
+    )
+    if function:
+        lines.append(f'dectl {function[0]} lambda {function[1]} deploy --publish — deploy, then move the live alias')
+    monitored = next((name for name, pipeline in pipelines.items() if pipeline.monitor.lambdas or pipeline.monitor.step_functions), None)
+    if monitored:
+        lines.append(f'dectl {monitored} monitor — tail every monitored resource as one stream')
+    return 'Examples:\n\n' + '\n\n'.join(lines)
 
 
 # The option-syntax brackets ([--follow], [OPTIONS], ...) would be parsed as rich style tags, so
@@ -317,14 +343,7 @@ def update(
 
 @app.callback(
     invoke_without_command=True,
-    epilog=(
-        'Examples:\n\n'
-        f'dectl {EXAMPLE_PIPELINE} list — show what this pipeline manages\n\n'
-        f'dectl {EXAMPLE_PIPELINE} glue JOB run --follow — start a Glue job and tail it\n\n'
-        f'dectl {EXAMPLE_PIPELINE} lambda FN deploy --publish — deploy and move the live alias\n\n'
-        'dectl reference — the full command grammar\n\n'
-        'dectl search my-bucket — find AWS resources by keyword'
-    ),
+    epilog=root_examples(cfg, ATTACHED_PIPELINES),
 )
 def main(
     ctx: typer.Context,
@@ -354,10 +373,13 @@ def main(
     ([bold]glue JOB run[/bold], [bold]s3 BUCKET mount[/bold]); acting on the whole set takes none
     ([bold]s3 export[/bold], [bold]jenkins status[/bold], [bold]list[/bold], [bold]monitor[/bold]).
 
-    Pipelines and their resources come from your config. Every level is self-documenting: run
-    any partial command with no arguments or [bold]--help[/bold] to see what is next. Aliases are
-    the short config keys, not full AWS names — run [bold]dectl PIPELINE list[/bold] for the mapping,
-    or [bold]dectl reference[/bold] for the whole grammar.
+    Start with [bold]dectl PIPELINE list[/bold]. It maps each alias, the short config key the commands
+    take, to the AWS name it acts on. Any partial command run bare shows what comes next, and
+    [bold]dectl reference[/bold] prints the whole grammar.
+
+    Tail one resource with its [bold]logs[/bold] verb. Reach for [bold]dectl PIPELINE monitor[/bold] when a
+    run crosses resources, such as a state machine starting a Lambda: it merges them into one stream.
+    [bold]dectl search[/bold] finds an AWS name your config does not hold.
 
     Config names carry an [bold]{env}[/bold] placeholder; [bold]--env prod[/bold] (or [bold]DECTL_ENV=prod[/bold])
     substitutes it, so one config drives every environment.
