@@ -1,115 +1,178 @@
 # dectl
 
-Data engineering control CLI for managing AWS pipelines.
+A command line for the loop between editing a data pipeline's code and watching it run on AWS. One
+config file names each pipeline's Glue jobs, Lambda functions, Step Functions state machines, S3
+buckets, Iceberg tables and Jenkins job under short aliases. dectl deploys code to them, runs them,
+and reads their logs and history.
 
-## Installing
+Terraform creates the resources and owns their definitions. dectl never creates one. It writes the
+part that changes on every iteration: a Glue script, a Lambda's code, a state machine's definition.
+Where a deploy touches a field Terraform also sets, dectl shows the diff and asks first. The Jenkins
+job stays the canonical deploy, and dectl queues its builds without deciding what they do.
 
-```bash
-uv tool install git+https://github.com/datapointchris/dectl.git
-```
-
-Releases are cut from `main` by python-semantic-release, so the default branch is
-always the latest release. Pin a specific version with `@v0.6.1` if you need to.
-
-`dectl update` installs the latest GitHub release over the running one, and
-`dectl update --check` reports whether one exists without installing it. Once a
-day, a command that finds a newer release prints a one-line notice to stderr;
-`NO_AUTO_UPDATE=1` (or `DECTL_NO_AUTO_UPDATE=1`) turns that off.
-
-## Command grammar
-
-Commands follow the shape `dectl PIPELINE RESOURCE ALIAS VERB [OPTIONS]` — **the verb comes
-last**, so a deploy → run → logs loop on one resource changes only the final word. Pipelines
-and their resources (`glue`, `lambda`, `sfn`, `s3`, `iceberg`, `jenkins`) are built from your config.
-Every level is self-documenting — run any partial command or add `--help` to see what's next,
-including the live list of aliases. `dectl reference` prints the whole grammar independent of
-your config.
-
-**One rule: aliased vs. set.** Acting on one thing takes an alias (`glue JOB run`,
-`s3 BUCKET mount`); acting on the whole set takes none (`s3 export`, `jenkins status`, `list`,
-`monitor`).
+## Install
 
 ```bash
-dectl                              # top-level help: pipelines + global commands
-dectl reference                    # the full command grammar, config-independent
-dectl salesdata                    # what the salesdata pipeline manages
-dectl salesdata list               # alias -> real AWS name mapping (add --json for scripts)
-dectl salesdata glue               # the glue jobs; then pick one, then a verb
-dectl salesdata glue source-copy   # this job's verbs (deploy/run/logs/runs) + what it maps to
+tag=$(gh release view --repo datapointchris/dectl --json tagName --jq .tagName)
+uv tool install "git+https://github.com/datapointchris/dectl.git@$tag"
+dectl --version     # the release, and the commit it was built from
 ```
 
-Every read command takes `--json` for a stable, machine-readable shape on stdout (`list`,
-`config show`, `search`, the per-resource `runs`, `lambda ... run`, `jenkins status`, and every
-`iceberg` verb).
+Install from a release tag, not the default branch. A commit that cuts no release still lands on
+`main`, so the branch can be ahead of every release. `dectl update` also refuses an install that
+tracks a branch, because it has no version to compare.
 
-## Environments
+`dectl update` installs the latest GitHub release over the running one. `dectl update --check` only
+reports whether there is one. Once a day, on a terminal, a command that finds a later release prints
+one line to stderr. Setting `NO_AUTO_UPDATE` or `DECTL_NO_AUTO_UPDATE` to anything turns that off.
 
-Resource names in config carry an `{env}` placeholder, so one config drives dev / staging / prod:
+## Starting from scratch
+
+```bash
+dectl reference                  # the whole grammar; needs no config and reaches no AWS
+dectl config init                # an annotated starter exercising every option; refuses to overwrite
+dectl config edit                # your region, profile and pipelines, {env} where the environment goes
+dectl config validate            # schema, local paths and bucket names, offline; exits 3 on a fault
+dectl env                        # which environment {env} becomes, and what chose it
+dectl example-pipeline list      # each alias beside the AWS name it resolves to, still offline
+dectl search source-copy         # the first call to AWS: proves the credentials, region and names
+```
+
+The examples in this file use the starter config's names: the pipeline `example-pipeline`, its Glue
+job `source-copy`, and the rest. Rename them in the file and the commands follow, because dectl
+builds its command tree from the config every time it starts.
+
+`config init` writes `$XDG_CONFIG_HOME/dectl/config.yaml`, which is `~/.config/dectl/config.yaml`
+when the variable is unset. `dectl config path` prints the resolved path. `config init` refuses when
+a file is already there. `config edit` opens `$VISUAL`, then `$EDITOR`, and writes the starter first
+when there is no file. `dectl config example` prints the same starter to stdout, for reading in one
+pane while editing in another.
+
+dectl holds no credentials of its own. AWS access comes from the profile `defaults.aws_profile`
+names, or from boto3's default chain when it is blank. The Jenkins `user` and `token` can be written
+as `${NAME}`, which reads them from that environment variable. A command needing an unset one
+refuses and names it.
+
+`search` is also how to find the names to put in the config. It matches a substring across S3,
+Lambda functions and layers, Glue, Step Functions, IAM and Secrets Manager, in the configured
+region.
+
+**When a command is missing, run `dectl config validate`.** A config that does not load drops every
+pipeline and leaves the `config` commands working. Typing a pipeline name then prints the load error
+rather than "No such command". Unknown keys are errors, so a typo like `step_function:` fails here
+instead of being ignored.
+
+## The grammar
+
+```text
+dectl PIPELINE RESOURCE ALIAS VERB [OPTIONS]
+```
+
+The verb comes last. A deploy, run and logs loop on one resource changes only the final word.
+
+A pipeline gets a resource command only for what its config declares: `glue`, `lambda`, `sfn`,
+`s3`, `iceberg` or `jenkins`. A pipeline with only `buckets` has `s3` and nothing else. An alias is
+the short key the config gives a resource, never its AWS name. `dectl PIPELINE list` prints the
+mapping. `dectl reference` prints the whole grammar whatever the config holds.
+
+One rule decides scope. Acting on one thing takes an alias: `glue JOB run`, `s3 BUCKET mount`.
+Acting on the whole set takes none: `s3 export`, `jenkins status`, `list`, `monitor`. The argument's
+presence selects the scope, never a flag.
+
+Whether a command writes is structural too. A write's rehearsal is a `plan` verb beside it, never a
+flag on the write. `plan` refuses everything the write would refuse, so a clean plan is a deploy
+that will run. A partial command prints its help, with the aliases the config gives that level, and
+acts on nothing.
+
+Every command also answers to a shortcut. Each level of the tree gets the shortest prefix of its
+name that its siblings do not share, and the prefixes run together into one token. `dectl exgsr` is
+`dectl example-pipeline glue source-copy run`. Help shows each command's sequence in parentheses.
+
+stdout carries the answer and stderr carries everything else. A command that answers with a record
+takes `--json`. A log tail does not, and neither does the eval-ready output of `s3`. `--no-input`
+makes a command that would prompt refuse instead, naming the flag that answers the prompt.
+
+## Which surface answers which question
+
+| Ask | Surface | Reads |
+| --- | --- | --- |
+| What does this pipeline manage, under which AWS names | `PIPELINE list`, `config show` | the config, for the active environment |
+| Which environment am I pointed at | `env` | `--env`, `DECTL_ENV`, the config |
+| What is that resource really called | `search` | S3, Lambda, Glue, Step Functions, IAM, Secrets Manager |
+| What would a deploy change | `glue ALIAS plan`, `sfn ALIAS plan` | the live definition, against the config and local files |
+| Push this code and try it | `ALIAS deploy`, then `ALIAS run` | the local files the config names |
+| Why did that run fail | `ALIAS logs`, `ALIAS runs`, a durable function's `history` | CloudWatch Logs and each service's run records |
+| What is the whole pipeline doing | `PIPELINE monitor` | the log groups the `monitor` block selects |
+| Ship through the canonical path | `jenkins ACTION`, `jenkins status` | the pipeline's Jenkins job |
+| Give the aws CLI a bucket | `s3 export`, `s3 ALIAS uri` | the config |
+| When did this table's numbers move | `iceberg ALIAS diff`, `iceberg ALIAS snapshots` | the Glue catalog entry and the table's metadata file |
+| Can this config be used | `config validate` | the config, and the files it names |
+
+## `--env` — one config drives every environment by swapping one token
 
 ```yaml
 lambdas:
-  do-thing:
-    name: salesdata-{env}-ds-do-thing-lambda
+  my-function:
+    name: my-{env}-lambda-function
 ```
 
 ```bash
-dectl salesdata list                 # dev (the default)
-dectl --env prod salesdata list      # -> salesdata-prod-ds-do-thing-lambda
-DECTL_ENV=staging dectl salesdata s3 export
+dectl example-pipeline list                  # my-dev-lambda-function, from the config's environment
+dectl --env prod example-pipeline list       # my-prod-lambda-function
+DECTL_ENV=staging dectl example-pipeline s3 export
+DECTL_ENV=staging dectl env                  # environment: staging  (from DECTL_ENV)
 ```
 
-Since `--env` is only known at runtime, `{env}` is substituted when a command runs, not when
-the tree is built. `--help` and the alias info panels show the raw `{env}` token.
+The priority is `--env`, then `DECTL_ENV`, then `defaults.environment` in the config, then `dev`.
+dectl substitutes `{env}` when a command runs, never when it builds the tree, because `--env` is not
+known until then. So `--help` and the alias panels show the raw `{env}` token. `--help` shows the
+config's environment as the default even when `DECTL_ENV` overrides it. Bare `dectl` prints the
+active environment and its source above the help, and `dectl env` prints it alone.
 
-Resolution priority is `--env` > `DECTL_ENV` > `defaults.environment` in config > `dev`. This
-assumes one AWS account across environments — only the names change.
+The scheme assumes one AWS account across environments. Only the names change.
 
-To see which environment you're pointed at (and why), run `dectl env`, or just `dectl` — the
-active env is printed as a banner above the help:
+A name that hardcodes its environment ignores `--env`. A deploy with `--env prod` against a name
+spelled `my-dev-function` acts on dev and succeeds. So when `--env` or `DECTL_ENV` was set and the
+resource carries no `{env}`, dectl warns once on stderr that the environment changed nothing.
+
+## `glue` — a deploy pushes the script and confirms any change to the definition
 
 ```bash
-dectl env
-# environment: prod  (from DECTL_ENV)
+dectl example-pipeline glue conform plan          # the definition diff; uploads and writes nothing
+dectl example-pipeline glue conform deploy        # upload the scripts, show the diff, confirm
+dectl example-pipeline glue conform run --follow  # start a run and tail its output and error logs
+dectl example-pipeline glue conform runs          # recent runs, with --json to script them
 ```
 
-## Glue: deploying without the Terraform loop
+A deploy is two writes with different owners. The script upload is always yours. The job definition
+is Terraform's once a pipeline is established. dectl keeps write access to it for the stretch before
+Terraform exists, when changing a worker type should not take a commit, a build and an apply.
+Because Terraform may own the definition, `deploy` diffs its computed definition against the live
+one and confirms before applying it. `deploy --yes` skips the prompt.
 
-```bash
-dectl salesdata glue conform plan            # what would change; touches nothing
-dectl salesdata glue conform deploy          # upload, show the diff, confirm
-dectl salesdata glue conform run --follow    # start it and tail both log streams
-dectl salesdata glue conform runs            # recent runs, --json to script them
-```
+`deploy` runs every check that can refuse before it writes anything. A refusal after the upload
+would leave the job pointing at code you were just told not to deploy.
 
-A deploy is two writes with different owners. The script upload is always yours. The job
-*definition* is Terraform's once a pipeline is established, and dectl keeps write access to it
-because that is the point before Terraform exists — change a worker type and run it, instead of
-commit → Jenkins → apply. So `deploy` diffs its computed definition against the live one and
-confirms before applying. `plan` shows the same diff and writes nothing, and `deploy --yes`
-skips the prompt.
+`run --follow` stops when the run ends, and exits non-zero when the run failed.
 
-### Three kinds of field, and the difference matters
+### dectl manages what the config names, preserves the rest, and creates nothing
 
-dectl **manages** what your config names, **preserves** everything else, and **cannot create**
-a job at all — `deploy` reads the live definition first, so the job has to exist.
+`deploy` reads the live definition first, so the job has to exist. `UpdateJob` replaces the whole
+definition rather than patching it, so a field dectl did not carry over would reset to its default
+on every deploy. dectl starts from the live definition and overrides only what the config names.
+Omit a key and the live value survives. That is how a Terraform-owned field outlives a deploy run to
+change something else.
 
-Preserving is the load-bearing half. `UpdateJob` replaces the whole definition rather than
-patching it, so a field dectl did not carry over would silently reset to its default on every
-deploy. Omit a key and dectl leaves whatever is there, which is how a Terraform-owned field
-survives a deploy you ran to change something else.
-
-When nothing your config names differs, the definition is left untouched and no `UpdateJob` is
-sent. That is the steady state: a deploy becomes a pure code push with no drift surface.
-
-### The managed fields
+When nothing the config names differs, dectl sends no `UpdateJob`. That is the steady state: a
+deploy is a pure code push with no drift surface.
 
 | Config key | What it sets |
 | --- | --- |
 | `role` | the IAM role the job runs as |
 | `scripts` | `ScriptLocation` from the first entry; the rest become `--extra-py-files` |
-| `connections` | authoritative — a name dropped from this list is detached |
+| `connections` | authoritative: a name dropped from the list is detached |
 | `arguments` | merged onto the job's existing default arguments |
-| `max_capacity` | DPU sizing — every Python shell job, and a Spark job that predates workers |
+| `max_capacity` | DPU sizing: every Python shell job, and a Spark job that predates workers |
 | `worker_type`, `number_of_workers` | worker sizing, Spark only |
 | `glue_version` | the Glue runtime |
 | `python_version` | the Python inside `Command` |
@@ -118,391 +181,329 @@ sent. That is the steady state: a deploy becomes a pure code push with no drift 
 | `max_concurrent_runs` | `ExecutionProperty.MaxConcurrentRuns` |
 | `execution_class` | `STANDARD` or `FLEX` |
 
-Every row below `arguments` is optional. Omit one and dectl writes nothing for it, so whatever
-Terraform or a console edit last set survives the deploy. Name one only while you want dectl
-deciding it instead.
+`role` and `scripts` are required, and every other key is optional. Omit one and dectl writes
+nothing for it, so whatever Terraform or a console edit last set survives. Leaving `connections` out
+leaves the job's connections alone, and `[]` detaches them all. The diff also reports keys a deploy
+drops.
 
-`dectl PIPELINE list` and `dectl config show` print what each job's config decides, so the split
-is answerable without running a deploy:
-
-```bash
-dectl salesdata list --json | jq '.glue.conform.managed'
-# { "worker_type": "G.1X", "number_of_workers": 4, "timeout_minutes": 60 }
-```
-
-`max_retries: 0` is the one worth setting by hand while iterating. A job left at three retries
-takes three runs to report a failure, which is three tracebacks to read instead of one.
-`execution_class: FLEX` runs on spare capacity for less money and starts when it starts, which is
-usually the right trade for a loop and the wrong one for a schedule.
-
-### Sizing is one model or the other
-
-A Glue job sizes by DPU or by workers, never both, and `UpdateJob` rejects a definition carrying
-each. A Python shell job takes `max_capacity`, which is `0.0625` (1 GB) or `1` (16 GB). A Spark
-job takes `worker_type` with `number_of_workers`, unless it is old enough to be sized by DPU.
-
-dectl refuses four shapes up front: a config naming both models, one half of the worker pair,
-`max_capacity` against a job Glue already sizes by workers, and workers against a Python shell
-job. Glue refuses all four itself, but from `UpdateJob` — which runs after the scripts have
-already been uploaded, and whose message names neither the job nor the config key.
-
-Migrating a DPU-sized Spark job to workers works, and the diff shows the DPU value being removed
-alongside the workers arriving. The reverse is refused rather than attempted: Glue has no runtime
-that will take `MaxCapacity` on a Spark job and leave `WorkerType` off, so there is no update
-that gets a job back to DPU sizing.
-
-One row you will not see: a Spark job's derived `MaxCapacity`. `JobUpdate` in
-`src/dectl/commands/glue.py` carries why.
-
-## Lambda dev loop vs the Jenkins build
-
-Aliases are the short config keys, not the full AWS names. The verb is last, so the
-deploy → run → logs loop only changes the trailing word.
+`list` prints what each job's config decides, so the split is answerable without a deploy:
 
 ```bash
-# Fast local loop — updates $LATEST, test it directly
-dectl salesdata lambda error-notifier deploy
-dectl salesdata lambda error-notifier run --payload-file event.json
-dectl salesdata lambda error-notifier run --json          # response as machine-readable JSON
-dectl salesdata lambda error-notifier logs                # add --follow to tail
-echo '{"key": "value"}' | dectl salesdata lambda error-notifier run --payload-file -
-
-# Make it live behind the alias (S3 triggers / durable functions see it):
-# updates $LATEST, publishes an immutable version, moves the configured live alias
-dectl salesdata lambda error-notifier deploy --publish
-
-# The canonical path: a build of the pipeline's Jenkins job, one verb per configured action
-dectl salesdata jenkins apply                             # posts ACTION=deploy in the example config
-dectl salesdata jenkins plan                              # posts ACTION=dry_run
-dectl salesdata jenkins status                            # the last build's result
+dectl example-pipeline list --json | jq '.glue.conform.managed'
 ```
 
-The `jenkins` verbs other than `status` and `logs` are the keys of the job's `actions` in
-config. Each posts the job's `parameters` with its own on top, so what a build does is the
-job's to decide.
+`max_retries: 0` is the one worth setting by hand while iterating. A job at three retries takes
+three runs to report a failure, which is three tracebacks to read instead of one.
+`execution_class: FLEX` runs on spare capacity for less money and starts when it starts. That suits
+a loop and not a schedule.
 
-`--publish` requires a `live_alias` on the function in config; without it, deploy only ever
-touches `$LATEST` and alias-triggered functions keep running old code. `run` always targets
-`$LATEST`, so it exercises the code from `deploy` even before you publish.
+### A job sizes by DPU or by workers, never both
 
-## Durable functions
+A Python shell job takes `max_capacity`, which is `0.0625` (1 GB) or `1` (16 GB). A Spark job takes
+`worker_type` with `number_of_workers`, unless it is old enough to be sized by DPU. `UpdateJob`
+rejects a definition carrying both.
 
-A Lambda durable function's unit of work is the *execution*, not the invocation: one execution
-checkpoints its way across many invocations and can suspend for up to a year between them. So a
-function flagged `durable: true` in config swaps `run` and `logs` for an execution-scoped set —
-the invocation-shaped views answer nothing useful, since `Invocations` counts replays and a
-single log stream holds fragments of whichever executions that environment happened to serve.
+dectl refuses these before it uploads anything:
 
-```yaml
-lambdas:
-  order-workflow:
-    name: salesdata-{env}-order-workflow
-    source_dir: modules/lambda/order_workflow/code
-    live_alias: live
-    durable: true
-```
+- a config naming both models
+- one half of the worker pair
+- `max_capacity` against a job Glue already sizes by workers
+- workers against a Python shell job
+
+Glue refuses each of them itself, but from `UpdateJob`. That runs after the scripts are uploaded,
+and its message names neither the job nor the config key.
+
+Migrating a DPU-sized Spark job to workers works, and the diff shows the DPU value leaving as the
+workers arrive. The reverse is refused. No Glue runtime takes `MaxCapacity` on a Spark job and
+leaves `WorkerType` off, so no update returns a job to DPU sizing. A Spark job's derived
+`MaxCapacity` never shows in the diff, and `JobUpdate` in `src/dectl/commands/glue.py` says why.
+
+## `lambda` — `deploy` moves `$LATEST`, and only `--publish` moves what triggers run
 
 ```bash
-dectl salesdata lambda order-workflow executions                 # which ones succeeded or failed
-dectl salesdata lambda order-workflow executions --status FAILED
-dectl salesdata lambda order-workflow history                    # steps/waits/retries of the latest
-dectl salesdata lambda order-workflow history order-123 --follow
-dectl salesdata lambda order-workflow logs                       # logger output for the latest
-dectl salesdata lambda order-workflow logs order-123             # ...or for one named execution
-dectl salesdata lambda order-workflow logs cfd01dc3a122          # ...or a unique tail of its name
-dectl salesdata lambda order-workflow run --async --name order-123
+dectl example-pipeline lambda my-function deploy                         # zip source_dir, update $LATEST
+dectl example-pipeline lambda my-function run --payload-file event.json  # invoke $LATEST, print the response
+echo '{"key": "value"}' | dectl example-pipeline lambda my-function run --payload-file -
+dectl example-pipeline lambda my-function logs --follow                  # tail its CloudWatch logs
+dectl example-pipeline lambda my-function deploy --publish               # publish a version, move live_alias
 ```
 
-`history` and `logs` are complements, and match the two console tabs: `history` is the
-checkpoint log Lambda replays from — which step failed, what it returned, how long a wait
-suspended for — while `logs` is what the function's own logger printed while doing it. The SDK
-logger stamps the execution ARN onto every record, and `logs` filters the group on it, so a log
-group carrying dozens of interleaved executions reads back as just the one. `--all` opts back
-out to the raw group.
+`run` always targets `$LATEST`, so it exercises a deploy before anything is published. Anything that
+invokes through an alias, such as an S3 trigger, keeps running the old version. `deploy --publish`
+publishes a version and moves the function's `live_alias` to it. With no `live_alias` configured,
+`--publish` still publishes a version and moves nothing.
 
-**Both take a unique tail of the name.** Without `run --name` an execution is named by a UUID,
-which is not something anyone retypes, so `history` and `logs` accept any suffix long enough to
-be unique — `logs cfd01dc3a122`, or fewer characters when fewer will do. The whole name is tried
-first, so an execution whose name ends another's still wins itself, and a tail matching several
-is an error listing them rather than a guess at which was meant. The tail rather than the head
-because a UUID front-loads its timestamp, so a prefix carries almost no entropy.
+A payload comes from a file, or from stdin as `-`, never from an inline argument.
 
-The search covers the same number of executions per version that `executions --limit` is capped
-at, so anything the table can print is something a tail can reach. An execution older than that
-has to be named in full, or by its ARN.
+`run` waits for the function's own timeout plus a margin. A call that does not answer within it is
+reported, not retried. `Invoke` is the one Lambda call that cannot be taken back, so dectl sends it
+with the SDK's retries off. botocore would otherwise re-send a long invoke. The function's own retry
+setting cannot stop that, because Lambda never sees a client's HTTP retries.
 
-**The opaque operation ids are folded away.** `logs` prints the operation as a tag beside the
-level — `wait_for_files`, or `wait_for_files.3` on a retry — and hides the two ids that identify
-it to the service, along with the execution ARN the tail is already filtered on. Everything else
-stays, including `requestId`, which says which invocation of the execution spoke, and `attempt`
-on a first try. `--context` restores the lot. Fields your own `extra=` put there are never
-dropped.
+### Durable functions — the unit of work is the execution, not the invocation
 
-`run` is qualified with the configured `live_alias` (falling back to `$LATEST`) — Lambda rejects
-an unqualified invoke of a durable function outright, since an execution is pinned to the
-version it starts on. Synchronous invocation waits for the whole execution and is capped at 15
-minutes, so anything longer needs `run --async`; `--name` makes the start idempotent and gives
-you a handle to pass to `history` and `logs`.
-
-**Executions are keyed by version, not by alias.** Lambda resolves an alias to a version number
-when the execution starts, so the alias name never appears in a durable execution ARN and
-listing by alias fails outright (`cannot filter durable executions by alias`). dectl resolves
-the alias to the version it currently points at and shows the resolution:
+A durable function checkpoints one execution across many invocations, and can suspend for up to a
+year between them. The invocation-shaped views answer nothing there. `Invocations` counts replays,
+and one log stream holds fragments of whichever executions that environment served. So
+`durable: true` replaces `run` and `logs` with execution-scoped versions, and adds `executions` and
+`history`.
 
 ```bash
-dectl salesdata lambda order-workflow executions
-# order-workflow durable executions (live → version 7)
-
-dectl salesdata lambda order-workflow executions --qualifier 6   # a specific version
-dectl salesdata lambda order-workflow executions --all-versions  # merged across recent deploys
+dectl example-pipeline lambda my-workflow run --async --name order-123   # start one, named, and return
+dectl example-pipeline lambda my-workflow executions --status FAILED     # which ones failed
+dectl example-pipeline lambda my-workflow history order-123 --follow     # its steps, waits and retries
+dectl example-pipeline lambda my-workflow logs cfd01dc3a122              # its logger output, by a name tail
 ```
 
-The consequence worth knowing: `deploy --publish` moves the alias to a new version, so runs from
-before the deploy stay under the old one and drop out of the default list. `--all-versions`
-merges the most recent published versions (and `$LATEST`), newest execution first, naming the
-versions it scanned. `history` and `logs` already fall back to that sweep when a name isn't
-found under the live version, so a name copied from the console resolves regardless of which
-deploy ran it.
+`history` and `logs` are complements, and match the console's two tabs. `history` is the checkpoint
+log Lambda replays from: which step failed, what it returned, how long a wait suspended. `logs` is
+what the function's own logger printed meanwhile. The SDK logger stamps the execution ARN on every
+record, and `logs` filters on it. A log group carrying dozens of interleaved executions reads back
+as one. `logs --all` tails the raw group instead.
 
-## Step Functions
+`logs` folds away the fields that repeat on every line of one execution. The operation shows as a
+tag beside the level, such as `wait_for_files`, or `wait_for_files.3` on a retry. `--context`
+restores every field. Fields your own `extra=` added are never dropped.
+
+**An execution is named by any unique tail of its name.** Without `run --name`, Lambda names an
+execution with a UUID, which nobody retypes. `history` and `logs` take any suffix long enough to be
+unique. The whole name is tried first, so a name that ends another's still finds itself. A tail
+matching several is an error listing them. The tail rather than the head, because a UUID's prefix
+carries the timestamp and little else.
+
+The tail search covers the same window `executions --limit` is capped at, so any row the table
+prints is reachable. An older execution has to be named in full, or by its ARN.
+
+`run` is qualified with `live_alias`, falling back to `$LATEST`. Lambda rejects an unqualified
+invoke of a durable function, because an execution is pinned to the version it starts on. A
+synchronous run waits for the whole execution and is capped at 15 minutes, so anything longer needs
+`--async`. `--name` makes the start idempotent and gives a handle for `history` and `logs`.
+
+**Executions are listed by version, not by alias.** Lambda resolves an alias to a version when the
+execution starts, and listing by alias fails outright. dectl resolves `live_alias` to the version it
+points at, and the listing's title shows the resolution, such as `live → version 7`. So
+`deploy --publish` moves the listing to the version it published, and earlier runs drop out of it.
+`executions --all-versions` merges recent published versions and `$LATEST`, latest first, naming the
+versions it scanned. `history` and `logs` fall back to that sweep when a name is not under the live
+version. A name copied from the console resolves whichever deploy ran it.
+
+## `sfn` — a definition pushed byte for byte as Terraform would render it
 
 ```bash
-dectl salesdata sfn ingest run                                   # start an execution, print its ARN
-dectl salesdata sfn ingest run --payload-file input.json --follow  # start with input and tail history
-dectl salesdata sfn ingest logs                                  # show the most recent execution's history
-dectl salesdata sfn ingest runs                                  # recent executions with status (--json)
+dectl example-pipeline sfn my-flow run --payload-file input.json --follow  # start, then tail its history
+dectl example-pipeline sfn my-flow logs                                    # the latest execution's history
+dectl example-pipeline sfn my-flow runs                                    # recent executions and status
+dectl example-pipeline sfn my-flow plan                                    # diff against the live definition
+dectl example-pipeline sfn my-flow deploy --publish                        # replace it, move live_alias
 ```
 
-`logs` renders the execution history — the typed state transitions
-(`TaskStateEntered`, `LambdaFunctionScheduled`, `ExecutionSucceeded`, …) — using
-the `GetExecutionHistory` API, so no CloudWatch logging setup is required.
+`logs` reads `GetExecutionHistory`, the typed state transitions, so it needs no CloudWatch logging.
+That API covers Standard workflows only, and Express workflows have no history API at all.
+`monitor` reads the state machine's CloudWatch log group instead, so it can interleave with
+Lambda's.
 
-### Deploying a definition Terraform templates
-
-A definition kept as an `.asl.json` file that Terraform renders with `templatefile()` can be
-pushed straight from your checkout, the way a Glue script or Lambda code is. Name the file and
-give a value for each `${name}` placeholder in it:
+`plan` and `deploy` exist only for a machine whose config names a `definition_file`. That is an
+`.asl.json` file Terraform renders with `templatefile()`. Each `${name}` in it needs an entry under
+`definition_substitutions`:
 
 ```yaml
 step_functions:
-  ingest:
-    name: salesdata-{env}-ingest
-    definition_file: modules/step_functions/ingest.asl.json
+  my-flow:
+    name: my-{env}-state-machine
+    definition_file: modules/step_functions/my_flow.asl.json
     definition_substitutions:
-      notify_arn: arn:aws:lambda:us-east-2:123456789012:function:salesdata-{env}-notify
-      copy_job: salesdata-{env}-copy
+      process_function_arn: arn:aws:lambda:us-east-2:123456789012:function:my-{env}-lambda-function
+      copy_timeout_seconds: 3600
     live_alias: live            # optional; what deploy --publish moves
 ```
 
-```bash
-dectl salesdata sfn ingest plan               # diff against the live definition, write nothing
-dectl salesdata sfn ingest deploy             # replace the live definition
-dectl salesdata sfn ingest deploy --publish   # ...and publish a version, moving live_alias to it
-```
+`deploy` renders the file as Terraform would, byte for byte, then validates it with Step Functions.
+It replaces only the definition. The role, logging and tracing stay as Terraform set them. A
+rendered definition identical to the live one is not written. Identical bytes are what make
+Terraform's next plan over the same file report no change. Commit the same file and that holds.
+Leave it uncommitted and the next `terraform apply` puts the committed definition back.
 
-`deploy` renders the file exactly as Terraform would, byte for byte, then validates it with
-Step Functions. It replaces only the definition. The role, logging and tracing stay as Terraform
-set them, and a definition identical to the live one, byte for byte, is not written at all. A
-placeholder with no entry is refused with its line, and with the value the live definition holds
-where it sits. That value is printed as the config entry, with `{env}` in place of the active
+There is no confirm prompt, unlike Glue. The definition is the code being iterated on, so a prompt
+would fire on every deploy. The diff prints every time instead.
+
+A placeholder with no entry is refused with its line, and with the value the live definition holds
+there. That value is printed as a ready config entry, with `{env}` in place of the active
 environment's name.
 
-Commit the same file and Terraform's next plan reports no change. Don't, and the next
-`terraform apply` puts the committed definition back.
-
-- **Only `${name}` is substituted.** `$${` and `%%{` escape as Terraform escapes them. A
-  `%{ if }` directive or an expression such as `${jsonencode(x)}` is refused rather than guessed
-  at.
-- **A number or boolean renders as Terraform renders it.** `timeout: 300` fills an unquoted
-  `"TimeoutSeconds": ${timeout}`, and `2.0` renders as `2`.
+- **Only `${name}` is substituted.** `$${` and `%%{` escape as Terraform escapes them. A `%{ if }`
+  directive or an expression such as `${jsonencode(x)}` is refused rather than guessed at.
+- **A number or boolean renders as Terraform renders it.** `copy_timeout_seconds: 3600` fills an
+  unquoted `"TimeoutSeconds": ${copy_timeout_seconds}`, and `2.0` renders as `2`.
 - **`{env}` belongs to the values, never the file.** A template's own `${env}` is a Terraform
-  variable like any other and needs an entry, such as `env: "{env}"`.
-- **`run` starts the latest definition, and an alias does not follow it.** Anything triggering
-  executions through an alias keeps the old version until `deploy --publish`. For a few seconds
-  after either write, a new execution may still get the previous one.
+  variable like any other, and needs an entry such as `env: "{env}"`.
+- **`run` starts the latest definition, and an alias does not follow it.** Anything starting
+  executions through an alias keeps the old version until `deploy --publish`. `--publish` publishes
+  the current revision whether or not it changed. An execution started within a few seconds of a
+  deploy may still run the previous definition.
 
-## Monitor a whole pipeline
+## `jenkins` — dectl queues the build, and the Jenkinsfile decides what it does
 
-`monitor` tails several resources at once as a single time-ordered stream, so you
-can watch a multi-Lambda / Step Functions pipeline behave end to end without
-opening each log by hand. What it watches is defined explicitly in config:
+```bash
+dectl example-pipeline jenkins plan            # queue a build posting ACTION=dry_run, as the starter has it
+dectl example-pipeline jenkins apply --follow  # queue one posting ACTION=deploy and stream its console
+dectl example-pipeline jenkins status          # the most recent build's result
+dectl example-pipeline jenkins logs --follow   # its console output
+```
+
+`jenkins` has no aliases, since a pipeline has one job. Its writes are the keys of the job's
+`actions` in the config. Each action posts the job's `parameters` with its own on top. dectl names
+no action itself. What `ACTION=dry_run` does belongs to the Jenkinsfile, which dectl never sees, so
+a verb dectl named would be a guess at it. An action cannot be called `status` or `logs`, because it
+would collide with that read.
+
+The command appears only when the config has both `jenkins` blocks. The top-level one names the
+server and its credentials. The pipeline's own names the job.
+
+## `monitor` — several resources tailed as one stream, in time order
 
 ```yaml
 pipelines:
-  salesdata:
+  example-pipeline:
     monitor:
-      lambdas: [ingest, transform, load]
-      step_functions: [flow]      # needs log_group set on the state machine
+      lambdas: [my-function]
+      step_functions: [my-flow]     # needs log_group set on the state machine
 ```
 
 ```bash
-dectl salesdata monitor    # interleaved, colored, one line per event, prefixed by resource
+dectl example-pipeline monitor     # one line per event, prefixed and colored by its source
 ```
 
-Each monitored line is prefixed and colored by its source, and the combined stream
-is ordered by timestamp so you see the actual cross-resource sequence. Step
-Functions is included only when the state machine has a `log_group` configured
-(CloudWatch logging enabled); monitor tells you when one is missing.
+`monitor` is a pipeline-level command because it spans resources. It tails what the `monitor` block
+selects, so a pipeline of several functions reads end to end without opening each log. A state
+machine joins only when it has a `log_group`, which means CloudWatch logging is on. `monitor` warns
+about each one missing.
 
-## S3 buckets
+Every tailer follows whole log groups by time, never stream by stream. Lambda writes each execution
+environment to its own stream, and Glue creates its error stream only on the first write to stderr.
+Waiting for streams to appear costs minutes of silence and misses a stream created later.
 
-Buckets are declared in config as an `alias -> real bucket name` mapping. Per-bucket verbs
-(`mount`/`unmount`/`uri`) take the alias; the set-level `export` spans every bucket.
+## `s3` — bucket names for the aws CLI, not another copy of it
 
 ```bash
-# Load every bucket URI into your shell as $pipeline_alias (lowercase), then use
-# them with the aws CLI. A CLI can't set the parent shell's env, so you eval it:
-eval "$(dectl salesdata s3 export)"           # --prefix overrides the variable name prefix
-aws s3 cp "$salesdata_raw/incoming/file.txt" .
-
-# One bucket's bare s3:// URI, for command substitution:
-aws s3 ls "$(dectl salesdata s3 raw uri)"
-
-# Mount a bucket as a local directory (Linux only — uses mount-s3 / FUSE):
-dectl salesdata s3 raw mount     # -> ~/buckets/salesdata/raw
-dectl salesdata s3 raw unmount
+eval "$(dectl example-pipeline s3 export)"          # $example_pipeline_raw and the rest, in this shell
+aws s3 cp "$example_pipeline_raw/incoming/file.txt" .
+aws s3 ls "$(dectl example-pipeline s3 raw uri)"     # one bucket's bare s3:// URI
+dectl example-pipeline s3 raw mount                  # at ~/buckets/example-pipeline/raw, Linux only
+dectl example-pipeline s3 raw unmount
 ```
 
-`s3 <alias> mount` refuses on macOS and points you at `export` instead.
+A CLI cannot set its parent shell's environment, so `export` prints the assignments for `eval`.
+Each bucket becomes a lowercase variable named for the pipeline and the alias, with hyphens turned
+to underscores. `--prefix` replaces the pipeline name. `export` and `uri` print no markup and no
+color codes, so command substitution gets exactly the value.
 
-## Iceberg tables
+`mount` shells out to `mount-s3`, Mountpoint for Amazon S3, which is FUSE-based and Linux-only. On
+any other system it refuses and points at `export`.
 
-Tables are declared as an alias over the Glue Data Catalog pair that owns them:
+## `iceberg` — table history read from its metadata file, with no query engine
 
 ```yaml
 iceberg_tables:
   events:
-    database: salesdata-{env}-catalog
+    database: my-{env}-catalog
     table: events
 ```
 
-The verbs read the table's own metadata file. Glue holds a pointer to it, so a read is one
-`GetTable` and one `GetObject` — no query engine, no workgroup, and nothing to switch on.
-
 ```bash
-dectl salesdata iceberg events snapshots     # every commit: operation, rows added and removed
-dectl salesdata iceberg events history       # each change of the current snapshot, rollbacks included
-dectl salesdata iceberg events branches      # branches and tags, and what they point at
-dectl salesdata iceberg events files         # file counts and average file size, commit by commit
-dectl salesdata iceberg events diff          # what the last commit changed
+dectl example-pipeline iceberg events snapshots     # every commit: operation, rows added and removed
+dectl example-pipeline iceberg events history       # each change of the current snapshot, rollbacks included
+dectl example-pipeline iceberg events files         # file counts and average size, commit by commit
+dectl example-pipeline iceberg events diff 4471     # what ran since that snapshot, and every counter moved
 ```
 
-Every one of those but `diff` is a list and takes `--limit`/`-n`, which is a row count. Leave it
-off and you get every row; `--limit 0` shows none. The whole answer is one metadata file that has
-already been read, so the flag trims the display rather than the fetch.
+Glue holds a pointer to the table's metadata file, so a read is one `GetTable` and one `GetObject`.
+There is no query engine, no workgroup and nothing to switch on. A table missing that pointer is not
+an Iceberg table, and dectl says so.
 
-`diff` is the one to reach for when a number moved. Give it the snapshot the number was last
-right at and it names the commits that ran since, alongside the record, file and byte deltas:
+`diff` is the one to reach for when a number moved. With no argument it compares the current
+snapshot with its parent. Given the snapshot the number was last right at, it lists the commits
+since, beside the record, file and byte deltas. Given two, it compares those. A snapshot is named by
+its full id, any unique tail of one, or a branch or tag. An ambiguous tail is an error listing the
+candidates.
 
-```bash
-dectl salesdata iceberg events diff 4471          # from that snapshot to now
-dectl salesdata iceberg events diff 4471 9108     # between two snapshots
-```
+The list verbs take `--limit`, a row count. Leave it off for every row. The whole answer is one
+metadata file already read, so the flag trims the display rather than the fetch.
 
-A snapshot is named by its full 19-digit id, by any unique tail of one, or by a branch or tag.
-An ambiguous tail is an error listing the candidates rather than a guess.
+`files` reports each snapshot's own summary counters. There is no row-per-data-file view, because
+the manifests naming individual files are Avro and dectl does not read them. Reading them would
+more than double the install. An expired snapshot is gone from the metadata file, so nothing can
+reach it.
 
-Two limits are worth knowing. `files` reports the file layout from each snapshot's own summary
-counters — file counts, total bytes and average size — and there is no row-per-data-file view,
-because the manifests naming individual files are Avro and dectl does not read them. And a
-snapshot that has been expired is gone from the metadata file, so nothing can reach it.
+dectl only reads tables. Compaction, snapshot expiry, orphan removal and rollback are not here.
 
-## Other commands
-
-```bash
-dectl salesdata glue source-copy run   # start a Glue job (add --follow to tail it)
-dectl reference                        # the full command grammar, config-independent
-dectl search my-bucket                 # find AWS resources by keyword (--json to script it)
-dectl config show                      # inspect the loaded config (--json for the shape)
-```
-
-## Config
-
-Config lives at `$XDG_CONFIG_HOME/dectl/config.yaml`, which is
-`~/.config/dectl/config.yaml` when the variable is unset. `dectl config path` prints the
-resolved path.
+## `config` — one file builds the command tree, and a typo in it is an error
 
 ```bash
-dectl config init        # write a starter config (fails if one already exists)
-dectl config example     # print a full example of every option, for side-by-side reference
-dectl config edit        # open it in $VISUAL / $EDITOR (seeds one from the template if missing)
-dectl config validate    # check it parses, matches the schema, and its paths are usable
-                         # add --json for {outcome, unusable_values}
-dectl config show        # resolved pipelines with alias -> AWS name mapping
-dectl config path        # print the config file path
+dectl config path        # the resolved config path, whether or not a file is there
+dectl config show        # every pipeline resolved: names, managed fields and paths
+dectl config validate    # exit 0 when clean, 3 otherwise; --json for outcome and unusable_values
 ```
 
-Unknown keys are rejected, so `config validate` catches a typo like `step_function:`
-instead of silently ignoring it. `config example` prints to stdout (highlighted in a
-terminal, plain when redirected), so you can display the full reference in one pane
-while editing the real config in another.
+Every model rejects unknown keys. `config validate` checks that the file parses, matches the schema,
+and names values that can be used. Bucket names are checked on any machine. `script_bucket` and
+every entry under `buckets` must be a name S3 accepts, as the active environment resolves it. A
+refused name is printed beside every arm of S3's naming rule, reserved prefixes and suffixes
+included. How each Glue script key is written is checked on any machine too. Whether a file is
+present needs a directory to look in, which `resolve_paths_from` supplies.
 
-### Running from anywhere: `resolve_paths_from`
+`validate --json` emits `outcome` and `unusable_values`. The outcome separates a clean config from
+one that could not be read at all.
 
-Every read talks to AWS and needs no local file, so a read runs from any directory.
-Deploys are the exception: a Glue job's `scripts` and a Lambda's `source_dir` are paths,
-and without `resolve_paths_from` they resolve from the directory you happen to be standing
-in.
+### `resolve_paths_from` — deploys that reach the same files from any directory
 
-Give a pipeline a `resolve_paths_from` and they resolve from that instead:
+Every read talks to AWS and needs no local file, so reads run from any directory. Deploys are the
+exception. A Glue job's `scripts`, a Lambda's `source_dir` and a state machine's `definition_file`
+are paths. With no `resolve_paths_from`, they resolve from the directory you are standing in.
 
 ```yaml
 pipelines:
-  salesdata:
-    resolve_paths_from: ~/code/salesdata
+  example-pipeline:
+    resolve_paths_from: ~/code/example-pipeline
     lambdas:
-      notifier:
-        name: salesdata-{env}-notifier
-        source_dir: modules/lambda/notifier/code
+      my-function:
+        name: my-{env}-lambda-function
+        source_dir: modules/lambda/my_function/code
 ```
 
-`dectl salesdata lambda notifier deploy` now zips `~/code/salesdata/modules/lambda/notifier/code`
-from wherever you run it. With several pipelines each naming their own directory, one
-config drives every checkout's deploys and you never change directory to do it.
+`dectl example-pipeline lambda my-function deploy` then zips
+`~/code/example-pipeline/modules/lambda/my_function/code` from anywhere. With several pipelines each
+naming its own directory, one config drives every checkout's deploys.
 
-The value must be absolute or start with `~`. A relative one would resolve against the
-working directory, which is the dependency the key removes, so it fails validation. A
-`{env}` token in it is substituted like any other name.
+The value must be absolute or start with `~`. A relative one would resolve against the working
+directory, which is the dependency the key removes, so it fails validation. A `{env}` token in it is
+substituted like any other name.
 
-A `source_dir` may be absolute and sit outside that directory — it is zipped and uploaded
-as bytes, so nothing else depends on where it came from. A glue `scripts` entry may not:
-its S3 key is built from the string you write, and S3 stores that string as given. So a
-script and its `script_prefix`, the two halves of that key, are each written as plain
-relative segments — `jobs/copy.py`. Anything else spells one file two ways: the key carries
-the `..`, the `./` or the doubled separator literally, so a second machine writing
-`jobs/copy.py` for the same script writes a different object, and a lifecycle rule or
-Terraform data source keyed on `scripts/` sees neither. `config validate` and the deploy
-both refuse it. The config still loads either way,
-which is what keeps the rest of the CLI available to tell you.
+A `source_dir` may be absolute and sit outside that directory. It is zipped and uploaded as bytes,
+so nothing depends on where it came from. A Glue script may not. Its S3 key is built from the string
+as written. So a script and its `script_prefix`, the two halves of that key, are each plain relative
+segments, like `jobs/copy.py`. Anything else spells one file two ways. The key carries a `..`, a
+`./` or a doubled separator literally, so a second machine writing `jobs/copy.py` writes a different
+object. `config validate` and the deploy both refuse it. The config still loads, which keeps the
+rest of the CLI available to say so.
 
-A glue job that declares no scripts is refused for the same reason: a Glue job is defined
-by a `ScriptLocation`, and there is none to build. A lambda `source_dir` that exists and
-holds nothing is refused too — it zips to a valid empty archive, which replaces the
-function's code with nothing.
+A Glue job declaring no scripts is refused, because a job is defined by its `ScriptLocation` and
+there is none to build. A `source_dir` that exists and holds nothing is also refused. It would zip
+to a valid empty archive and replace the function's code with nothing.
 
-Bucket names are checked the same way, on any machine. A `script_bucket` and every entry
-under `buckets` has to be a name S3 accepts, and the check reads the name the active
-environment resolves to, since that is the one that reaches S3. The rule has more arms than
-are worth reading here, and `dectl config validate` prints all of them beside the name it
-refused — reserved affixes included, which is where a name that looks fine is rejected.
+With `resolve_paths_from` set, `config validate` checks the directory and every path beneath it. It
+says of each whether it is absent or present with the wrong type, since those have opposite fixes.
+An absent directory is reported once, rather than once per file beneath it.
 
-Omit `resolve_paths_from` and nothing changes: paths resolve from the working directory,
-and a deploy has to run from the checkout.
+`config show` and `list` print the resolved directory for every pipeline, with `~` expanded and
+`{env}` substituted, and mark the ones falling back to the working directory. They print the
+resolved path of every declared path beneath it, named by its config key, so the file a deploy would
+send is on the page. Their `--json` carries the same under `resolve_paths_from`, and under `paths`
+on each resource that declares one.
 
-`config validate` checks a pipeline that names `resolve_paths_from` all the way down — the
-directory, every script, every `source_dir` — and says of each one whether it is absent or
-present with the wrong type, since those have opposite fixes. For a pipeline that names
-none it still checks how the glue keys are written and whether the bucket names are ones S3
-accepts, both answerable on any machine; only whether a file is present needs a directory
-to look in.
+## Where it writes
 
-An absent directory is reported on its own. Every path beneath it would carry the same one
-cause, and ten lines each naming a file name that cause in none of them.
-
-`config show` prints the resolved directory for every pipeline, with `~` expanded and
-`{env}` substituted, and marks the ones falling back to the working directory. It prints
-the resolved path of every declared path beneath it, named by the config key it came from,
-so the file a deploy would send is on the page rather than inferred. `config show --json`
-and `list --json` carry the same under `resolve_paths_from` and a `paths` block per
-resource. `validate --json` emits an object with `outcome` and `unusable_values`, so a
-caller can tell a clean config from one that could not be read at all.
+- `$XDG_CONFIG_HOME/dectl/config.yaml`: the config, written only by `config init` and `config edit`.
+- `$XDG_CACHE_HOME/clisteno/` and `$XDG_STATE_HOME/clisteno/`: the shortcut table, computed from the
+  live command tree.
+- `$XDG_STATE_HOME/dectl/`: when the update check last ran, and what it found.
+- `~/buckets/PIPELINE/ALIAS`: the directory `s3 ALIAS mount` creates and mounts on.
