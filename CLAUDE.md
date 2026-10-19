@@ -179,8 +179,7 @@ docstring before changing either. What a new field or resource has to meet:
   `--json` and the printed row all come from the declaration. **A new resource *kind* costs six
   edits**: the `--json` section, its `paths` key, the human section, its `print_paths` call,
   `resource_types`, and the pipeline loop in `main.py`. `s3` has neither a `print_paths` call nor
-  a `paths` key today. `test_every_resolved_path_reaches_both_renderers` catches a kind with
-  declared paths and no display.
+  a `paths` key today.
 - **A new `ConfigFault` needs a `FAULT_WORDING` entry, a `SPELLING_FAULTS` decision, and a line in
   `recovery_lines`.** `test_every_fault_has_a_sentence` pins the first.
 - **`join_uri` joins three strings and all three are guarded.** `key_fault` covers the prefix and
@@ -204,7 +203,6 @@ rendered job. `configured_uris` is handed a raw one, because the help panel is b
 `--env` is parsed. `script_uris` renders its own operands, because a renderer must not reach
 `render_env_model`. Mixing conventions names an object nothing wrote, but only when the
 environment's own name carries the token.
-`test_every_site_composing_a_script_destination_substitutes_exactly_once` drives all four.
 
 `deploy` runs everything that can refuse before it writes anything: `resolve_scripts`, then
 `confirm_glue_job_update`, then the upload, then `apply_glue_job_update`. A refusal after the
@@ -260,9 +258,8 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
   before-image `job_definition_changes` diffs against, and the copy is shallow. Writing through a
   nested dict such as `Command` makes the diff compare it with itself and skip `UpdateJob`.
 - **`JobUpdate.derived` tells the diff that a key the API forced out is not a change.** Its
-  docstring is the one copy of the mechanism. The `sizing_named` half of
-  `test_a_worker_sized_job_converges_after_one_deploy` catches an inverted read; its
-  `sizing_unmanaged` twin passes either way.
+  docstring is the one copy of the mechanism. `test_a_worker_sized_job_converges_after_one_deploy`
+  catches an inverted read.
 - **`glue deploy` is two writes with different owners.** The script upload is always yours. The
   job *definition* is Terraform's once a pipeline is established, but dectl can still write it
   before then. So `deploy` diffs its computed update against the live definition, skips
@@ -401,13 +398,11 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
 `typer.testing.CliRunner`. Live AWS tests are marked `integration` and run only with
 `--run-integration`, because they create and delete real resources.
 
-**`tests/layered_pipelines_config/` is a config in the shape a real multi-pipeline one takes, and
-the README's full example is its `config.yaml` and `pipelines/sales.yaml` verbatim.** It
+**`tests/layered_pipelines_config/` is a config in the shape a real multi-pipeline one takes.** It
 configures every resource type. The variables in `config.yaml` fan out to two pipeline files
 through each one's prefix, and `finance.yaml` is written out like `sales.yaml` under its own
 pipeline and dataset. The scripts and Lambda sources it names sit beside it, so its relative paths
 resolve. `test_config.py` loads it through `load_config` for the load-time faults and refusals.
-Its README test holds the README's config and template blocks equal to these files.
 `test_main.py` starts the installed `dectl` against it in a fresh process, because `main.py`
 builds the tree from the files at import.
 `test_stepfunctions_integration.py` deploys its `flow.asl.json.tftpl` with `finance`'s

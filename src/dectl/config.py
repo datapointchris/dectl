@@ -277,8 +277,7 @@ class ResourceModel(StrictModel, DeclaresValues):
     resources alike. A field declared to some declarations and not the others is checked one way
     and not another, or excluded from the env-effect guard and never checked, and all of those
     read as success. `test_every_string_field_is_classified` is what makes a new field a
-    decision, and `test_every_declaration_consumer_sees_every_member_shape` is what keeps a
-    consumer from walking its own way to a narrower set."""
+    decision."""
 
 
 class Defaults(StrictModel):
