@@ -1,7 +1,7 @@
 # dectl
 
 Data engineering control CLI for driving AWS pipelines (Glue, Lambda, Step Functions, S3,
-Jenkins deploys) from a single config file. Installed via `uv tool install`; the entry point is
+Jenkins deploys) from one config directory. Installed via `uv tool install`; the entry point is
 `dectl.main:app`.
 
 ## The core idea: the CLI surface is assembled from config at import time
@@ -90,10 +90,13 @@ lives in `$XDG_CONFIG_HOME/dectl/`, resolved by `pyclisteno.paths.config_home()`
 is honored rather than `~/.config` being hardcoded. `config.yaml` holds `defaults`, `jenkins` and
 `variables`. Each pipeline is `pipelines/<name>.yaml`, and the file stem is the pipeline's name.
 
-**The split ends at the loader.** `read_config_files` joins the files into the one mapping
-`DectlConfig` validates, each pipeline under `pipelines.<stem>`, so everything after loading sees
-the same shape a single file once gave it. It refuses a `pipelines` key in `config.yaml` and any
-file in `pipelines/` not named `<name>.yaml`, skipping one whose name starts with `.`. Both refusals are
+**The files are joined at the loader, and nothing after it knows there are several.**
+`read_config_files` joins them into the one mapping `DectlConfig` validates, so everything after
+loading sees each pipeline under `pipelines.<stem>`. It refuses a `pipelines` key in
+`config.yaml`. In `pipelines/` it refuses what looks like a misnamed pipeline: a `.yml`, `.yaml` in
+another case, or a stem in `GLOBAL_COMMAND_NAMES`, which the root's own command would hide. It
+skips everything else, since one editor backup refused would take every pipeline down with it.
+`config edit NAME` runs the same `pipeline_name_fault` before it writes a file. The refusals are
 `ValidationError`s located at `('pipelines',)`, so the one renderer reports them. Locations are
 rendered by `variables.file_and_key`, which turns `('pipelines', name, ...)` into
 `pipelines/<name>.yaml <keys>` and anything else into `config.yaml <keys>`. The fault rows and
@@ -120,8 +123,10 @@ that pipeline alone. So every field downstream, the path checks included, sees a
 and needs no change for a new field to take variables. `{env}` passes through to the `resolve_*`
 chokepoints. A pipeline variable redefining one from `config.yaml`, a variable named `env` or a name
 `{name}` cannot reach, an undefined `{name}`, an unquoted `{name}` YAML read as a mapping, and a
-non-string value are each a `ValidationError` carrying the key's own location. dectl gives YAML
-anchors and merges no handling of its own. `{{name}}` is the escape for a literal `{name}` another
+non-string value are each a `ValidationError` carrying the key's own location. An anchor or merge
+is YAML's, resolved before the pass sees the mapping, and reaches only within one file. The pass
+builds new mappings rather than editing the one it was handed, because YAML gives an anchored block
+to each alias and merge of it as one object. `{{name}}` is the escape for a literal `{name}` another
 program fills. `${NAME}` is skipped by the token's lookbehind, which keeps the Jenkins credentials
 and Terraform placeholders out of reach.
 `aws_names_only` drops `variables`, because a `{env}` held there names nothing and would silence
@@ -453,6 +458,12 @@ covers a spelling the reader can miss.
 **botocore's retry loop sits below the client object, so no fake reaches it.** `test_invoke.py`
 counts the requests arriving at a socket that accepts connections and never answers. It is the
 only place `total_max_attempts: 1` is shown to mean one request, and it needs no AWS.
+
+**What live Lambda does that no fake would have told you.** Lambda delivers an invocation's logs
+seconds after `Invoke` returns, creating the log group if it is gone. So a function whose role may
+write logs recreates a group the test deleted. A test's role for a durable function needs only
+`lambda:CheckpointDurableExecution` and `lambda:GetDurableExecutionState`. A durable execution's
+`FunctionArn` names the version it ran.
 
 **Latency is invisible to any fake.** `test_glue_run_integration.py` runs a real Python Shell job
 against a wall-clock budget, and it is the only module that costs money. The deploy integration

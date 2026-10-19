@@ -36,7 +36,7 @@ type Location = tuple[str | int, ...]
 
 class Variable(NamedTuple):
     value: str
-    # Where it is defined, as a dotted key the reader can search the file for.
+    # Where it is defined, as the file and the key within it, which the reader can open and search.
     origin: str
     # The variables its own value was built from, so a fault traces to the one holding the character.
     used: tuple[str, ...] = ()
@@ -75,12 +75,12 @@ TOP_LEVEL_VARIABLES = file_and_key(('variables',))
 
 
 class Pass:
-    """One expansion of one file: the faults it found and the strings it changed."""
+    """One expansion of the assembled config: the faults it found and the strings it changed."""
 
     def __init__(self, defined: dict[str, list[Definition]]) -> None:
         self.faults: list[InitErrorDetails] = []
         self.changed: dict[Location, tuple[str, Written]] = {}
-        # Every variable name in the file -> where each is defined, so a reference out of a
+        # Every variable name in every config file -> where each is defined, so a reference out of a
         # variable's reach is told where it is rather than that it does not exist.
         self.defined = defined
 
@@ -96,7 +96,7 @@ class Pass:
             if unquoted_token(value):
                 self.unquoted(value, scope, location)
                 return value
-            # Built new rather than edited: YAML hands an aliased block to every pipeline as one object.
+            # Built new rather than edited: YAML hands an anchored block to each alias and merge of it as one object.
             return {key: self.substitute(item, scope, (*location, key)) for key, item in value.items()}
         if isinstance(value, list):
             return [self.substitute(item, scope, (*location, index)) for index, item in enumerate(value)]
@@ -231,7 +231,7 @@ def unquoted_token(value: Any) -> bool:
 
 
 def defined_variables(raw: dict[Any, Any]) -> dict[str, list[Definition]]:
-    """Every variable name the file defines, at either level, and each block defining it."""
+    """Every variable name config.yaml and the pipeline files define, and each block defining it."""
     blocks: list[tuple[str, Any]] = [(TOP_LEVEL_VARIABLES, raw.get('variables'))]
     pipelines = raw.get('pipelines')
     if isinstance(pipelines, dict):
