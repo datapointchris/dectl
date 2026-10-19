@@ -16,7 +16,7 @@ pipelines:
       dataset: orders
       landing: &landing s3://{prefix}-raw/{dataset}/incoming/
     buckets:
-      raw: "{prefix}-raw"
+      raw: &raw-bucket "{prefix}-raw"
     lambdas:
       process:
         name: "{prefix}-process-{dataset}"
@@ -28,6 +28,7 @@ pipelines:
         scripts: [load.py]
         role: arn:aws:iam::{account}:role/{prefix}-glue
         arguments:
+          RAW_BUCKET: *raw-bucket
           LANDING: "{landing}"
           OUTPUT_PATTERN: out/{{date}}/
       backfill:

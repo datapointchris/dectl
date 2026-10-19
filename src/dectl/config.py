@@ -15,6 +15,7 @@ from pydantic import Field
 from pydantic import ModelWrapValidatorHandler
 from pydantic import PrivateAttr
 from pydantic import ValidationError
+from pydantic import ValidationInfo
 from pydantic import field_validator
 from pydantic import model_validator
 
@@ -121,6 +122,11 @@ pipelines:
         arguments:
           SOURCE_BUCKET: "{raw_bucket}"
           SOURCE_PREFIX: incoming
+          # `&curated` anchors this one value, and `curated: *curated` under buckets repeats it
+          # whole. Written {curated}, it would look for a variable and find none. An anchor
+          # cannot go inside a longer value either, so a name used inside others is a variable,
+          # as raw_bucket is.
+          TARGET_BUCKET: &curated "{company}-{env}-curated-data-bucket"
           # The job fills {date} itself, so it reaches Glue with single braces.
           OUTPUT_PATTERN: out/{{date}}/
       # A second job, sized the other way, and naming every optional key so each one is here to
@@ -205,7 +211,7 @@ pipelines:
         name: "{company}-{env}-reporting-machine"
     buckets:
       raw: "{raw_bucket}"
-      curated: "{company}-{env}-curated-data-bucket"
+      curated: *curated
     iceberg_tables:
       # Glue Data Catalog database + table. dectl reads the table's own metadata file, so the
       # only requirement is that the table is registered in Glue with table_type ICEBERG.
@@ -497,8 +503,8 @@ class DectlConfig(StrictModel):
 
     @model_validator(mode='wrap')
     @classmethod
-    def substitute_variables(cls, raw: Any, handler: ModelWrapValidatorHandler['DectlConfig']) -> 'DectlConfig':
-        expansion = expand_variables(raw)
+    def substitute_variables(cls, raw: Any, handler: ModelWrapValidatorHandler['DectlConfig'], info: ValidationInfo) -> 'DectlConfig':
+        expansion = expand_variables(raw, (info.context or {}).get('anchor_lines', {}))
         config = handler(expansion.config)
         for name, pipeline in config.pipelines.items():
             pipeline._writings = expansion.writings.get(name, {})
@@ -949,13 +955,34 @@ def config_value_faults(config: DectlConfig) -> list[UnusableValue]:
     return problems
 
 
+class AnchorRecordingLoader(yaml.SafeLoader):
+    """`safe_load`'s loader, keeping each anchor's name and line, which composing the nodes discards.
+
+    The variables pass reads them, because `{raw}` written for an anchor `&raw` is the mistake
+    anchors invite, and a refusal that knows the anchor can name the `*raw` that works."""
+
+    def __init__(self, stream: Any) -> None:
+        super().__init__(stream)
+        self.anchor_lines: dict[str, int] = {}
+
+    def compose_node(self, parent: Any, index: Any) -> Any:
+        event = self.peek_event()
+        if not isinstance(event, yaml.AliasEvent) and getattr(event, 'anchor', None):
+            self.anchor_lines[event.anchor] = event.start_mark.line + 1
+        return super().compose_node(parent, index)
+
+
 def load_config() -> DectlConfig | None:
     if not CONFIG_PATH.exists():
         return None
     # The open file rather than its text, so a YAML error's position names the file.
     with CONFIG_PATH.open('rb') as handle:
-        raw = yaml.safe_load(handle)
-    return DectlConfig.model_validate(raw)
+        loader = AnchorRecordingLoader(handle)
+        try:
+            raw = loader.get_single_data()
+        finally:
+            loader.dispose()
+    return DectlConfig.model_validate(raw, context={'anchor_lines': loader.anchor_lines})
 
 
 # The two ways a config that exists still fails to load: YAML that will not parse, and YAML that

@@ -105,8 +105,11 @@ every string of the raw mapping: the top-level block reaches the whole file, a p
 that pipeline alone. So every field downstream, the path checks included, sees a substituted value
 and needs no change for a new field to take variables. `{env}` passes through to the `resolve_*`
 chokepoints. A pipeline variable redefining a top-level one, a variable named `env` or a name
-`{name}` cannot reach, an undefined `{name}`, an unquoted `{name}` YAML read as a mapping, and a
-non-string value are each a `ValidationError` carrying the key's own location. `{{name}}` is the
+`{name}` cannot reach, an undefined `{name}`, an unquoted `{name}` YAML read as a mapping, a quoted
+`"*name"` naming an anchor, and a non-string value are each a `ValidationError` carrying the key's
+own location. `load_config` parses with `AnchorRecordingLoader` and hands each anchor's name and
+line in through the validation context, so `{raw}` written for an anchor `&raw` is told the `*raw`
+that works. A config validated without that context sees no anchors. `{{name}}` is the
 escape for a literal `{name}` another program fills. `${NAME}` is skipped by the token's
 lookbehind, which keeps the Jenkins credentials and Terraform placeholders out of reach.
 `aws_names_only` drops `variables`, because a `{env}` held there names nothing and would silence

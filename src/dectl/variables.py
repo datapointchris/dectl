@@ -6,8 +6,9 @@ not: `--env` is parsed after the command tree is built, so it passes through unt
 a pipeline's block reaches that pipeline alone.
 
 Nothing a variable could replace is overwritten. `env` cannot be a variable's name, a pipeline
-cannot redefine a top-level variable, and a `{name}` naming no variable is refused rather than
-left in place to reach AWS as a literal name. `{{name}}` is the escape, and renders as `{name}`.
+cannot redefine a top-level variable, and a `{name}` with no variable defined for it is refused
+rather than left in place to reach AWS as a literal name. `{{name}}` is the escape, and renders
+as `{name}`. A YAML anchor is not a variable: `&raw` is repeated as `*raw`, never as `{raw}`.
 Mapping keys are aliases and are never substituted.
 
 Every string a substitution changed is recorded with what the file wrote, so a fault found later
@@ -61,12 +62,14 @@ def dotted(location: Location) -> str:
 class Pass:
     """One expansion of one file: the faults it found and the strings it changed."""
 
-    def __init__(self, defined: dict[str, list[Definition]]) -> None:
+    def __init__(self, defined: dict[str, list[Definition]], anchor_lines: dict[str, int]) -> None:
         self.faults: list[InitErrorDetails] = []
         self.changed: dict[Location, tuple[str, Written]] = {}
         # Every variable name in the file -> where each is defined, so a reference out of a
         # variable's reach is told where it is rather than that it does not exist.
         self.defined = defined
+        # Every YAML anchor in the file -> its line, so `{raw}` written for `&raw` is told `*raw`.
+        self.anchor_lines = anchor_lines
 
     def fault(self, kind: str, message: str, location: Location, value: Any) -> None:
         self.faults.append(InitErrorDetails(type=PydanticCustomError(kind, message), loc=location, input=value))
@@ -86,6 +89,11 @@ class Pass:
             return [self.substitute(item, scope, (*location, index)) for index, item in enumerate(value)]
         if not isinstance(value, str):
             return value
+        if value.startswith('*') and value[1:] in self.anchor_lines:
+            anchor = f'&{value[1:]} on line {self.anchor_lines[value[1:]]}'
+            message = f'{value} is quoted, so YAML reads it as text. Write {value} unquoted, to repeat the value anchored as {anchor}'
+            self.fault('quoted_alias', message, location, value)
+            return value
         used: list[str] = []
 
         def replace(match: re.Match[str]) -> str:
@@ -98,7 +106,8 @@ class Pass:
                 used.append(f'{match[0]} from {scope[name].origin}')
                 used.extend(scope[name].used)
                 return scope[name].value
-            self.fault('undefined_variable', self.unreachable(match[0], name, scope, below, location), location, value)
+            reason = self.unreachable(match[0], name, scope, below, location, whole=match[0] == value)
+            self.fault('undefined_variable', reason, location, value)
             return match[0]
 
         substituted = VARIABLE_TOKEN.sub(replace, value)
@@ -106,17 +115,19 @@ class Pass:
             self.changed[location] = (substituted, Written(value, tuple(used)))
         return substituted
 
-    def unreachable(self, token: str, name: str, scope: dict[str, Variable], below: frozenset[str], location: Location) -> str:
+    def unreachable(self, token: str, name: str, scope: dict[str, Variable], below: frozenset[str], location: Location, whole: bool) -> str:
         """Why `token` resolves to nothing here, most likely cause first.
 
         The escape is offered last, because escaping a variable that exists elsewhere ships the
         braces to AWS as text. Moving a variable to the top level is offered only where it would
-        work: one built from another pipeline's variables cannot be read outside that pipeline."""
+        work: one built from another pipeline's variables cannot be read outside that pipeline.
+        An anchor of the same name is offered only as `*name`, and only where `whole` says the
+        token is the entire value, because an alias cannot sit inside a longer string."""
         if name in below:
-            return f'{token} is defined below this variable, and a variable sees only those above it'
+            return f'variable {token} is defined below this one, and a variable sees only those above it'
         if name in self.defined:
             where = ' and '.join(definition.origin for definition in self.defined[name])
-            unseen = f'{token} is defined in {where}, which this value cannot see'
+            unseen = f'variable {token} is defined in {where}, which this value cannot see'
             if location[0] != 'pipelines' or len(location) < 2:
                 return f"{unseen}. A pipeline's variables reach that pipeline alone; move it to the top-level variables block"
             here = f'pipelines.{location[1]}.variables'
@@ -127,10 +138,20 @@ class Pass:
                 f"{unseen}. A pipeline's variables reach that pipeline alone: define it in {here} too, or move it "
                 'to the top-level variables block if every pipeline shares its value'
             )
+        missing = f'variable {token} cannot be found'
+        if name in self.anchor_lines:
+            anchor = f'&{name} on line {self.anchor_lines[name]}'
+            if not whole:
+                return (
+                    f'{missing}. {anchor} is a YAML anchor, which repeats a whole value and cannot go inside one. '
+                    f'Define {name} under variables to use it here'
+                )
+            key = f'{location[-1]}: ' if isinstance(location[-1], str) else ''
+            return f'{missing}. {anchor} is a YAML anchor, not a variable. Repeat it as the whole value, unquoted: {key}*{name}'
         close = difflib.get_close_matches(name, list(scope), n=1)
         if close:
-            return f'{token} names no variable; did you mean {{{close[0]}}}?'
-        return f'{token} names no variable. If a job or Jenkinsfile fills {token} itself, write {{{token}}}'
+            return f'{missing}. Did you mean {{{close[0]}}}?'
+        return f'{missing}. If a job or Jenkinsfile fills {token} itself, write {{{token}}}'
 
     def pipeline_variables_in(self, name: str) -> str:
         """The `{name}`s a definition of `name` uses that no top-level variable supplies, joined for a message."""
@@ -148,7 +169,7 @@ class Pass:
         (name,) = value
         message = f'{{{name}}} was read as a YAML mapping, because the value starts with {{; quote it'
         if name not in scope and name != RESERVED_NAME:
-            message += f'. Quoted, {self.unreachable(f"{{{name}}}", name, scope, frozenset(), location)}'
+            message += f'. Quoted, {self.unreachable(f"{{{name}}}", name, scope, frozenset(), location, whole=True)}'
         self.fault('unquoted_variable', message, location, value)
 
     def resolve_block(self, block: Any, inherited: dict[str, Variable], location: Location) -> tuple[Any, dict[str, Variable]]:
@@ -225,11 +246,11 @@ def defined_variables(raw: dict[Any, Any]) -> dict[str, list[Definition]]:
     return defined
 
 
-def expand_variables(raw: Any) -> Expansion:
+def expand_variables(raw: Any, anchor_lines: dict[str, int]) -> Expansion:
     """The parsed config with every variable substituted, or a `ValidationError` naming each fault."""
     if not isinstance(raw, dict):
         return Expansion(raw, {})
-    run = Pass(defined_variables(raw))
+    run = Pass(defined_variables(raw), anchor_lines)
     top_block, top_scope = run.resolve_block(raw.get('variables'), {}, ('variables',))
     expanded: dict[Any, Any] = {}
     for key, value in raw.items():

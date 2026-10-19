@@ -146,7 +146,7 @@ def merged(base, overlay):
     return {**base, **{key: merged(base.get(key), value) for key, value in overlay.items()}}
 
 
-def test_variables_substitute_at_load_and_refuse_what_would_clobber(monkeypatch):
+def test_variables_substitute_at_load_and_refuse_what_would_clobber(monkeypatch, tmp_path):
     """The committed config fans one top-level variable out to two pipelines through each one's
     own prefix, and copies finance from sales with a YAML merge. Its resolved names under an
     environment are `test_main`'s, read through the CLI."""
@@ -155,6 +155,29 @@ def test_variables_substitute_at_load_and_refuse_what_would_clobber(monkeypatch)
     assert config is not None
     # `{env}` survives the load, because --env is parsed after the tree is built.
     assert config.pipelines['finance'].buckets['raw'] == 'acme-{env}-finance-raw'
+    # An anchored value is copied as the file wrote it, so each pipeline fills its own prefix.
+    assert config.pipelines['finance'].glue_jobs['load'].arguments['RAW_BUCKET'] == 'acme-{env}-finance-raw'
+
+    text = LAYERED_CONFIG.read_text()
+    anchored_at = next(number for number, line in enumerate(text.splitlines(), 1) if '&raw-bucket' in line)
+    anchor_mistakes = [
+        (
+            '"{raw-bucket}"',
+            'undefined_variable',
+            f'variable {{raw-bucket}} cannot be found. &raw-bucket on line {anchored_at} is a YAML anchor, not a variable. '
+            'Repeat it as the whole value, unquoted: RAW_BUCKET: *raw-bucket',
+        ),
+        ('s3://{raw-bucket}/incoming', 'undefined_variable', 'cannot go inside one. Define raw-bucket under variables'),
+        ('"*raw-bucket"', 'quoted_alias', f'unquoted, to repeat the value anchored as &raw-bucket on line {anchored_at}'),
+    ]
+    written = tmp_path / 'config.yaml'
+    monkeypatch.setattr('dectl.config.CONFIG_PATH', written)
+    for mistake, kind, message in anchor_mistakes:
+        written.write_text(text.replace('RAW_BUCKET: *raw-bucket', f'RAW_BUCKET: {mistake}'))
+        with pytest.raises(ValidationError) as caught:
+            load_config()
+        assert {error['type'] for error in caught.value.errors()} == {kind}
+        assert message in caught.value.errors()[0]['msg']
 
     raw = yaml.safe_load(LAYERED_CONFIG.read_text())
     misnamed = DectlConfig.model_validate(merged(raw, {'variables': {'company': 'Acme_Co'}}))

@@ -491,10 +491,12 @@ Each of these is refused when the config loads, naming the key:
 
 - a variable named `env`, or named with anything but letters, digits, `_` and `-`;
 - a pipeline variable redefining a top-level one;
-- a `{name}` that names no variable, so a typo never reaches AWS as a literal name;
+- a `{name}` with no variable defined for it, so a typo never reaches AWS as a literal name. Where
+  the file anchors a value as `&name`, the message gives the `*name` that repeats it;
 - a `{name}` defined only in another pipeline's block. The message names that block, and offers
   moving the variable to the top level only when its value uses no pipeline variable;
 - an unquoted `{name}`, which YAML reads as a mapping;
+- a quoted `"*name"`, which YAML reads as text rather than as the value anchored `&name`;
 - a value that is not a string, including a block meant for reuse, which is an anchor's job.
 
 A value another program fills, such as a Glue argument `s3://b/out/{date}/`, writes the braces
@@ -523,11 +525,13 @@ pipelines:
       prefix: "{company}-{env}-sales"
       landing: &landing s3://{prefix}-raw/incoming/
     buckets:
-      raw: "{prefix}-raw"
+      raw: &raw-bucket "{prefix}-raw"
     glue_jobs:
       load: &load
         name: "{prefix}-load"
         role: arn:aws:iam::{account}:role/{prefix}-glue
+        arguments:
+          RAW_BUCKET: *raw-bucket
       backfill:
         <<: *load
         name: "{prefix}-backfill"
@@ -543,6 +547,11 @@ level deep, so `finance`'s `variables` block replaces the copied one whole. It r
 variable, and `*landing` repeats a shared value. An anchor is written where its block is first
 used, since the config has no key for holding anchors alone. Write it after the colon and before
 the quotes, as `&landing` is above.
+
+An anchor repeats a whole value, so `RAW_BUCKET: *raw-bucket` is the bucket each pipeline names.
+`{raw-bucket}` would look for a variable instead, and none exists. An alias cannot sit inside a
+longer string either: `s3://*raw-bucket/incoming` is that text and nothing more. A name used inside
+other values is a variable.
 
 ### `resolve_paths_from` — deploys that reach the same files from any directory
 
