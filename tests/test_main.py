@@ -4,9 +4,11 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 import typer
+from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
 import dectl.main
@@ -235,6 +237,20 @@ def test_search_reports_the_validation_error_before_touching_aws(invalid_config)
 
     assert result.exit_code == 1
     assert 'pipelines.p.step_function' in result.stderr
+
+
+def test_an_aws_refusal_no_command_handles_ends_in_its_own_sentence(monkeypatch):
+    """A deploy to a Glue job Terraform has not created yet answers EntityNotFoundException."""
+    monkeypatch.setenv('COLUMNS', '200')
+    monkeypatch.setattr(dectl.main, 'CONFIG_ERROR', None)
+    monkeypatch.setattr(dectl.main, 'cfg', DectlConfig.model_validate({'defaults': {'account_id': '123456789012'}, 'pipelines': {}}))
+    refusal = ClientError({'Error': {'Code': 'EntityNotFoundException', 'Message': 'Job [load] not found'}}, 'GetJob')
+    monkeypatch.setattr(dectl.main, 'run_search', Mock(side_effect=refusal))
+
+    result = runner.invoke(app, ['search', 'load'])
+
+    assert result.exit_code == 1
+    assert result.stderr.splitlines() == [str(refusal)]
 
 
 def test_an_unknown_name_reports_why_the_pipeline_tree_is_missing(invalid_config):

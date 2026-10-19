@@ -352,6 +352,10 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
   `cfg is None`.
 - **stdout is data and stderr is everything else.** Every refusal calls `output.error`, never
   `console.print`. `success` and `info` stay on stdout because they are the answer.
+- **An AWS error no command catches ends on botocore's own sentence, never a traceback.**
+  `DectlGroup.invoke` catches `ClientError` and `BotoCoreError`, prints the message and exits 1.
+  A command that knows what a refusal means catches it first and says that instead, as
+  `locate_metadata` does for a missing table.
 
 **Iceberg**
 

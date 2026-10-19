@@ -6,11 +6,14 @@ from typing import Any
 
 import typer
 import yaml
+from botocore.exceptions import BotoCoreError
+from botocore.exceptions import ClientError
 from pyclisteno import attach
 from pydantic import ValidationError
 from pyselfupdate import Config
 from pyselfupdate import notify
 from pyselfupdate.typercmd import run_update
+from rich.markup import escape
 from typer.core import TyperGroup
 
 from dectl.commands.config_cmd import config_app
@@ -78,24 +81,36 @@ def require_config() -> DectlConfig:
 
 
 class DectlGroup(TyperGroup):
-    """Report the config failure where an unknown pipeline name is what the reader typed.
-
-    Every pipeline is a subcommand assembled from config, so a config that does not load takes
-    the whole pipeline tree with it. Click can only report the name as unknown, which sends the
-    reader after a typo in a command they have run for months. The substitution holds only
-    while there is no loaded config to have contained the name — with one loaded, an unknown
-    name really is unknown and Click's usage error is the right answer.
-    """
+    """The root group, which decides how a failure no command handled reaches the reader."""
 
     # `Any` because typer vendors click privately as `typer._click`, and those are the types
     # this signature has to match. `click` itself is not a dectl dependency and would be the
     # wrong hierarchy anyway; `typer.Context` is a subclass of the vendored one, so naming it
     # here narrows a parameter the base widens.
     def get_command(self, ctx: Any, cmd_name: str) -> Any:
+        """Report the config failure where an unknown pipeline name is what the reader typed.
+
+        Every pipeline is a subcommand assembled from config, so a config that does not load
+        takes the whole pipeline tree with it. Click can only report the name as unknown, which
+        sends the reader after a typo in a command they have run for months. The substitution
+        holds only while there is no loaded config to have contained the name — with one loaded,
+        an unknown name really is unknown and Click's usage error is the right answer."""
         command = super().get_command(ctx, cmd_name)
         if command is None and cfg is None:
             require_config()
         return command
+
+    def invoke(self, ctx: Any) -> Any:
+        """End on AWS's own sentence where AWS refused and no command said more.
+
+        botocore's message names the operation, the error code and the resource, which is all a
+        traceback through botocore's frames would add. A command that knows what a refusal
+        means catches it first and says that instead."""
+        try:
+            return super().invoke(ctx)
+        except (BotoCoreError, ClientError) as exc:
+            error(escape(str(exc)))
+            raise typer.Exit(1) from exc
 
 
 # no_args_is_help is intentionally omitted: it would short-circuit to help before the callback
