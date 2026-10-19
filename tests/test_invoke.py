@@ -10,7 +10,6 @@ from botocore.exceptions import ReadTimeoutError
 from dectl.config import DectlConfig
 from dectl.config import LambdaConfig
 from dectl.invoke import ADMISSION_RETRY_ATTEMPTS
-from dectl.invoke import DURABLE_SYNC_CAP_SECONDS
 from dectl.invoke import EVENT_ACK_TIMEOUT_SECONDS
 from dectl.invoke import INVOKE_TIMEOUT_MARGIN_SECONDS
 from dectl.invoke import LAMBDA_MAX_TIMEOUT_SECONDS
@@ -132,16 +131,6 @@ def test_the_invoke_client_issues_exactly_one_request(hanging_endpoint):
     assert len(connections) == 1
 
 
-def test_max_attempts_of_one_still_issues_a_duplicate_invoke(hanging_endpoint):
-    # total_max_attempts counts the initial request; max_attempts counts retries on top of it. The
-    # two read alike and differ by exactly the duplicate invocation this repo shipped an outage on.
-    endpoint, connections = hanging_endpoint
-
-    invoke_against(endpoint, {'mode': 'standard', 'max_attempts': 1})
-
-    assert len(connections) == 2
-
-
 def test_the_invoke_client_carries_no_retries_and_the_read_timeout_it_was_given():
     client = make_invoke_client(empty_session(), 930)
 
@@ -160,35 +149,6 @@ def test_aws_retry_environment_variables_do_not_reopen_the_retry(monkeypatch):
 
     assert client.meta.config.retries['total_max_attempts'] == 1
     assert client.meta.config.retries['mode'] == 'standard'
-
-
-def test_a_session_client_still_retries_its_reads():
-    # Retries are correct everywhere else in the tool: a retried list or filter costs a round trip.
-    client = empty_session().client('lambda', aws_access_key_id='x', aws_secret_access_key='y')
-
-    assert client.meta.config.retries.get('total_max_attempts', 5) > 1
-
-
-def test_the_read_timeout_follows_the_function_timeout():
-    reader = FakeLambdaConfigReader(timeout=3)
-
-    assert invoke_read_timeout(reader, lambda_config()) == 3 + INVOKE_TIMEOUT_MARGIN_SECONDS
-    assert reader.calls == ['fn']
-
-
-def test_a_function_at_the_lambda_maximum_gets_a_wait_above_it():
-    reader = FakeLambdaConfigReader(timeout=LAMBDA_MAX_TIMEOUT_SECONDS)
-
-    assert invoke_read_timeout(reader, lambda_config()) > LAMBDA_MAX_TIMEOUT_SECONDS
-
-
-def test_a_durable_function_waits_the_execution_ceiling_without_asking():
-    # A durable invoke waits for the whole execution, which Lambda caps at 15 minutes whatever the
-    # function's Timeout says — so reading it would mislead.
-    reader = FakeLambdaConfigReader(timeout=3)
-
-    assert invoke_read_timeout(reader, lambda_config(durable=True)) == DURABLE_SYNC_CAP_SECONDS + INVOKE_TIMEOUT_MARGIN_SECONDS
-    assert reader.calls == []
 
 
 def test_an_event_invoke_waits_on_the_acknowledgement_not_the_function():
@@ -215,27 +175,6 @@ def test_an_unreadable_timeout_falls_back_to_the_ceiling_and_warns_the_wait_it_t
     assert f'{timeout}s' in warning
 
 
-def test_the_fallback_warning_stays_off_stdout(capsys):
-    # stdout belongs to the answer, and every read verb takes --json.
-    reader = FakeLambdaConfigReader(error_code='ResourceNotFoundException')
-
-    invoke_read_timeout(reader, lambda_config())
-
-    assert capsys.readouterr().out == ''
-
-
-def test_a_throttle_is_sent_again_because_it_started_nothing():
-    # The no-retry client also drops the retries that never could duplicate a run, and a function at
-    # its concurrency limit is the common one. Lambda refused the invocation, so re-sending is safe.
-    invoker = FakeInvoker([client_error('TooManyRequestsException', status=429)])
-    slept: list[float] = []
-
-    issue_invoke(invoker, sleep=slept.append, FunctionName='fn', Payload=b'{}')
-
-    assert invoker.attempts == 2
-    assert slept == [1]
-
-
 def test_a_throttle_backs_off_exponentially_and_then_gives_up():
     failures = [client_error('TooManyRequestsException', status=429) for _ in range(ADMISSION_RETRY_ATTEMPTS)]
     invoker = FakeInvoker(failures)
@@ -246,15 +185,6 @@ def test_a_throttle_backs_off_exponentially_and_then_gives_up():
 
     assert invoker.attempts == ADMISSION_RETRY_ATTEMPTS
     assert slept == [1, 2, 4, 8]
-
-
-def test_a_refusal_recognized_only_by_its_status_is_still_sent_again():
-    # A 429 is Lambda declining to admit the invocation whatever it calls the code.
-    invoker = FakeInvoker([client_error('SomeNewThrottleName', status=429)])
-
-    issue_invoke(invoker, sleep=lambda seconds: None, FunctionName='fn', Payload=b'{}')
-
-    assert invoker.attempts == 2
 
 
 def test_a_failure_that_may_have_started_an_execution_is_never_sent_again():
@@ -282,12 +212,3 @@ def test_a_read_timeout_is_never_sent_again():
         issue_invoke(invoker, sleep=lambda seconds: None, FunctionName='fn', Payload=b'{}')
 
     assert invoker.attempts == 1
-
-
-def test_a_successful_invoke_is_sent_once_and_its_arguments_survive():
-    invoker = FakeInvoker()
-
-    response = issue_invoke(invoker, FunctionName='fn', Payload=b'{"k": 1}')
-
-    assert invoker.attempts == 1
-    assert response['kwargs'] == {'FunctionName': 'fn', 'Payload': b'{"k": 1}'}

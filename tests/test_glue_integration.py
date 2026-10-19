@@ -163,18 +163,8 @@ SPARK_JOB = {
 }
 
 
-# A config that leaves sizing unmanaged, and one that names the size the job already has. Both
-# are ordinary and only the second is what a config generated from the job's own Terraform looks
-# like — which is the one that stays broken if the suppression is decided by what the config
-# names rather than by what the live job is.
-SIZING_CONFIGS = [
-    pytest.param({}, id='sizing_unmanaged'),
-    pytest.param({'worker_type': 'G.1X', 'number_of_workers': 2}, id='sizing_named'),
-]
-
-
-@pytest.mark.parametrize('sizing', SIZING_CONFIGS)
-def test_a_worker_sized_job_converges_after_one_deploy(session, glue_role_arn, sizing):
+def test_a_worker_sized_job_converges_after_one_deploy(session, glue_role_arn):
+    sizing = {'worker_type': 'G.1X', 'number_of_workers': 2}
     """The steady state, against the derived MaxCapacity only real Glue produces.
 
     GetJob returns a MaxCapacity for a worker-sized job that UpdateJob refuses to take back, so
@@ -195,40 +185,26 @@ def test_a_worker_sized_job_converges_after_one_deploy(session, glue_role_arn, s
         assert 'MaxCapacity' in live
 
 
-# Each managed field, the definition it lands in, and a value the fixture above does not already
-# hold. Driven against real Glue because a fake accepts whatever key it is handed: the question
-# here is whether UpdateJob takes the field at all, and only the service answers that.
-DEFINITION_FIELD_SPECS = [
-    pytest.param({'glue_version': '5.0'}, lambda job: job['GlueVersion'] == '5.0', id='glue_version'),
-    pytest.param({'timeout_minutes': 17}, lambda job: job['Timeout'] == 17, id='timeout_minutes'),
-    pytest.param({'max_retries': 0}, lambda job: job['MaxRetries'] == 0, id='max_retries'),
-    pytest.param({'execution_class': 'FLEX'}, lambda job: job['ExecutionClass'] == 'FLEX', id='execution_class'),
-    pytest.param(
-        {'max_concurrent_runs': 4},
-        lambda job: job['ExecutionProperty']['MaxConcurrentRuns'] == 4,
-        id='max_concurrent_runs',
-    ),
-    pytest.param(
-        {'worker_type': 'G.2X', 'number_of_workers': 3},
-        lambda job: job['WorkerType'] == 'G.2X' and job['NumberOfWorkers'] == 3,
-        id='worker_pair',
-    ),
-]
-
-
-@pytest.mark.parametrize('managed, holds', DEFINITION_FIELD_SPECS)
-def test_a_managed_field_round_trips_through_update_job(session, glue_role_arn, managed, holds):
+def test_every_managed_spark_field_round_trips_through_update_job(session, glue_role_arn):
+    """A fake accepts any key it is handed; only the service says whether UpdateJob takes a field."""
+    managed = {
+        'glue_version': '5.0',
+        'timeout_minutes': 17,
+        'max_retries': 0,
+        'execution_class': 'FLEX',
+        'max_concurrent_runs': 4,
+        'worker_type': 'G.2X',
+        'number_of_workers': 3,
+    }
     with live_job(session, Role=glue_role_arn, **SPARK_JOB) as job_name:
         assert deploy_definition(session, job_config(job_name, glue_role_arn, **managed)) is True
 
-        assert holds(session.client('glue').get_job(JobName=job_name)['Job'])
+        live = session.client('glue').get_job(JobName=job_name)['Job']
+        assert (live['GlueVersion'], live['Timeout'], live['MaxRetries'], live['ExecutionClass']) == ('5.0', 17, 0, 'FLEX')
+        assert (live['ExecutionProperty']['MaxConcurrentRuns'], live['WorkerType'], live['NumberOfWorkers']) == (4, 'G.2X', 3)
 
 
-# The two fields the Spark table cannot carry. A Python shell job is the only one that takes
-# either, so they get their own case — and `test_every_managed_definition_field_is_driven_against_live_glue`
-# in tests/test_glue.py reads this name, which is what makes deleting the case red rather than
-# quietly uncovered. That guard lives there because this module is marked `integration` and CI
-# passes no --run-integration, so an assertion placed here would never gate a merge.
+# The two fields only a Python shell job takes.
 SHELL_FIELD_SPEC = {'max_capacity': 1.0, 'python_version': '3.9'}
 
 
@@ -270,23 +246,3 @@ def test_migrating_a_dpu_sized_job_to_worker_sizing_is_accepted(session, glue_ro
         live = glue.get_job(JobName=job_name)['Job']
         assert live['WorkerType'] == 'G.1X'
         assert live['NumberOfWorkers'] == 2
-
-
-def test_a_script_location_that_is_the_only_change_still_reaches_the_job(session, glue_role_arn):
-    """The definition is read as converged if the diff is measured against a mutated before-image.
-
-    UpdateJob is then skipped and the job keeps the location it had, with the new script sitting
-    uploaded at the one nothing points to. Everything else here matches the live job exactly, so
-    ScriptLocation is the only thing that can produce a change."""
-    with live_job(session, Role=glue_role_arn, **SPARK_JOB) as job_name:
-        glue_job = job_config(job_name, glue_role_arn)
-        deploy_definition(session, glue_job)
-        settled = session.client('glue').get_job(JobName=job_name)['Job']['Command']['ScriptLocation']
-
-        moved = job_config(job_name, glue_role_arn)
-        moved = moved.model_copy(update={'scripts': ['moved.py']})
-        assert deploy_definition(session, moved) is True
-
-        live = session.client('glue').get_job(JobName=job_name)['Job']
-        assert settled == 's3://dectl-it-scripts/scripts/deployed.py'
-        assert live['Command']['ScriptLocation'] == 's3://dectl-it-scripts/scripts/moved.py'

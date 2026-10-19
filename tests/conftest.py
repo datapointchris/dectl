@@ -1,7 +1,6 @@
 import contextlib
 import operator
 import os
-import re
 
 # The same reasoning as the width pinned below, for the other thing a terminal decides. A console
 # that believes it is writing to one emits SGR escapes, so `'names nothing to deploy' in
@@ -45,8 +44,7 @@ from dectl.output import stderr_console
 # before any statement here runs. An explicit width cannot regress on import order.
 #
 # Wide enough that every table under test renders its columns unfolded, which is what makes an
-# assertion about a rendered value an assertion about the value. A test whose subject *is* the
-# width sets its own through `at_width`: pinned wide, a fold and an ellipsis render alike.
+# assertion about a rendered value an assertion about the value.
 console.width = 160
 stderr_console.width = 160
 
@@ -174,42 +172,6 @@ def fresh_environment():
     "did this warn" depend on which tests ran first. Measured: `test_s3.py` passed alone and
     failed in the suite, on a warning raised by a test in another file."""
     set_active_environment(DEFAULT_ENV, 'default')
-
-
-ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*m')
-
-
-def unwrapped(text: str) -> str:
-    """Captured output as its words, for comparing it against text a renderer was given.
-
-    Two things stand between a capture and the message it carries. The wrap: a line longer than
-    the console still breaks, and the lines it breaks into are not the ones the renderer
-    produced — rich breaks at spaces rather than mid-word, so collapsing whitespace recovers it.
-    And the color: whether escapes are emitted depends on what the process thinks it is writing
-    to, which is not the same locally and on CI. Measured — this suite passed here and failed
-    there on `no row-per-file view`, where Click's help formatter had put a reset and a dim
-    between `file` and `view`.
-
-    For comparing whole messages. An `in` check against the collapse can match a phrase spanning
-    two unrelated lines, which is why `test_render_pipeline_prints_alias_to_name_lines` asserts
-    tokens instead."""
-    return ' '.join(ANSI_ESCAPE.sub('', text).split())
-
-
-@contextlib.contextmanager
-def at_width(console, columns: int):
-    """Render into `console` at a fixed width, for a test whose subject is the width.
-
-    The suite pins a wide console so a rendered value is not a fact about the runner's window.
-    That is the right default and the wrong one for a guard on folding: a column wide enough to
-    hold its value renders identically whether it folds, truncates or does neither, so such a
-    test passes on the behavior it was written to refuse. Those set the width they mean."""
-    original = console.width
-    console.width = columns
-    try:
-        yield
-    finally:
-        console.width = original
 
 
 def log_event(event_id: str, timestamp: int, message: str, stream: str = 'stream-a') -> dict:

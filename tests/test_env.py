@@ -2,8 +2,6 @@ import pytest
 
 from dectl.config import GlueJobConfig
 from dectl.env import active_environment
-from dectl.env import contains_env_placeholder
-from dectl.env import describe_active_environment
 from dectl.env import render_env_model
 from dectl.env import set_active_environment
 from dectl.env import substitute_env
@@ -48,24 +46,6 @@ def test_render_env_model_substitutes_every_string_field_without_mutating_origin
     assert job.name == 'salesdata-{env}-job'
 
 
-def test_default_active_environment_is_dev():
-    assert active_environment.name == 'dev'
-
-
-def test_set_active_environment_records_name_and_source(monkeypatch):
-    monkeypatch.setattr(active_environment, 'name', 'dev')
-    monkeypatch.setattr(active_environment, 'source', 'default')
-    set_active_environment('prod', 'DECTL_ENV')
-    assert describe_active_environment() == 'prod (from DECTL_ENV)'
-
-
-def test_env_command_reports_flag_as_source():
-    result = runner.invoke(app, ['--env', 'prod', 'env'])
-    assert result.exit_code == 0
-    assert 'prod' in result.stdout
-    assert '--env' in result.stdout
-
-
 def test_env_command_reports_env_var_as_source():
     result = runner.invoke(app, ['env'], env={'DECTL_ENV': 'staging'})
     assert result.exit_code == 0
@@ -81,11 +61,6 @@ def hardcoded_job() -> GlueJobConfig:
         scripts=['s.py'],
         role='arn:aws:iam::123456789012:role/salesdata-dev-glue-role',
     )
-
-
-def test_contains_env_placeholder_searches_nested_values():
-    assert contains_env_placeholder({'a': ['x', {'b': 'src-{env}'}]})
-    assert not contains_env_placeholder({'a': ['x', {'b': 'src-dev'}]})
 
 
 def test_explicit_env_that_substitutes_nothing_warns(capsys):

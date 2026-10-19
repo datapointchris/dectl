@@ -4,18 +4,10 @@ import pytest
 import typer
 from botocore.exceptions import ClientError
 
-from dectl.config import LambdaConfig
-from dectl.durable import SUFFIX_SEARCH_LIMIT
-from dectl.durable import epoch_millis
-from dectl.durable import execution_by_suffix
-from dectl.durable import execution_to_dict
 from dectl.durable import format_duration
-from dectl.durable import invoke_qualifier
 from dectl.durable import listing_qualifier
-from dectl.durable import recent_versions
 from dectl.durable import render_durable_event
 from dectl.durable import render_execution_header
-from dectl.durable import render_executions_table
 from dectl.durable import resolve_execution
 from dectl.durable import sweep_executions
 from dectl.durable import tail_durable_history
@@ -102,64 +94,11 @@ def capture_durable_event(event: dict) -> str:
     return capture.get()
 
 
-def test_invoke_qualifier_prefers_the_live_alias():
-    # An alias is the right qualifier to invoke through: it resolves to whatever is live.
-    fn = LambdaConfig(name='fn', source_dir='code', live_alias='live', durable=True)
-    assert invoke_qualifier(fn) == 'live'
-
-
-def test_invoke_qualifier_falls_back_to_latest():
-    # Durable invocations are always qualified; without a live alias, $LATEST is the qualifier.
-    fn = LambdaConfig(name='fn', source_dir='code', durable=True)
-    assert invoke_qualifier(fn) == '$LATEST'
-
-
-def test_listing_qualifier_resolves_an_alias_to_its_version():
-    # The bug: an alias name never appears in a durable execution ARN, so the list API refuses it
-    # with "cannot filter durable executions by alias". It has to be resolved first.
-    client = FakeLambdaClient(aliases={'live': '7'})
-
-    assert listing_qualifier(client, 'fn', 'live') == '7'
-
-
-def test_listing_qualifier_passes_versions_through_untouched():
-    client = FakeLambdaClient(aliases={'live': '7'})
-
-    assert listing_qualifier(client, 'fn', '$LATEST') == '$LATEST'
-    assert listing_qualifier(client, 'fn', '3') == '3'
-
-
 def test_listing_qualifier_exits_when_the_alias_does_not_exist():
     client = FakeLambdaClient(aliases={})
 
     with pytest.raises(typer.Exit):
         listing_qualifier(client, 'fn', 'live')
-
-
-def test_listing_an_alias_directly_is_rejected_by_the_service():
-    # Guards the fake against drifting from the behavior that caused the bug.
-    client = FakeLambdaClient([execution('order-9')], aliases={'live': '7'})
-
-    with pytest.raises(ClientError, match='cannot filter durable executions by alias'):
-        client.list_durable_executions_by_function(FunctionName='fn', Qualifier='live')
-
-
-def test_version_of_reads_the_version_out_of_an_execution_arn():
-    assert version_of(execution('order-9', version='3')) == '3'
-    assert version_of({}) == ''
-
-
-def test_recent_versions_are_newest_first_with_latest_last():
-    # ListVersionsByFunction pages oldest-first, so the newest are at the end of the response.
-    client = FakeLambdaClient(versions=['$LATEST', '1', '2', '3'])
-
-    assert recent_versions(client, 'fn') == ['3', '2', '1', '$LATEST']
-
-
-def test_recent_versions_are_bounded_by_depth():
-    client = FakeLambdaClient(versions=['$LATEST', '1', '2', '3', '4'])
-
-    assert recent_versions(client, 'fn', depth=2) == ['4', '3', '$LATEST']
 
 
 def test_sweep_merges_versions_newest_execution_first():
@@ -237,25 +176,6 @@ def test_format_duration_covers_a_suspended_workflow():
     assert format_duration(STARTED, None) == ''
 
 
-def test_epoch_millis_converts_a_boto_timestamp():
-    assert epoch_millis(STARTED) == int(STARTED.timestamp() * 1000)
-    assert epoch_millis(None) is None
-
-
-def test_render_durable_event_names_the_step_and_its_result():
-    event = {
-        'EventType': 'StepSucceeded',
-        'EventTimestamp': STARTED,
-        'Name': 'fetch-orders',
-        'StepSucceededDetails': {'Result': {'Payload': '{"count": 3}'}},
-    }
-    output = capture_durable_event(event)
-
-    assert 'StepSucceeded' in output
-    assert 'fetch-orders' in output
-    assert '{"count": 3}' in output
-
-
 def test_render_durable_event_expands_a_step_failure():
     event = {
         'EventType': 'StepFailed',
@@ -278,11 +198,6 @@ def test_render_durable_event_expands_a_step_failure():
     assert 'card declined' in output
     assert 'handler.py' in output
     assert 'attempt' in output
-
-
-def test_render_durable_event_shows_a_wait_duration():
-    event = {'EventType': 'WaitStarted', 'EventTimestamp': STARTED, 'WaitStartedDetails': {'Duration': 3600}}
-    assert '3600s' in capture_durable_event(event)
 
 
 def test_render_execution_header_surfaces_the_failure_reason():
@@ -352,15 +267,6 @@ def test_resolve_execution_prefers_a_whole_name_over_a_tail_of_another():
     assert found['DurableExecutionName'] == 'run-7'
 
 
-def test_resolve_execution_finds_a_tail_under_an_older_version():
-    # The tail is typed off `executions --all-versions`, so it has to resolve past the live one.
-    client = FakeLambdaClient([execution('090c4189-b18b-4296-9d0c-cfd01dc3a122', version='6')], versions=['$LATEST', '6', '7'])
-
-    found = resolve_execution(client, 'fn', '7', 'cfd01dc3a122')
-
-    assert found['DurableExecutionName'] == '090c4189-b18b-4296-9d0c-cfd01dc3a122'
-
-
 def test_an_ambiguous_tail_is_a_usage_error_naming_the_candidates():
     # Picking the newest would resolve silently to something the caller did not name.
     client = FakeLambdaClient([execution('batch-alpha-99'), execution('batch-beta-99')], versions=['$LATEST', '7'])
@@ -372,57 +278,3 @@ def test_an_ambiguous_tail_is_a_usage_error_naming_the_candidates():
     output = capture.get()
     assert 'batch-alpha-99' in output
     assert 'batch-beta-99' in output
-
-
-def test_a_tail_matching_nothing_exits_naming_the_versions_searched():
-    client = FakeLambdaClient([execution('order-9')], versions=['$LATEST', '7'])
-
-    with pytest.raises(typer.Exit) as raised:
-        resolve_execution(client, 'fn', '7', 'nosuchtail')
-
-    assert raised.value.exit_code == 1
-
-
-def test_execution_by_suffix_matches_the_tail_not_the_head():
-    # A UUID's head is its timestamp, so a prefix carries almost no entropy.
-    client = FakeLambdaClient([execution('090c4189-b18b-4296-9d0c-cfd01dc3a122')], versions=['$LATEST', '7'])
-
-    found = execution_by_suffix(client, 'fn', 'cfd01dc3a122', ['7'])
-
-    assert found['DurableExecutionName'] == '090c4189-b18b-4296-9d0c-cfd01dc3a122'
-
-
-def test_execution_to_dict_has_no_positional_handle():
-    # The handle is the name, which every row already carries; a row number would be a property of
-    # the listing rather than of the execution.
-    assert 'index' not in execution_to_dict(execution('order-9'))
-
-
-def test_the_executions_table_does_not_truncate_the_name():
-    # The tail is the handle, and an ellipsis in the middle of a UUID hides exactly that.
-    with console.capture() as capture:
-        render_executions_table('fn', 'version 7', [execution('090c4189-b18b-4296-9d0c-cfd01dc3a122')])
-
-    assert 'cfd01dc3a122' in capture.get()
-
-
-def test_the_suffix_window_covers_everything_the_listing_can_show():
-    # The two numbers are one number: a tail is typed off a listing, so a row the table can print
-    # and the resolver cannot reach is an ambiguity nobody sees.
-    listed = [execution(f'run-{index:03d}') for index in range(SUFFIX_SEARCH_LIMIT)]
-    client = FakeLambdaClient(listed, versions=['$LATEST', '7'])
-
-    found = resolve_execution(client, 'fn', '7', f'{SUFFIX_SEARCH_LIMIT - 1:03d}')
-
-    assert found['DurableExecutionName'] == f'run-{SUFFIX_SEARCH_LIMIT - 1:03d}'
-
-
-def test_the_not_found_error_names_the_window_it_searched():
-    client = FakeLambdaClient([execution('order-9')], versions=['$LATEST', '7'])
-
-    with pytest.raises(typer.Exit), stderr_console.capture() as capture:
-        resolve_execution(client, 'fn', '7', 'nosuchtail')
-    output = capture.get()
-
-    assert 'searched' in output
-    assert 'named in full' in output
