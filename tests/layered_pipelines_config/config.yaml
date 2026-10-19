@@ -1,35 +1,62 @@
-# Two pipelines built from one top-level variable through each one's own prefix, with finance
-# copied from sales by a YAML merge. flow.asl.json.tftpl beside it is the definition both deploy.
+# Two pipelines from one file. Sales is written out; finance copies it with a YAML merge and
+# changes two variables. The code each one deploys sits beside this file, so every relative path
+# below resolves when dectl runs from this directory.
 variables:
   company: acme
   account: "123456789012"
   region: us-east-2
+  # Built from the variables above it, so every ARN below is written once.
+  lambda_arns: arn:aws:lambda:{region}:{account}:function
+  glue_role: arn:aws:iam::{account}:role/{company}-{env}-glue
 
 defaults:
   account_id: "{account}"
   region: "{region}"
+  environment: dev
+
+jenkins:
+  url: https://jenkins.example.com
+  user: ${JENKINS_USER}
+  token: ${JENKINS_API_TOKEN}
 
 pipelines:
   sales: &pipeline
     variables:
-      prefix: "{company}-{env}-sales"
+      pipeline: sales
       dataset: orders
-      landing: &landing s3://{prefix}-raw/{dataset}/incoming/
+      # Each anchored, so finance repeats the value whole and fills it with its own pipeline
+      # and dataset.
+      prefix: &prefix "{company}-{env}-{pipeline}"
+      # A bucket named inside other values is a variable: the buckets, the job arguments and
+      # the state machine's substitutions below all build on it.
+      raw_bucket: &raw-bucket "{prefix}-raw"
+      landing: &landing s3://{raw_bucket}/{dataset}/incoming/
     buckets:
-      raw: &raw-bucket "{prefix}-raw"
+      raw: "{raw_bucket}"
+      # Used only as a whole value, so an anchor is enough: *curated-bucket repeats it below.
+      curated: &curated-bucket "{prefix}-curated"
     lambdas:
       process:
         name: "{prefix}-process-{dataset}"
         source_dir: lambdas/process
+        live_alias: live
+      workflow:
+        name: "{prefix}-workflow"
+        source_dir: lambdas/workflow
+        live_alias: live
+        durable: true
     glue_jobs:
       load: &load
         name: "{prefix}-load"
         script_bucket: "{prefix}-scripts"
         scripts: [load.py]
-        role: arn:aws:iam::{account}:role/{prefix}-glue
+        role: "{glue_role}"
+        max_capacity: 1
         arguments:
-          RAW_BUCKET: *raw-bucket
+          SOURCE: s3://{raw_bucket}/{dataset}/
           LANDING: "{landing}"
+          TARGET_BUCKET: *curated-bucket
+          # The job fills {date} itself, so it reaches Glue with single braces.
           OUTPUT_PATTERN: out/{{date}}/
       backfill:
         <<: *load
@@ -38,19 +65,42 @@ pipelines:
     step_functions:
       flow:
         name: "{prefix}-flow"
+        log_group: /aws/vendedlogs/states/{prefix}-flow
         definition_file: flow.asl.json.tftpl
+        live_alias: live
         definition_substitutions:
-          process_arn: arn:aws:lambda:{region}:{account}:function:{prefix}-process-{dataset}
+          process_arn: "{lambda_arns}:{prefix}-process-{dataset}"
           load_job: "{prefix}-load"
           load_timeout_seconds: 3600
           min_orders: 1
           load_enabled: true
+          # Whole JSONata expressions: single quotes inside, double quotes around.
           landing_key: "{% '{landing}' & $states.input.date & '.json' %}"
           loaded_output: "{% $merge([$states.input, {'stage': 'loaded'}]) %}"
+    iceberg_tables:
+      events:
+        database: "{company}_{env}_{pipeline}"
+        table: "{dataset}"
+    monitor:
+      lambdas: [process, workflow]
+      step_functions: [flow]
+    jenkins:
+      job_path: data-engineering/{pipeline}-deploy
+      parameters:
+        ENVIRONMENT: "{env}"
+      actions:
+        apply:
+          ACTION: deploy
+        plan:
+          ACTION: dry_run
 
   finance:
     <<: *pipeline
+    # A merge is one level deep, so this block replaces sales' whole. It changes two values
+    # and repeats the rest by anchor.
     variables:
-      prefix: "{company}-{env}-finance"
+      pipeline: finance
       dataset: invoices
+      prefix: *prefix
+      raw_bucket: *raw-bucket
       landing: *landing

@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -44,6 +45,7 @@ from dectl.config import pipeline_root
 from dectl.config import pipeline_value_faults
 from dectl.config import resolve_from_root
 from dectl.env import render_env_model
+from dectl.env import render_value
 from dectl.env import set_active_environment
 from dectl.env import substitute_env
 from dectl.pipeline_view import aws_names_only
@@ -153,39 +155,40 @@ def test_variables_substitute_at_load_and_refuse_what_would_clobber(monkeypatch,
     monkeypatch.setattr('dectl.config.CONFIG_PATH', LAYERED_CONFIG)
     config = load_config()
     assert config is not None
+    finance = config.pipelines['finance']
     # `{env}` survives the load, because --env is parsed after the tree is built.
-    assert config.pipelines['finance'].buckets['raw'] == 'acme-{env}-finance-raw'
+    assert finance.buckets['raw'] == 'acme-{env}-finance-raw'
     # An anchored value is copied as the file wrote it, so each pipeline fills its own prefix.
-    assert config.pipelines['finance'].glue_jobs['load'].arguments['RAW_BUCKET'] == 'acme-{env}-finance-raw'
-
-    text = LAYERED_CONFIG.read_text()
-    anchored_at = next(number for number, line in enumerate(text.splitlines(), 1) if '&raw-bucket' in line)
-    anchor_mistakes = [
-        (
-            '"{raw-bucket}"',
-            'undefined_variable',
-            f'variable {{raw-bucket}} cannot be found. &raw-bucket on line {anchored_at} is a YAML anchor, not a variable. '
-            'Repeat it as the whole value, unquoted: RAW_BUCKET: *raw-bucket',
-        ),
-        ('s3://{raw-bucket}/incoming', 'undefined_variable', 'cannot go inside one. Define raw-bucket under variables'),
-        ('"*raw-bucket"', 'quoted_alias', f'unquoted, to repeat the value anchored as &raw-bucket on line {anchored_at}'),
-    ]
-    written = tmp_path / 'config.yaml'
-    monkeypatch.setattr('dectl.config.CONFIG_PATH', written)
-    for mistake, kind, message in anchor_mistakes:
-        written.write_text(text.replace('RAW_BUCKET: *raw-bucket', f'RAW_BUCKET: {mistake}'))
-        with pytest.raises(ValidationError) as caught:
-            load_config()
-        assert {error['type'] for error in caught.value.errors()} == {kind}
-        assert message in caught.value.errors()[0]['msg']
+    assert finance.glue_jobs['backfill'].arguments == {
+        'SOURCE': 's3://acme-{env}-finance-raw/invoices/',
+        'LANDING': 's3://acme-{env}-finance-raw/invoices/incoming/',
+        'TARGET_BUCKET': 'acme-{env}-finance-curated',
+        'OUTPUT_PATTERN': 'out/{date}/',
+    }
 
     raw = yaml.safe_load(LAYERED_CONFIG.read_text())
     misnamed = DectlConfig.model_validate(merged(raw, {'variables': {'company': 'Acme_Co'}}))
     traced = {(fault.pipeline, fault.written) for fault in config_value_faults(misnamed)}
+
+    def prefix_trace(pipeline: str) -> tuple[str, ...]:
+        return (
+            f'{{prefix}} from pipelines.{pipeline}.variables.prefix',
+            '{company} from variables.company',
+            f'{{pipeline}} from pipelines.{pipeline}.variables.pipeline',
+        )
+
+    # A fault in a bucket named through two variables traces to the one holding the bad character.
     assert traced == {
-        (pipeline, Written(text, (f'{{prefix}} from pipelines.{pipeline}.variables.prefix', '{company} from variables.company')))
+        row
         for pipeline in ['sales', 'finance']
-        for text in ['{prefix}-raw', '{prefix}-scripts']
+        for row in [
+            (
+                pipeline,
+                Written('{raw_bucket}', (f'{{raw_bucket}} from pipelines.{pipeline}.variables.raw_bucket', *prefix_trace(pipeline))),
+            ),
+            (pipeline, Written('{prefix}-curated', prefix_trace(pipeline))),
+            (pipeline, Written('{prefix}-scripts', prefix_trace(pipeline))),
+        ]
     }
 
     refusals = [
@@ -212,6 +215,69 @@ def test_variables_substitute_at_load_and_refuse_what_would_clobber(monkeypatch,
             DectlConfig.model_validate(merged(raw, overlay))
         assert [error['type'] for error in caught.value.errors()] == [kind]
         assert message in caught.value.errors()[0]['msg']
+
+
+def leaf_strings(value, key=None):
+    if isinstance(value, dict):
+        for child_key, child in value.items():
+            yield from leaf_strings(child, child_key)
+    elif isinstance(value, str):
+        yield key, value
+
+
+def test_the_readme_example_is_the_committed_config_and_resolves_and_refuses_as_it_says(monkeypatch, tmp_path):
+    """The README's full example is read as a reference, so every value and message it shows is
+    what dectl gives for the committed config."""
+    readme = (Path(__file__).parent.parent / 'README.md').read_text()
+    section = readme.split('### A full config', 1)[1]
+    section = re.split(r'^#{2,3} ', section, maxsplit=1, flags=re.MULTILINE)[0]
+    fences = dict(re.findall(r'^```(\w+)\n(.*?)^```$', section, flags=re.MULTILINE | re.DOTALL))
+    text = LAYERED_CONFIG.read_text()
+    assert fences['yaml'] == text
+    assert fences['json'] == (LAYERED_CONFIG.parent / 'flow.asl.json.tftpl').read_text()
+
+    def table_rows(part: str) -> list[tuple[str, str]]:
+        rows = []
+        for row in re.findall(r'^\| `.*$', part, flags=re.MULTILINE):
+            cells = re.fullmatch(r'\| `(.+?)` +\| `(.+?)` +\|', row)
+            assert cells, row
+            rows.append((cells[1], cells[2]))
+        return rows
+
+    resolutions, mistakes = (table_rows(part) for part in section.split('What each common mistake gets'))
+    monkeypatch.setattr('dectl.config.CONFIG_PATH', LAYERED_CONFIG)
+    config = load_config()
+    assert config is not None
+    set_active_environment('prod', '--env')
+    try:
+        finance = set(leaf_strings(render_value(config.pipelines['finance'].model_dump())))
+    finally:
+        set_active_environment('dev', 'default')
+    assert resolutions
+    for written, resolved in resolutions:
+        assert written in text
+        assert (written.split(':')[0], resolved) in finance
+
+    written_config = tmp_path / 'config.yaml'
+    monkeypatch.setattr('dectl.config.CONFIG_PATH', written_config)
+
+    def load_with(line: str):
+        key = line.split(':')[0]
+        lines = text.splitlines(keepends=True)
+        [at] = [number for number, original in enumerate(lines) if original.strip().startswith(f'{key}: ')]
+        indent = lines[at][: len(lines[at]) - len(lines[at].lstrip())]
+        written_config.write_text(''.join([*lines[:at], f'{indent}{line}\n', *lines[at + 1 :]]))
+        return load_config()
+
+    assert mistakes
+    for line, message in mistakes:
+        with pytest.raises(ValidationError) as caught:
+            load_with(line)
+        assert {error['msg'] for error in caught.value.errors()} == {message}
+
+    # `raw` sits above the line anchoring &curated-bucket.
+    with pytest.raises(yaml.YAMLError, match='found undefined alias'):
+        load_with('raw: *curated-bucket')
 
 
 def test_validation_rejects_unknown_pipeline_key():

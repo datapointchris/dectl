@@ -511,47 +511,222 @@ Quote a value that starts with `{`. YAML reads a leading brace as an inline mapp
 `raw: {raw_bucket}` parses as a mapping and `raw: {company}-raw` does not parse. A brace later in
 the value needs no quotes. Quote an account id too, because YAML reads an unquoted `0123` as octal.
 
-YAML anchors repeat a whole block, and variables fill what differs in each copy. YAML copies the
-block as the file wrote it, before any variable is filled, so a copy resolves against the pipeline
-it lands in:
+### A full config: two pipelines, every resource, and what each value becomes
+
+Variables and YAML anchors both write a value once. They do different jobs:
+
+| To write once                       | Use                                                    | In the config below                             |
+| ----------------------------------- | ------------------------------------------------------ | ----------------------------------------------- |
+| A name used inside other values     | a variable, written `{name}`                           | `raw_bucket`, inside `raw`, `SOURCE`, `landing` |
+| One value repeated whole            | an anchor `&name` where it is first used, then `*name` | `TARGET_BUCKET: *curated-bucket`                |
+| A block repeated with a few changes | an anchored block, then `<<: *name` and the changes    | `backfill`, copied from `load`                  |
+| A pipeline for another dataset      | the same, one level up, restating `variables`          | `finance`, copied from `sales`                  |
+
+An anchor is never written `{name}`, which looks for a variable. It cannot go inside a longer
+value either: `s3://*curated-bucket/out/` is that text and nothing more. YAML copies an anchored
+value or block as the file wrote it, before any variable is filled, so each copy resolves against
+the pipeline it lands in. That is what lets `finance` reuse `sales` whole.
+
+This config is `tests/layered_pipelines_config/config.yaml`, and the suite loads it through dectl
+on every run. The code it deploys sits beside it, so its relative paths resolve when dectl runs
+from that directory.
 
 ```yaml
+# Two pipelines from one file. Sales is written out; finance copies it with a YAML merge and
+# changes two variables. The code each one deploys sits beside this file, so every relative path
+# below resolves when dectl runs from this directory.
 variables:
   company: acme
   account: "123456789012"
+  region: us-east-2
+  # Built from the variables above it, so every ARN below is written once.
+  lambda_arns: arn:aws:lambda:{region}:{account}:function
+  glue_role: arn:aws:iam::{account}:role/{company}-{env}-glue
+
+defaults:
+  account_id: "{account}"
+  region: "{region}"
+  environment: dev
+
+jenkins:
+  url: https://jenkins.example.com
+  user: ${JENKINS_USER}
+  token: ${JENKINS_API_TOKEN}
+
 pipelines:
   sales: &pipeline
     variables:
-      prefix: "{company}-{env}-sales"
-      landing: &landing s3://{prefix}-raw/incoming/
+      pipeline: sales
+      dataset: orders
+      # Each anchored, so finance repeats the value whole and fills it with its own pipeline
+      # and dataset.
+      prefix: &prefix "{company}-{env}-{pipeline}"
+      # A bucket named inside other values is a variable: the buckets, the job arguments and
+      # the state machine's substitutions below all build on it.
+      raw_bucket: &raw-bucket "{prefix}-raw"
+      landing: &landing s3://{raw_bucket}/{dataset}/incoming/
     buckets:
-      raw: &raw-bucket "{prefix}-raw"
+      raw: "{raw_bucket}"
+      # Used only as a whole value, so an anchor is enough: *curated-bucket repeats it below.
+      curated: &curated-bucket "{prefix}-curated"
+    lambdas:
+      process:
+        name: "{prefix}-process-{dataset}"
+        source_dir: lambdas/process
+        live_alias: live
+      workflow:
+        name: "{prefix}-workflow"
+        source_dir: lambdas/workflow
+        live_alias: live
+        durable: true
     glue_jobs:
       load: &load
         name: "{prefix}-load"
-        role: arn:aws:iam::{account}:role/{prefix}-glue
+        script_bucket: "{prefix}-scripts"
+        scripts: [load.py]
+        role: "{glue_role}"
+        max_capacity: 1
         arguments:
-          RAW_BUCKET: *raw-bucket
+          SOURCE: s3://{raw_bucket}/{dataset}/
+          LANDING: "{landing}"
+          TARGET_BUCKET: *curated-bucket
+          # The job fills {date} itself, so it reaches Glue with single braces.
+          OUTPUT_PATTERN: out/{{date}}/
       backfill:
         <<: *load
         name: "{prefix}-backfill"
+        scripts: [backfill.py]
+    step_functions:
+      flow:
+        name: "{prefix}-flow"
+        log_group: /aws/vendedlogs/states/{prefix}-flow
+        definition_file: flow.asl.json.tftpl
+        live_alias: live
+        definition_substitutions:
+          process_arn: "{lambda_arns}:{prefix}-process-{dataset}"
+          load_job: "{prefix}-load"
+          load_timeout_seconds: 3600
+          min_orders: 1
+          load_enabled: true
+          # Whole JSONata expressions: single quotes inside, double quotes around.
+          landing_key: "{% '{landing}' & $states.input.date & '.json' %}"
+          loaded_output: "{% $merge([$states.input, {'stage': 'loaded'}]) %}"
+    iceberg_tables:
+      events:
+        database: "{company}_{env}_{pipeline}"
+        table: "{dataset}"
+    monitor:
+      lambdas: [process, workflow]
+      step_functions: [flow]
+    jenkins:
+      job_path: data-engineering/{pipeline}-deploy
+      parameters:
+        ENVIRONMENT: "{env}"
+      actions:
+        apply:
+          ACTION: deploy
+        plan:
+          ACTION: dry_run
+
   finance:
     <<: *pipeline
+    # A merge is one level deep, so this block replaces sales' whole. It changes two values
+    # and repeats the rest by anchor.
     variables:
-      prefix: "{company}-{env}-finance"
+      pipeline: finance
+      dataset: invoices
+      prefix: *prefix
+      raw_bucket: *raw-bucket
       landing: *landing
 ```
 
-`finance` resolves to `acme-dev-finance-raw` and `acme-dev-finance-backfill`. A `<<:` merge is one
-level deep, so `finance`'s `variables` block replaces the copied one whole. It restates every
-variable, and `*landing` repeats a shared value. An anchor is written where its block is first
-used, since the config has no key for holding anchors alone. Write it after the colon and before
-the quotes, as `&landing` is above.
+`flow.asl.json.tftpl` beside it is the definition `sfn flow deploy` renders. It is a Terraform
+template, so the same file serves `terraform apply`:
 
-An anchor repeats a whole value, so `RAW_BUCKET: *raw-bucket` is the bucket each pipeline names.
-`{raw-bucket}` would look for a variable instead, and none exists. An alias cannot sit inside a
-longer string either: `s3://*raw-bucket/incoming` is that text and nothing more. A name used inside
-other values is a variable.
+```json
+{
+  "Comment": "Loads a day's orders when there are enough, then totals them by customer",
+  "QueryLanguage": "JSONata",
+  "StartAt": "Process",
+  "States": {
+    "Process": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${process_arn}",
+        "Payload": { "key": "${landing_key}" }
+      },
+      "Assign": { "orders": "{% $states.result.Payload.orders %}" },
+      "Output": "{% $states.result.Payload %}",
+      "Next": "HasOrders"
+    },
+    "HasOrders": {
+      "Type": "Choice",
+      "Choices": [
+        { "Condition": "{% ${load_enabled} and $count($orders) >= ${min_orders} %}", "Next": "Load" }
+      ],
+      "Default": "NothingToLoad"
+    },
+    "Load": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Arguments": {
+        "JobName": "${load_job}",
+        "Arguments": { "--source_key": "{% $states.input.key %}" }
+      },
+      "TimeoutSeconds": ${load_timeout_seconds},
+      "Output": "${loaded_output}",
+      "Next": "TotalByCustomer"
+    },
+    "TotalByCustomer": {
+      "Type": "Pass",
+      "Output": "{% $orders.$${ customer: $sum(total) } %}",
+      "End": true
+    },
+    "NothingToLoad": { "Type": "Succeed" }
+  }
+}
+```
+
+What `finance` resolves to under `--env prod`, for each value written once in `sales`:
+
+| Written in `sales`                                                  | `finance` under `--env prod`                                                             |
+| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `raw: "{raw_bucket}"`                                               | `acme-prod-finance-raw`                                                                  |
+| `curated: &curated-bucket "{prefix}-curated"`                       | `acme-prod-finance-curated`                                                              |
+| `SOURCE: s3://{raw_bucket}/{dataset}/`                              | `s3://acme-prod-finance-raw/invoices/`                                                   |
+| `LANDING: "{landing}"`                                              | `s3://acme-prod-finance-raw/invoices/incoming/`                                          |
+| `TARGET_BUCKET: *curated-bucket`                                    | `acme-prod-finance-curated`                                                              |
+| `OUTPUT_PATTERN: out/{{date}}/`                                     | `out/{date}/`                                                                            |
+| `name: "{prefix}-backfill"`                                         | `acme-prod-finance-backfill`                                                             |
+| `role: "{glue_role}"`                                               | `arn:aws:iam::123456789012:role/acme-prod-glue`                                          |
+| `process_arn: "{lambda_arns}:{prefix}-process-{dataset}"`           | `arn:aws:lambda:us-east-2:123456789012:function:acme-prod-finance-process-invoices`      |
+| `landing_key: "{% '{landing}' & $states.input.date & '.json' %}"`   | `{% 's3://acme-prod-finance-raw/invoices/incoming/' & $states.input.date & '.json' %}`   |
+| `database: "{company}_{env}_{pipeline}"`                            | `acme_prod_finance`                                                                      |
+| `job_path: data-engineering/{pipeline}-deploy`                      | `data-engineering/finance-deploy`                                                        |
+| `ENVIRONMENT: "{env}"`                                              | `prod`                                                                                   |
+
+`dectl --env prod finance list` prints the names, and `config validate` checks every value.
+
+What each common mistake gets, written in place of the line it names:
+
+| Written | dectl refuses it with |
+| --- | --- |
+| `TARGET_BUCKET: "{curated-bucket}"` | `variable {curated-bucket} cannot be found. &curated-bucket on line 37 is a YAML anchor, not a variable. Repeat it as the whole value, unquoted: TARGET_BUCKET: *curated-bucket` |
+| `TARGET_BUCKET: s3://{curated-bucket}/out/` | `variable {curated-bucket} cannot be found. &curated-bucket on line 37 is a YAML anchor, which repeats a whole value and cannot go inside one. Define curated-bucket under variables to use it here` |
+| `TARGET_BUCKET: "*curated-bucket"` | `*curated-bucket is quoted, so YAML reads it as text. Write *curated-bucket unquoted, to repeat the value anchored as &curated-bucket on line 37` |
+| `OUTPUT_PATTERN: out/{date}/` | `variable {date} cannot be found. Did you mean {dataset}? If a job or Jenkinsfile fills {date} itself, write {{date}}` |
+| `raw: {raw_bucket}` | `{raw_bucket} was read as a YAML mapping, because the value starts with {; quote it` |
+
+Three rules the table cannot show:
+
+- **A merge is one level deep.** `finance` writes its own `variables`, so that block replaces the
+  copied one whole. It restates `prefix`, `raw_bucket` and `landing` by anchor rather than leaving
+  them out.
+- **An anchor comes before its first `*name` in the file.** A `*name` above its `&name` is YAML's
+  own error, `found undefined alias`, with the file and line.
+- **The anchor goes after the colon and before the quotes**, as `&curated-bucket "{prefix}-curated"`.
+  The config has no key for holding anchors alone, so each one sits where its value is first used.
 
 ### `resolve_paths_from` — deploys that reach the same files from any directory
 

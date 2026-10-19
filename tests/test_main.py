@@ -49,15 +49,18 @@ def test_the_layered_config_resolves_each_pipeline_under_its_own_names(tmp_path)
         assert listed.stderr == ''
         resolved = json.loads(listed.stdout)
         prefix = f'acme-prod-{pipeline}'
-        assert resolved['s3'] == {'raw': {'bucket': f'{prefix}-raw'}}
-        assert resolved['lambda']['process']['name'] == f'{prefix}-process-{dataset}'
-        assert {alias: job['name'] for alias, job in resolved['glue'].items()} == {
-            'load': f'{prefix}-load',
-            'backfill': f'{prefix}-backfill',
+        assert resolved['s3'] == {'raw': {'bucket': f'{prefix}-raw'}, 'curated': {'bucket': f'{prefix}-curated'}}
+        assert {alias: (fn['name'], fn['durable']) for alias, fn in resolved['lambda'].items()} == {
+            'process': (f'{prefix}-process-{dataset}', False),
+            'workflow': (f'{prefix}-workflow', True),
         }
-        assert resolved['glue']['backfill']['script_bucket'] == f'{prefix}-scripts'
-        assert resolved['sfn']['flow']['name'] == f'{prefix}-flow'
-        assert resolved['sfn']['flow']['definition_substitutions'] == {
+        assert {alias: (job['name'], job['script_uris']) for alias, job in resolved['glue'].items()} == {
+            'load': (f'{prefix}-load', [f's3://{prefix}-scripts/scripts/load.py']),
+            'backfill': (f'{prefix}-backfill', [f's3://{prefix}-scripts/scripts/backfill.py']),
+        }
+        flow = resolved['sfn']['flow']
+        assert (flow['name'], flow['log_group'], flow['live_alias']) == (f'{prefix}-flow', f'/aws/vendedlogs/states/{prefix}-flow', 'live')
+        assert flow['definition_substitutions'] == {
             'process_arn': f'arn:aws:lambda:us-east-2:123456789012:function:{prefix}-process-{dataset}',
             'load_job': f'{prefix}-load',
             'load_timeout_seconds': '3600',
@@ -66,6 +69,9 @@ def test_the_layered_config_resolves_each_pipeline_under_its_own_names(tmp_path)
             'landing_key': f"{{% 's3://{prefix}-raw/{dataset}/incoming/' & $states.input.date & '.json' %}}",
             'loaded_output': "{% $merge([$states.input, {'stage': 'loaded'}]) %}",
         }
+        assert resolved['iceberg']['events'] | {'paths': {}} == {'database': f'acme_prod_{pipeline}', 'table': dataset, 'paths': {}}
+        assert resolved['jenkins'] == {'job_path': f'data-engineering/{pipeline}-deploy', 'actions': ['apply', 'plan']}
+        assert resolved['monitor'] == {'lambdas': ['process', 'workflow'], 'step_functions': ['flow']}
 
 
 def row_entries(row: str) -> list[str]:

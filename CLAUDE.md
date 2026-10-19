@@ -385,15 +385,18 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
 `--run-integration`, because they create and delete real resources.
 
 **`tests/layered_pipelines_config/` is a config in the shape a real multi-pipeline one takes, and
-three tests run it through the real code.** One top-level variable fans out to two pipelines through each
-one's prefix, `finance` is a YAML merge of `sales`, and the definition substitutions include whole
-JSONata expressions. `test_config.py` loads it through `load_config` for the load-time faults and
-refusals. `test_main.py` starts the installed `dectl` against it in a fresh process, because
-`main.py` builds the tree from the file at import. `test_stepfunctions_integration.py` deploys its
-`flow.asl.json.tftpl` with `finance`'s substitutions, so live Step Functions validates the
-JSONata. A config shape that has to work goes in this file rather than in a test's inline dict.
-The template is named `.tftpl`, Terraform's extension for a `templatefile()` template, so the
-JSON hook does not read it before it is rendered.
+the README's full example is that file verbatim.** It configures every resource type. Top-level
+variables fan out to two pipelines through each one's prefix, `finance` is a YAML merge of
+`sales`, and values repeat by variable, by anchor and by `<<:` block. The scripts and Lambda
+sources it names sit beside it, so its relative paths resolve. `test_config.py` loads it through
+`load_config` for the load-time faults and refusals. Its README test holds the README's config and
+template blocks equal to these files, checks each resolution row against `finance` under `prod`,
+and loads each mistake row for its exact message. `test_main.py` starts the installed `dectl`
+against it in a fresh process, because `main.py` builds the tree from the file at import.
+`test_stepfunctions_integration.py` deploys its `flow.asl.json.tftpl` with `finance`'s
+substitutions, so live Step Functions validates the JSONata. A config shape that has to work goes
+in this file rather than in a test's inline dict. The template is named `.tftpl`, Terraform's
+extension for a `templatefile()` template, so the JSON hook does not read it before it is rendered.
 
 **Anything that writes to AWS gets a live test.** A failure here is read once, from output, with
 no debugger and no second attempt, and a fake holds only the service rules somebody already knew.
