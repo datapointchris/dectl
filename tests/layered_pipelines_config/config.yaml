@@ -1,11 +1,11 @@
-# Two pipelines from one file, each written out whole. They share the top-level variables and
-# differ in their own. The code each one deploys sits beside this file, so every relative path
-# below resolves when dectl runs from this directory.
+# Two pipelines, each its own file in pipelines/. They share the variables below and differ in
+# their own. The code each one deploys sits beside this file, so every relative path in a
+# pipeline file resolves when dectl runs from this directory.
 variables:
   company: acme
   account: "123456789012"
   region: us-east-2
-  # Built from the variables above it, so every ARN below is written once.
+  # Built from the variables above it, so every ARN in the pipeline files is written once.
   lambda_arns: arn:aws:lambda:{region}:{account}:function
   glue_role: arn:aws:iam::{account}:role/{company}-{env}-glue
 
@@ -18,136 +18,3 @@ jenkins:
   url: https://jenkins.example.com
   user: ${JENKINS_USER}
   token: ${JENKINS_API_TOKEN}
-
-pipelines:
-  sales:
-    variables:
-      pipeline: sales
-      dataset: orders
-      prefix: "{company}-{env}-{pipeline}"
-      # A bucket named inside other values is a variable: the buckets, the job arguments and
-      # the state machine's substitutions below all build on it.
-      raw_bucket: "{prefix}-raw"
-      curated_bucket: "{prefix}-curated"
-      landing: s3://{raw_bucket}/{dataset}/incoming/
-    buckets:
-      raw: "{raw_bucket}"
-      curated: "{curated_bucket}"
-    lambdas:
-      process:
-        name: "{prefix}-process-{dataset}"
-        source_dir: lambdas/process
-        live_alias: live
-      workflow:
-        name: "{prefix}-workflow"
-        source_dir: lambdas/workflow
-        live_alias: live
-        durable: true
-    glue_jobs:
-      load:
-        name: "{prefix}-load"
-        script_bucket: "{prefix}-scripts"
-        scripts: [load.py]
-        role: "{glue_role}"
-        max_capacity: 1
-        arguments:
-          SOURCE: s3://{raw_bucket}/{dataset}/
-          LANDING: "{landing}"
-          TARGET_BUCKET: "{curated_bucket}"
-          # The job fills {date} itself, so it reaches Glue with single braces.
-          OUTPUT_PATTERN: out/{{date}}/
-    step_functions:
-      flow:
-        name: "{prefix}-flow"
-        log_group: /aws/vendedlogs/states/{prefix}-flow
-        definition_file: flow.asl.json.tftpl
-        live_alias: live
-        definition_substitutions:
-          process_arn: "{lambda_arns}:{prefix}-process-{dataset}"
-          load_job: "{prefix}-load"
-          load_timeout_seconds: 3600
-          min_orders: 1
-          load_enabled: true
-          # Whole JSONata expressions: single quotes inside, double quotes around.
-          landing_key: "{% '{landing}' & $states.input.date & '.json' %}"
-          loaded_output: "{% $merge([$states.input, {'stage': 'loaded'}]) %}"
-    iceberg_tables:
-      events:
-        database: "{company}_{env}_{pipeline}"
-        table: "{dataset}"
-    monitor:
-      lambdas: [process, workflow]
-      step_functions: [flow]
-    jenkins:
-      job_path: data-engineering/{pipeline}-deploy
-      parameters:
-        ENVIRONMENT: "{env}"
-      actions:
-        apply:
-          ACTION: deploy
-        plan:
-          ACTION: dry_run
-
-  finance:
-    variables:
-      pipeline: finance
-      dataset: invoices
-      prefix: "{company}-{env}-{pipeline}"
-      raw_bucket: "{prefix}-raw"
-      curated_bucket: "{prefix}-curated"
-      landing: s3://{raw_bucket}/{dataset}/incoming/
-    buckets:
-      raw: "{raw_bucket}"
-      curated: "{curated_bucket}"
-    lambdas:
-      process:
-        name: "{prefix}-process-{dataset}"
-        source_dir: lambdas/process
-        live_alias: live
-      workflow:
-        name: "{prefix}-workflow"
-        source_dir: lambdas/workflow
-        live_alias: live
-        durable: true
-    glue_jobs:
-      load:
-        name: "{prefix}-load"
-        script_bucket: "{prefix}-scripts"
-        scripts: [load.py]
-        role: "{glue_role}"
-        max_capacity: 1
-        arguments:
-          SOURCE: s3://{raw_bucket}/{dataset}/
-          LANDING: "{landing}"
-          TARGET_BUCKET: "{curated_bucket}"
-          OUTPUT_PATTERN: out/{{date}}/
-    step_functions:
-      flow:
-        name: "{prefix}-flow"
-        log_group: /aws/vendedlogs/states/{prefix}-flow
-        definition_file: flow.asl.json.tftpl
-        live_alias: live
-        definition_substitutions:
-          process_arn: "{lambda_arns}:{prefix}-process-{dataset}"
-          load_job: "{prefix}-load"
-          load_timeout_seconds: 3600
-          min_orders: 1
-          load_enabled: true
-          landing_key: "{% '{landing}' & $states.input.date & '.json' %}"
-          loaded_output: "{% $merge([$states.input, {'stage': 'loaded'}]) %}"
-    iceberg_tables:
-      events:
-        database: "{company}_{env}_{pipeline}"
-        table: "{dataset}"
-    monitor:
-      lambdas: [process, workflow]
-      step_functions: [flow]
-    jenkins:
-      job_path: data-engineering/{pipeline}-deploy
-      parameters:
-        ENVIRONMENT: "{env}"
-      actions:
-        apply:
-          ACTION: deploy
-        plan:
-          ACTION: dry_run

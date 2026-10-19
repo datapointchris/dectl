@@ -5,25 +5,28 @@ import pytest
 
 from dectl.commands.config_cmd import config_app
 from dectl.config import TEMPLATE_CONFIG
+from dectl.config import init_config
+from dectl.config import load_config
+from dectl.config import template_files
 from dectl.env import set_active_environment
 from tests.conftest import RefusalRunner
 from tests.conftest import unwrapped
+from tests.conftest import write_config_files
 
 runner = RefusalRunner()
 
 
 def test_show_json_emits_pipeline_shape(monkeypatch, tmp_path):
     config_path = tmp_path / 'config.yaml'
-    config_path.write_text(TEMPLATE_CONFIG)
     monkeypatch.setattr('dectl.config.CONFIG_PATH', config_path)
     monkeypatch.setattr('dectl.commands.config_cmd.CONFIG_PATH', config_path)
+    init_config()
 
     result = runner.invoke(config_app, ['show', '--json'])
 
     assert result.exit_code == 0
-    data = json.loads(result.stdout)
-    assert data[0]['pipeline'] == 'example-pipeline'
-    assert 'source-copy' in data[0]['glue']
+    shown = {pipeline['pipeline']: pipeline for pipeline in json.loads(result.stdout)}
+    assert 'source-copy' in shown['example-pipeline']['glue']
 
 
 def test_path_prints_config_path(monkeypatch, tmp_path):
@@ -36,20 +39,20 @@ def test_path_prints_config_path(monkeypatch, tmp_path):
     assert str(config_path) in result.stdout
 
 
-def test_piped_example_is_the_template():
-    # `dectl config example > config.yaml` writes a config, so piped output is the template
-    # itself. CliRunner output is not a TTY, which selects the piped branch.
+def test_piped_example_is_each_template_file_under_its_path():
+    # CliRunner output is not a TTY, which selects the piped branch.
     result = runner.invoke(config_app, ['example'])
 
     assert result.exit_code == 0
-    assert result.stdout == TEMPLATE_CONFIG
+    for path, text in template_files().items():
+        assert f'# {path}\n{text}' in result.stdout
 
 
 def test_validate_accepts_the_template(monkeypatch, tmp_path):
     config_path = tmp_path / 'config.yaml'
-    config_path.write_text(TEMPLATE_CONFIG)
     monkeypatch.setattr('dectl.config.CONFIG_PATH', config_path)
     monkeypatch.setattr('dectl.commands.config_cmd.CONFIG_PATH', config_path)
+    init_config()
 
     result = runner.invoke(config_app, ['validate', '--json'])
 
@@ -68,8 +71,7 @@ def test_validate_reports_missing_config(monkeypatch, tmp_path):
 
 
 def test_validate_reports_unknown_key(monkeypatch, tmp_path):
-    config_path = tmp_path / 'config.yaml'
-    config_path.write_text('defaults:\n  account_id: "1"\npipelines:\n  p:\n    glue_jbs: {}\n')
+    config_path = write_config_files(tmp_path, 'defaults:\n  account_id: "1"\npipelines:\n  p:\n    glue_jbs: {}\n')
     monkeypatch.setattr('dectl.config.CONFIG_PATH', config_path)
     monkeypatch.setattr('dectl.commands.config_cmd.CONFIG_PATH', config_path)
 
@@ -81,22 +83,26 @@ def test_validate_reports_unknown_key(monkeypatch, tmp_path):
     assert result.stdout == ''
 
 
-def test_edit_seeds_config_then_opens_editor(monkeypatch, tmp_path):
+def test_edit_opens_config_yaml_bare_and_a_pipeline_file_by_name(monkeypatch, tmp_path):
     config_path = tmp_path / 'config.yaml'
-    monkeypatch.setattr('dectl.config.CONFIG_DIR', tmp_path)
     monkeypatch.setattr('dectl.config.CONFIG_PATH', config_path)
     monkeypatch.setattr('dectl.commands.config_cmd.CONFIG_PATH', config_path)
     monkeypatch.setenv('VISUAL', 'cat')  # a real binary on PATH, so shutil.which resolves it
     monkeypatch.delenv('EDITOR', raising=False)
 
     invoked = []
-    monkeypatch.setattr('dectl.commands.config_cmd.subprocess.run', lambda cmd, *a, **k: invoked.append(cmd))
+    monkeypatch.setattr('dectl.commands.config_cmd.subprocess.run', lambda cmd, *a, **k: invoked.append(cmd[-1]))
 
-    result = runner.invoke(config_app, ['edit'])
+    bare = runner.invoke(config_app, ['edit'])
+    named = runner.invoke(config_app, ['edit', 'orders'])
 
-    assert result.exit_code == 0
-    assert config_path.exists()  # seeded from the template
-    assert invoked and invoked[0][-1] == str(config_path)
+    assert (bare.exit_code, named.exit_code) == (0, 0)
+    pipeline_path = tmp_path / 'pipelines' / 'orders.yaml'
+    assert invoked == [str(config_path), str(pipeline_path)]
+    # Both were created, and what was created loads: the template, and the stub under its name.
+    config = load_config()
+    assert config is not None
+    assert 'orders' in config.pipelines
 
 
 def test_edit_prefers_visual_over_editor(monkeypatch, tmp_path):
@@ -143,7 +149,7 @@ def point_at(monkeypatch, tmp_path, contents: str | None):
     monkeypatch.setenv('COLUMNS', '200')
     config_path = tmp_path / 'config.yaml'
     if contents is not None:
-        config_path.write_text(contents)
+        write_config_files(tmp_path, contents)
     monkeypatch.setattr('dectl.config.CONFIG_PATH', config_path)
     monkeypatch.setattr('dectl.commands.config_cmd.CONFIG_PATH', config_path)
     return config_path
@@ -159,7 +165,7 @@ def test_show_reports_an_invalid_config_instead_of_raising(monkeypatch, tmp_path
     assert result.exit_code == 1
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert 'does not match the expected schema' in result.stderr
-    assert 'pipelines.p.step_function' in result.stderr
+    assert 'pipelines/p.yaml step_function' in result.stderr
     assert 'Traceback' not in result.stderr
 
 
@@ -171,7 +177,7 @@ def test_show_json_keeps_stdout_empty_when_the_config_is_invalid(monkeypatch, tm
 
     assert result.exit_code == 1
     assert result.stdout == ''
-    assert 'pipelines.p.step_function' in result.stderr
+    assert 'pipelines/p.yaml step_function' in result.stderr
 
 
 def test_show_and_validate_report_an_invalid_config_identically(monkeypatch, tmp_path):
@@ -246,14 +252,14 @@ def test_validate_json_keeps_stdout_parseable_on_a_schema_failure(monkeypatch, t
 
     assert result.exit_code == 3
     assert json.loads(result.stdout) == {'outcome': 'invalid_schema', 'unusable_values': []}
-    assert 'pipelines.p.step_function' in result.stderr
+    assert 'pipelines/p.yaml step_function' in result.stderr
 
 
 @pytest.mark.parametrize(
     ('raw', 'outcome', 'where'),
     [
         ('pipelines: [oh: dear\n', 'invalid_yaml', 'in "{path}", line'),
-        (BAD_CONFIG, 'invalid_schema', 'pipelines.p.step_function'),
+        (BAD_CONFIG, 'invalid_schema', 'pipelines/p.yaml step_function'),
     ],
 )
 def test_validate_json_tells_the_two_load_failures_apart(monkeypatch, tmp_path, raw, outcome, where):

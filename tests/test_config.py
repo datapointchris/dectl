@@ -2,7 +2,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import get_args
@@ -19,6 +18,7 @@ from pydantic import field_validator
 from dectl.config import CONFIG_LOAD_ERRORS
 from dectl.config import ROOT_SITE
 from dectl.config import TEMPLATE_CONFIG
+from dectl.config import TEMPLATE_PIPELINES
 from dectl.config import DectlConfig
 from dectl.config import Defaults
 from dectl.config import GlueJobConfig
@@ -43,6 +43,7 @@ from dectl.config import describe_config_error
 from dectl.config import load_config
 from dectl.config import pipeline_root
 from dectl.config import pipeline_value_faults
+from dectl.config import read_config_files
 from dectl.config import resolve_from_root
 from dectl.env import render_env_model
 from dectl.env import set_active_environment
@@ -127,7 +128,8 @@ def test_the_template_names_every_field_the_models_hold():
     for model in config_models():
         for field in model.model_fields:
             declared.add((model, field))
-    written = pairs_written_in(DectlConfig, yaml.safe_load(TEMPLATE_CONFIG))
+    pipelines = {name: yaml.safe_load(text) for name, text in TEMPLATE_PIPELINES.items()}
+    written = pairs_written_in(DectlConfig, yaml.safe_load(TEMPLATE_CONFIG) | {'pipelines': pipelines})
 
     assert declared - written == set(SHOWN_ONLY_AS_A_COMMENT)
 
@@ -163,15 +165,15 @@ def test_variables_substitute_at_load_and_refuse_what_would_clobber(monkeypatch,
         'OUTPUT_PATTERN': 'out/{date}/',
     }
 
-    raw = yaml.safe_load(LAYERED_CONFIG.read_text())
+    raw = read_config_files()
     misnamed = DectlConfig.model_validate(merged(raw, {'variables': {'company': 'Acme_Co'}}))
     traced = {(fault.pipeline, fault.written) for fault in config_value_faults(misnamed)}
 
     def prefix_trace(pipeline: str) -> tuple[str, ...]:
         return (
-            f'{{prefix}} from pipelines.{pipeline}.variables.prefix',
-            '{company} from variables.company',
-            f'{{pipeline}} from pipelines.{pipeline}.variables.pipeline',
+            f'{{prefix}} from pipelines/{pipeline}.yaml variables.prefix',
+            '{company} from config.yaml variables.company',
+            f'{{pipeline}} from pipelines/{pipeline}.yaml variables.pipeline',
         )
 
     # A fault in a bucket named through two variables traces to the one holding the bad character.
@@ -181,12 +183,13 @@ def test_variables_substitute_at_load_and_refuse_what_would_clobber(monkeypatch,
         for row in [
             (
                 pipeline,
-                Written('{raw_bucket}', (f'{{raw_bucket}} from pipelines.{pipeline}.variables.raw_bucket', *prefix_trace(pipeline))),
+                Written('{raw_bucket}', (f'{{raw_bucket}} from pipelines/{pipeline}.yaml variables.raw_bucket', *prefix_trace(pipeline))),
             ),
             (
                 pipeline,
                 Written(
-                    '{curated_bucket}', (f'{{curated_bucket}} from pipelines.{pipeline}.variables.curated_bucket', *prefix_trace(pipeline))
+                    '{curated_bucket}',
+                    (f'{{curated_bucket}} from pipelines/{pipeline}.yaml variables.curated_bucket', *prefix_trace(pipeline)),
                 ),
             ),
             (pipeline, Written('{prefix}-scripts', prefix_trace(pipeline))),
@@ -201,13 +204,13 @@ def test_variables_substitute_at_load_and_refuse_what_would_clobber(monkeypatch,
         (
             'undefined_variable',
             {'pipelines': {'sales': {'variables': {'shared': 'x'}}, 'finance': {'buckets': {'shared': '{shared}'}}}},
-            'define it in pipelines.finance.variables too, or move it to the top-level variables block',
+            'define it in pipelines/finance.yaml variables too, or move it to config.yaml variables',
         ),
-        # Moving it to the top level would leave {prefix} out of its reach, so that is not offered.
+        # Moving it to config.yaml would leave {prefix} out of its reach, so that is not offered.
         (
             'undefined_variable',
             {'pipelines': {'sales': {'variables': {'archive': '{prefix}-archive'}}, 'finance': {'buckets': {'archive': '{archive}'}}}},
-            'It is built from the pipeline variables {prefix}, so define {archive} in pipelines.finance.variables too',
+            'It is built from the pipeline variables {prefix}, so define {archive} in pipelines/finance.yaml variables too',
         ),
         ('variable_not_a_string', {'variables': {'account': 123}}, 'octal'),
         ('variable_not_a_string', {'variables': {'glue': {'role': 'r'}}}, 'YAML read this as a mapping'),
@@ -224,9 +227,13 @@ def test_the_readme_example_is_the_committed_config():
     readme = (Path(__file__).parent.parent / 'README.md').read_text()
     section = readme.split('### A full config', 1)[1]
     section = re.split(r'^#{2,3} ', section, maxsplit=1, flags=re.MULTILINE)[0]
-    fences = dict(re.findall(r'^```(\w+)\n(.*?)^```$', section, flags=re.MULTILINE | re.DOTALL))
-    assert fences['yaml'] == LAYERED_CONFIG.read_text()
-    assert fences['json'] == (LAYERED_CONFIG.parent / 'flow.asl.json.tftpl').read_text()
+    fences = re.findall(r'^```(\w+)\n(.*?)^```$', section, flags=re.MULTILINE | re.DOTALL)
+    directory = LAYERED_CONFIG.parent
+    assert fences == [
+        ('yaml', LAYERED_CONFIG.read_text()),
+        ('yaml', (directory / 'pipelines' / 'sales.yaml').read_text()),
+        ('json', (directory / 'flow.asl.json.tftpl').read_text()),
+    ]
 
 
 def test_validation_rejects_unknown_pipeline_key():
@@ -252,28 +259,35 @@ def test_load_config_returns_none_when_file_missing():
         assert load_config() is None
 
 
-def test_load_config_parses_valid_yaml():
-    content = """
-defaults:
-  account_id: "111111111111"
-  region: us-west-2
-pipelines:
-  foo:
-    glue_jobs:
-      bar:
-        name: foo-bar-job
-        script_bucket: foo-bucket
-        scripts: [main.py]
-        role: "arn:aws:iam::111111111111:role/foo-role"
-"""
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-        f.write(content)
-        f.flush()
-        with patch('dectl.config.CONFIG_PATH', Path(f.name)):
-            config = load_config()
-            assert config is not None
-            assert config.defaults.region == 'us-west-2'
-            assert 'foo' in config.pipelines
+def test_each_pipeline_is_read_from_its_own_file(monkeypatch, tmp_path):
+    """config.yaml's variables reach every pipeline file and a pipeline's reach its own, and a
+    fault names the file holding it."""
+    monkeypatch.setattr('dectl.config.CONFIG_PATH', tmp_path / 'config.yaml')
+    (tmp_path / 'config.yaml').write_text('variables:\n  company: acme\ndefaults:\n  account_id: "1"\n')
+    pipelines = tmp_path / 'pipelines'
+    pipelines.mkdir()
+    (pipelines / 'sales.yaml').write_text('variables:\n  raw: "{company}-sales-raw"\nbuckets:\n  raw: "{raw}"\n')
+    (pipelines / 'finance.yaml').write_text('buckets:\n  raw: "{company}-finance-raw"\n')
+    (pipelines / '.finance.yaml.swp').write_text('[ not yaml')
+
+    config = load_config()
+    assert config is not None
+    assert {name: pipeline.buckets for name, pipeline in config.pipelines.items()} == {
+        'finance': {'raw': 'acme-finance-raw'},
+        'sales': {'raw': 'acme-sales-raw'},
+    }
+
+    (pipelines / 'finance.yaml').write_text('buckets:\n  raw: "{raw}"\n')
+    (pipelines / 'orders.yml').write_text('buckets: {}\n')
+    with pytest.raises(ValidationError) as caught:
+        load_config()
+    assert describe_config_error(caught.value)[0] == '  pipelines/: orders.yml is not a pipeline file; a pipeline is pipelines/<name>.yaml'
+    (pipelines / 'orders.yml').unlink()
+    with pytest.raises(ValidationError) as caught:
+        load_config()
+    assert describe_config_error(caught.value)[0].startswith(
+        '  pipelines/finance.yaml buckets.raw: variable {raw} is defined in pipelines/sales.yaml variables, which this value cannot see'
+    )
 
 
 def test_validation_rejects_missing_account_id():
@@ -459,7 +473,7 @@ def test_describe_names_the_location_and_the_rejected_value():
 
     lines = describe_config_error(exc)
 
-    assert lines[0] == '  pipelines.p.step_function: Extra inputs are not permitted'
+    assert lines[0] == '  pipelines/p.yaml step_function: Extra inputs are not permitted'
     assert lines[1] == "    got: {'flow': {'name': 'sm'}}"
 
 
@@ -470,7 +484,7 @@ def test_describe_truncates_a_large_rejected_value():
 
     lines = describe_config_error(exc)
 
-    assert lines[0] == '  defaults: Field required'
+    assert lines[0] == '  config.yaml defaults: Field required'
     assert lines[1].endswith('…')
     assert len(lines[1]) < 200
 
@@ -480,8 +494,9 @@ def test_describe_reports_every_problem_not_only_the_first():
 
     lines = describe_config_error(exc)
 
-    assert '  defaults.acct: Extra inputs are not permitted' in lines
-    assert '  pipelines.p.glue_jbs: Extra inputs are not permitted' in lines
+    # Each names the file holding it, so the two land in different files.
+    assert '  config.yaml defaults.acct: Extra inputs are not permitted' in lines
+    assert '  pipelines/p.yaml glue_jbs: Extra inputs are not permitted' in lines
 
 
 def test_a_yaml_syntax_error_reports_through_the_same_renderer():

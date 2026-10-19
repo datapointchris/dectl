@@ -31,7 +31,8 @@ one line to stderr. Setting `NO_AUTO_UPDATE` or `DECTL_NO_AUTO_UPDATE` to anythi
 ```bash
 dectl reference                  # the whole grammar; needs no config and reaches no AWS
 dectl config init                # an annotated starter exercising every option; refuses to overwrite
-dectl config edit                # your region, profile and pipelines, {env} where the environment goes
+dectl config edit                # your region, profile and shared variables
+dectl config edit sales          # one pipeline's file, created if absent; {env} where the environment goes
 dectl config validate            # schema, local paths and bucket names, offline; exits 3 on a fault
 dectl env                        # which environment {env} becomes, and what chose it
 dectl example-pipeline list      # each alias beside the AWS name it resolves to, still offline
@@ -39,14 +40,19 @@ dectl search source-copy         # the first call to AWS: proves the credentials
 ```
 
 The examples in this file use the starter config's names: the pipeline `example-pipeline`, its Glue
-job `source-copy`, and the rest. Rename them in the file and the commands follow, because dectl
+job `source-copy`, and the rest. Rename them in the config and the commands follow, because dectl
 builds its command tree from the config every time it starts.
 
-`config init` writes `$XDG_CONFIG_HOME/dectl/config.yaml`, which is `~/.config/dectl/config.yaml`
-when the variable is unset. `dectl config path` prints the resolved path. `config init` refuses when
-a file is already there. `config edit` opens `$VISUAL`, then `$EDITOR`, and writes the starter first
-when there is no file. `dectl config example` prints the same starter to stdout, for reading in one
-pane while editing in another.
+The config is a directory, `$XDG_CONFIG_HOME/dectl/`, which is `~/.config/dectl/` when the variable
+is unset. `config.yaml` there holds the defaults, the Jenkins server and the variables every pipeline
+shares. Each pipeline is its own file, `pipelines/<name>.yaml`, and the file's name is the
+pipeline's. `dectl config path` prints the resolved `config.yaml`.
+
+`config init` writes `config.yaml` and two example pipeline files, and refuses when `config.yaml` is
+already there. `config edit` opens `config.yaml` in `$VISUAL`, then `$EDITOR`, writing the starter
+first when there is none. `config edit NAME` opens `pipelines/NAME.yaml`, creating a stub when it is
+not there. `dectl config example` prints the starter's files to stdout, each under a line naming
+its path, for reading in one pane while editing in another.
 
 dectl holds no credentials of its own. AWS access comes from the profile `defaults.aws_profile`
 names, or from boto3's default chain when it is blank. The Jenkins `user` and `token` can be written
@@ -366,17 +372,16 @@ no action itself. What `ACTION=dry_run` does belongs to the Jenkinsfile, which d
 a verb dectl named would be a guess at it. An action cannot be called `status` or `logs`, because it
 would collide with that read.
 
-The command appears only when the config has both `jenkins` blocks. The top-level one names the
-server and its credentials. The pipeline's own names the job.
+The command appears only when the config has both `jenkins` blocks. The one in `config.yaml` names
+the server and its credentials. The pipeline file's own names the job.
 
 ## `monitor` — several resources tailed as one stream, in time order
 
 ```yaml
-pipelines:
-  example-pipeline:
-    monitor:
-      lambdas: [my-function]
-      step_functions: [my-flow]     # needs log_group set on the state machine
+# pipelines/example-pipeline.yaml
+monitor:
+  lambdas: [my-function]
+  step_functions: [my-flow]     # needs log_group set on the state machine
 ```
 
 ```bash
@@ -446,16 +451,19 @@ reach it.
 
 dectl only reads tables. Compaction, snapshot expiry, orphan removal and rollback are not here.
 
-## `config` — one file builds the command tree, and a typo in it is an error
+## `config` — the config files build the command tree, and a typo in one is an error
 
 ```bash
-dectl config path        # the resolved config path, whether or not a file is there
+dectl config path        # the resolved config.yaml, whether or not a file is there
 dectl config show        # every pipeline resolved: names, managed fields and paths
 dectl config validate    # exit 0 when clean, 3 otherwise; --json for outcome and unusable_values
 ```
 
-Every model rejects unknown keys. `config validate` checks that the file parses, matches the schema,
-and names values that can be used. Bucket names are checked on any machine. `script_bucket` and
+Every model rejects unknown keys. `config validate` checks that the files parse, match the schema,
+and name values that can be used. Each fault names its file and the key within it, as in
+`pipelines/sales.yaml glue_jobs.load.role`. A `pipelines` block in `config.yaml` is refused, and so
+is any file in `pipelines/` not named `<name>.yaml`, so a pipeline is never silently left out. A
+dotfile there, such as an editor's swap file, is skipped. Bucket names are checked on any machine. `script_bucket` and
 every entry under `buckets` must be a name S3 accepts, as the active environment resolves it. A
 refused name is printed beside every arm of S3's naming rule, reserved prefixes and suffixes
 included. How each Glue script key is written is checked on any machine too. Whether a file is
@@ -467,33 +475,36 @@ one that could not be read at all.
 ### `variables` — a value written once and used as `{name}` everywhere
 
 ```yaml
+# config.yaml
 variables:
   account: "123456789012"
   lambda_arn_prefix: arn:aws:lambda:us-east-2:{account}:function
-pipelines:
-  sales:
-    variables:
-      raw_bucket: "acme-{env}-raw"
-    buckets:
-      raw: "{raw_bucket}"
-    step_functions:
-      flow:
-        definition_substitutions:
-          process_arn: "{lambda_arn_prefix}:acme-{env}-process"
 ```
 
-The top-level block reaches every string in the file. A pipeline's block reaches that pipeline
-alone. Variables are substituted when the config loads. `{env}` passes through untouched and is
+```yaml
+# pipelines/sales.yaml
+variables:
+  raw_bucket: "acme-{env}-raw"
+buckets:
+  raw: "{raw_bucket}"
+step_functions:
+  flow:
+    definition_substitutions:
+      process_arn: "{lambda_arn_prefix}:acme-{env}-process"
+```
+
+The block in `config.yaml` reaches every string in every file. A pipeline file's block reaches that
+pipeline alone. Variables are substituted when the config loads. `{env}` passes through untouched and is
 substituted when a command runs. A variable sees the ones defined above it, so one can be built from
 another. `config show` and `list` print the substituted values.
 
 Each of these is refused when the config loads, naming the key:
 
 - a variable named `env`, or named with anything but letters, digits, `_` and `-`;
-- a pipeline variable redefining a top-level one;
+- a pipeline variable redefining one from `config.yaml`;
 - a `{name}` with no variable defined for it, so a typo never reaches AWS as a literal name;
-- a `{name}` defined only in another pipeline's block. The message names that block, and offers
-  moving the variable to the top level only when its value uses no pipeline variable;
+- a `{name}` defined only in another pipeline's file. The message names that file, and offers
+  moving the variable to `config.yaml` only when its value uses no pipeline variable;
 - an unquoted `{name}`, which YAML reads as a mapping;
 - a value that is not a string.
 
@@ -511,19 +522,19 @@ the value needs no quotes. Quote an account id too, because YAML reads an unquot
 
 ### A full config: two pipelines and every resource
 
-This config is `tests/layered_pipelines_config/config.yaml`, and the suite loads it through dectl
-on every run. The code it deploys sits beside it, so its relative paths resolve when dectl runs
-from that directory.
+This config is `tests/layered_pipelines_config/`, and the suite loads it through dectl on every
+run. The code it deploys sits beside it, so its relative paths resolve when dectl runs from that
+directory. `config.yaml` holds what both pipelines share:
 
 ```yaml
-# Two pipelines from one file, each written out whole. They share the top-level variables and
-# differ in their own. The code each one deploys sits beside this file, so every relative path
-# below resolves when dectl runs from this directory.
+# Two pipelines, each its own file in pipelines/. They share the variables below and differ in
+# their own. The code each one deploys sits beside this file, so every relative path in a
+# pipeline file resolves when dectl runs from this directory.
 variables:
   company: acme
   account: "123456789012"
   region: us-east-2
-  # Built from the variables above it, so every ARN below is written once.
+  # Built from the variables above it, so every ARN in the pipeline files is written once.
   lambda_arns: arn:aws:lambda:{region}:{account}:function
   glue_role: arn:aws:iam::{account}:role/{company}-{env}-glue
 
@@ -536,140 +547,81 @@ jenkins:
   url: https://jenkins.example.com
   user: ${JENKINS_USER}
   token: ${JENKINS_API_TOKEN}
-
-pipelines:
-  sales:
-    variables:
-      pipeline: sales
-      dataset: orders
-      prefix: "{company}-{env}-{pipeline}"
-      # A bucket named inside other values is a variable: the buckets, the job arguments and
-      # the state machine's substitutions below all build on it.
-      raw_bucket: "{prefix}-raw"
-      curated_bucket: "{prefix}-curated"
-      landing: s3://{raw_bucket}/{dataset}/incoming/
-    buckets:
-      raw: "{raw_bucket}"
-      curated: "{curated_bucket}"
-    lambdas:
-      process:
-        name: "{prefix}-process-{dataset}"
-        source_dir: lambdas/process
-        live_alias: live
-      workflow:
-        name: "{prefix}-workflow"
-        source_dir: lambdas/workflow
-        live_alias: live
-        durable: true
-    glue_jobs:
-      load:
-        name: "{prefix}-load"
-        script_bucket: "{prefix}-scripts"
-        scripts: [load.py]
-        role: "{glue_role}"
-        max_capacity: 1
-        arguments:
-          SOURCE: s3://{raw_bucket}/{dataset}/
-          LANDING: "{landing}"
-          TARGET_BUCKET: "{curated_bucket}"
-          # The job fills {date} itself, so it reaches Glue with single braces.
-          OUTPUT_PATTERN: out/{{date}}/
-    step_functions:
-      flow:
-        name: "{prefix}-flow"
-        log_group: /aws/vendedlogs/states/{prefix}-flow
-        definition_file: flow.asl.json.tftpl
-        live_alias: live
-        definition_substitutions:
-          process_arn: "{lambda_arns}:{prefix}-process-{dataset}"
-          load_job: "{prefix}-load"
-          load_timeout_seconds: 3600
-          min_orders: 1
-          load_enabled: true
-          # Whole JSONata expressions: single quotes inside, double quotes around.
-          landing_key: "{% '{landing}' & $states.input.date & '.json' %}"
-          loaded_output: "{% $merge([$states.input, {'stage': 'loaded'}]) %}"
-    iceberg_tables:
-      events:
-        database: "{company}_{env}_{pipeline}"
-        table: "{dataset}"
-    monitor:
-      lambdas: [process, workflow]
-      step_functions: [flow]
-    jenkins:
-      job_path: data-engineering/{pipeline}-deploy
-      parameters:
-        ENVIRONMENT: "{env}"
-      actions:
-        apply:
-          ACTION: deploy
-        plan:
-          ACTION: dry_run
-
-  finance:
-    variables:
-      pipeline: finance
-      dataset: invoices
-      prefix: "{company}-{env}-{pipeline}"
-      raw_bucket: "{prefix}-raw"
-      curated_bucket: "{prefix}-curated"
-      landing: s3://{raw_bucket}/{dataset}/incoming/
-    buckets:
-      raw: "{raw_bucket}"
-      curated: "{curated_bucket}"
-    lambdas:
-      process:
-        name: "{prefix}-process-{dataset}"
-        source_dir: lambdas/process
-        live_alias: live
-      workflow:
-        name: "{prefix}-workflow"
-        source_dir: lambdas/workflow
-        live_alias: live
-        durable: true
-    glue_jobs:
-      load:
-        name: "{prefix}-load"
-        script_bucket: "{prefix}-scripts"
-        scripts: [load.py]
-        role: "{glue_role}"
-        max_capacity: 1
-        arguments:
-          SOURCE: s3://{raw_bucket}/{dataset}/
-          LANDING: "{landing}"
-          TARGET_BUCKET: "{curated_bucket}"
-          OUTPUT_PATTERN: out/{{date}}/
-    step_functions:
-      flow:
-        name: "{prefix}-flow"
-        log_group: /aws/vendedlogs/states/{prefix}-flow
-        definition_file: flow.asl.json.tftpl
-        live_alias: live
-        definition_substitutions:
-          process_arn: "{lambda_arns}:{prefix}-process-{dataset}"
-          load_job: "{prefix}-load"
-          load_timeout_seconds: 3600
-          min_orders: 1
-          load_enabled: true
-          landing_key: "{% '{landing}' & $states.input.date & '.json' %}"
-          loaded_output: "{% $merge([$states.input, {'stage': 'loaded'}]) %}"
-    iceberg_tables:
-      events:
-        database: "{company}_{env}_{pipeline}"
-        table: "{dataset}"
-    monitor:
-      lambdas: [process, workflow]
-      step_functions: [flow]
-    jenkins:
-      job_path: data-engineering/{pipeline}-deploy
-      parameters:
-        ENVIRONMENT: "{env}"
-      actions:
-        apply:
-          ACTION: deploy
-        plan:
-          ACTION: dry_run
 ```
+
+`pipelines/sales.yaml` is the `sales` pipeline, and every resource type appears in it:
+
+```yaml
+variables:
+  pipeline: sales
+  dataset: orders
+  prefix: "{company}-{env}-{pipeline}"
+  # A bucket named inside other values is a variable: the buckets, the job arguments and
+  # the state machine's substitutions below all build on it.
+  raw_bucket: "{prefix}-raw"
+  curated_bucket: "{prefix}-curated"
+  landing: s3://{raw_bucket}/{dataset}/incoming/
+buckets:
+  raw: "{raw_bucket}"
+  curated: "{curated_bucket}"
+lambdas:
+  process:
+    name: "{prefix}-process-{dataset}"
+    source_dir: lambdas/process
+    live_alias: live
+  workflow:
+    name: "{prefix}-workflow"
+    source_dir: lambdas/workflow
+    live_alias: live
+    durable: true
+glue_jobs:
+  load:
+    name: "{prefix}-load"
+    script_bucket: "{prefix}-scripts"
+    scripts: [load.py]
+    role: "{glue_role}"
+    max_capacity: 1
+    arguments:
+      SOURCE: s3://{raw_bucket}/{dataset}/
+      LANDING: "{landing}"
+      TARGET_BUCKET: "{curated_bucket}"
+      # The job fills {date} itself, so it reaches Glue with single braces.
+      OUTPUT_PATTERN: out/{{date}}/
+step_functions:
+  flow:
+    name: "{prefix}-flow"
+    log_group: /aws/vendedlogs/states/{prefix}-flow
+    definition_file: flow.asl.json.tftpl
+    live_alias: live
+    definition_substitutions:
+      process_arn: "{lambda_arns}:{prefix}-process-{dataset}"
+      load_job: "{prefix}-load"
+      load_timeout_seconds: 3600
+      min_orders: 1
+      load_enabled: true
+      # Whole JSONata expressions: single quotes inside, double quotes around.
+      landing_key: "{% '{landing}' & $states.input.date & '.json' %}"
+      loaded_output: "{% $merge([$states.input, {'stage': 'loaded'}]) %}"
+iceberg_tables:
+  events:
+    database: "{company}_{env}_{pipeline}"
+    table: "{dataset}"
+monitor:
+  lambdas: [process, workflow]
+  step_functions: [flow]
+jenkins:
+  job_path: data-engineering/{pipeline}-deploy
+  parameters:
+    ENVIRONMENT: "{env}"
+  actions:
+    apply:
+      ACTION: deploy
+    plan:
+      ACTION: dry_run
+```
+
+`pipelines/finance.yaml` is the same file with `pipeline: finance` and `dataset: invoices`, so every
+name it builds is its own.
 
 `flow.asl.json.tftpl` beside it is the definition `sfn flow deploy` renders. It is a Terraform
 template, so the same file serves `terraform apply`:
@@ -729,13 +681,12 @@ exception. A Glue job's `scripts`, a Lambda's `source_dir` and a state machine's
 are paths. With no `resolve_paths_from`, they resolve from the directory you are standing in.
 
 ```yaml
-pipelines:
-  example-pipeline:
-    resolve_paths_from: ~/code/example-pipeline
-    lambdas:
-      my-function:
-        name: my-{env}-lambda-function
-        source_dir: modules/lambda/my_function/code
+# pipelines/example-pipeline.yaml
+resolve_paths_from: ~/code/example-pipeline
+lambdas:
+  my-function:
+    name: my-{env}-lambda-function
+    source_dir: modules/lambda/my_function/code
 ```
 
 `dectl example-pipeline lambda my-function deploy` then zips
@@ -770,7 +721,8 @@ on each resource that declares one.
 
 ## Where it writes
 
-- `$XDG_CONFIG_HOME/dectl/config.yaml`: the config, written only by `config init` and `config edit`.
+- `$XDG_CONFIG_HOME/dectl/config.yaml` and `pipelines/`: the config, written only by `config init`
+  and `config edit`.
 - `$XDG_CACHE_HOME/clisteno/` and `$XDG_STATE_HOME/clisteno/`: the shortcut table, computed from the
   live command tree.
 - `$XDG_STATE_HOME/dectl/`: when the update check last ran, and what it found.

@@ -3,6 +3,7 @@ import shlex
 import shutil
 import subprocess
 from itertools import starmap
+from pathlib import Path
 from typing import Annotated
 from typing import NoReturn
 
@@ -11,13 +12,16 @@ from rich.syntax import Syntax
 
 from dectl.config import CONFIG_LOAD_ERRORS
 from dectl.config import CONFIG_PATH
-from dectl.config import TEMPLATE_CONFIG
+from dectl.config import PIPELINE_STUB
+from dectl.config import PIPELINE_SUFFIX
 from dectl.config import Defaults
 from dectl.config import config_error_outcome
 from dectl.config import config_value_faults
 from dectl.config import init_config
 from dectl.config import load_config
+from dectl.config import pipelines_dir
 from dectl.config import report_config_error
+from dectl.config import template_files
 from dectl.env import describe_active_environment
 from dectl.output import console
 from dectl.output import emit_json
@@ -30,7 +34,7 @@ from dectl.values import refuse_unusable_values
 
 config_app = typer.Typer(
     no_args_is_help=True,
-    help=f'Manage dectl configuration at {CONFIG_PATH}.',
+    help=f'Manage dectl configuration in {CONFIG_PATH.parent}: config.yaml, and pipelines/<name>.yaml for each pipeline.',
 )
 
 # What `config validate` exits for anything it found. The convention it follows reserves 1 for
@@ -73,7 +77,7 @@ def config_show(
         emit_json(list(starmap(pipeline_to_dict, cfg.pipelines.items())))
         return
 
-    console.print(f'[bold]config:[/bold] {CONFIG_PATH}')
+    console.print(f'[bold]config:[/bold] {CONFIG_PATH.parent}')
     # Derived from the model rather than listed, so a field added to `Defaults` prints without
     # this being edited. `aws_profile` is the one that decides which AWS account every deploy
     # below reaches, and a reader could not see it resolved anywhere.
@@ -104,26 +108,32 @@ def config_example() -> None:
     """Print a full example config showing every available option.
 
     Meant for side-by-side reference: display it in one pane while editing the real
-    config in another. Syntax-highlighted when printed to a terminal, plain text when
-    redirected or piped so `dectl config example > config.yaml` stays clean.
+    config in another. Each file follows a `# <path>` line naming where it goes in the config
+    directory. Syntax-highlighted when printed to a terminal, plain text when piped.
     """
+    text = '\n'.join(f'# {relative}\n{contents}' for relative, contents in template_files().items())
     if console.is_terminal:
-        console.print(Syntax(TEMPLATE_CONFIG, 'yaml', background_color='default', word_wrap=True))
+        console.print(Syntax(text, 'yaml', background_color='default', word_wrap=True))
     else:
-        print(TEMPLATE_CONFIG, end='')
+        print(text, end='')
 
 
 @config_app.command('edit')
-def config_edit() -> None:
-    """Open the config in your editor ($VISUAL, then $EDITOR).
+def config_edit(
+    pipeline: Annotated[
+        str | None, typer.Argument(help='Open pipelines/PIPELINE.yaml instead of config.yaml, creating it if it is not there.')
+    ] = None,
+) -> None:
+    """Open config.yaml, or one pipeline's file, in your editor ($VISUAL, then $EDITOR).
 
     Seeds a starter config from the template first if none exists. The editor runs in the
     foreground, so a terminal editor (nvim, vim) blocks until you close it; a GUI editor
     returns immediately unless you configured it to wait (e.g. EDITOR="code --wait").
     """
-    if not CONFIG_PATH.exists():
-        path = init_config()
-        info(f'no config found — created a starter config at {path}')
+    # A name is a file in pipelines/, and the loader skips a dotfile, so neither a path nor one is a pipeline.
+    if pipeline is not None and (Path(pipeline).name != pipeline or pipeline.startswith('.')):
+        error(f'{pipeline!r} cannot name a pipeline: it is the file pipelines/<name>{PIPELINE_SUFFIX}')
+        raise typer.Exit(1)
 
     editor = os.environ.get('VISUAL') or os.environ.get('EDITOR')
     if not editor:
@@ -139,7 +149,18 @@ def config_edit() -> None:
         error(f'editor not found on PATH: {parts[0]}')
         raise typer.Exit(1)
 
-    subprocess.run([editor_bin, *parts[1:], str(CONFIG_PATH)])
+    path = CONFIG_PATH
+    if pipeline is None and not CONFIG_PATH.exists():
+        init_config()
+        info(f'no config found — created a starter config at {CONFIG_PATH}')
+    elif pipeline is not None:
+        path = pipelines_dir() / f'{pipeline}{PIPELINE_SUFFIX}'
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(PIPELINE_STUB.format(name=pipeline))
+            info(f'created {path}')
+
+    subprocess.run([editor_bin, *parts[1:], str(path)])
 
 
 @config_app.command('validate')
@@ -189,7 +210,7 @@ def config_validate(
             emit_json({'outcome': config_error_outcome(exc), 'unusable_values': []})
         raise typer.Exit(NEEDS_A_PERSON_EXIT) from exc
     if config is None:
-        refuse('no_config', f'config at {CONFIG_PATH} was removed while it was being read')
+        refuse('no_config', f'{CONFIG_PATH} was removed while it was being read')
 
     problems = config_value_faults(config)
     if as_json:
@@ -215,7 +236,7 @@ def config_validate(
         raise typer.Exit(NEEDS_A_PERSON_EXIT if problems else 0)
 
     if problems:
-        error(f'config at {CONFIG_PATH} matches the schema, but names values that cannot be used:')
+        error(f'config in {CONFIG_PATH.parent} matches the schema, but names values that cannot be used:')
         refuse_unusable_values(problems, exit_code=NEEDS_A_PERSON_EXIT)
 
-    success(f'config at {CONFIG_PATH} is valid')
+    success(f'config in {CONFIG_PATH.parent} is valid')

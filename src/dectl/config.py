@@ -17,6 +17,8 @@ from pydantic import PrivateAttr
 from pydantic import ValidationError
 from pydantic import field_validator
 from pydantic import model_validator
+from pydantic_core import InitErrorDetails
+from pydantic_core import PydanticCustomError
 
 from dectl.asl import template_text
 from dectl.env import substitute_env
@@ -41,24 +43,32 @@ from dectl.values import normalized
 from dectl.values import path_fault
 from dectl.values import root_fault
 from dectl.variables import expand_variables
+from dectl.variables import file_and_key
 
 # `$XDG_CONFIG_HOME/dectl/config.yaml`, falling back to `~/.config` when the variable is unset.
 # `config_home()` reads the environment at import, so a process that exports the variable after
-# importing dectl keeps the path it started with.
+# importing dectl keeps the path it started with. Everything else is found beside it, from
+# `CONFIG_PATH.parent` at the call, so a test pointing `CONFIG_PATH` elsewhere moves all of it.
 CONFIG_DIR = config_home() / 'dectl'
 CONFIG_PATH = CONFIG_DIR / 'config.yaml'
+PIPELINE_SUFFIX = '.yaml'
 
 TEMPLATE_CONFIG = """\
-# Substituted as {name} into every string in this file when it loads. A pipeline's own
-# `variables` block adds to these for that pipeline alone, and cannot redefine one of them. A
-# variable sees the ones defined above it, so one can be built from another. `env` is never a
-# variable: {env} is replaced at each command, from --env, DECTL_ENV or `environment` below.
+# Each pipeline is its own file beside this one, pipelines/<name>.yaml, and the file's name is
+# the pipeline's. `dectl config edit NAME` opens one, creating it if it is not there.
+#
+# Substituted as {name} into every string in this file and in every pipeline file when they
+# load. A pipeline's own `variables` block adds to these for that pipeline alone, and cannot
+# redefine one of them. A variable sees the ones defined above it, so one can be built from
+# another. `env` is never a variable: {env} is replaced at each command, from --env, DECTL_ENV
+# or `environment` below.
 #
 # Quote a value that starts with `{`. YAML reads a leading brace as an inline mapping, so
 # `x: {company}-raw` does not parse and `x: {env}` parses as a mapping. A brace later in the
 # value, as in the ARNs below, needs no quotes. Quote an account id as well, because YAML reads
 # an unquoted 0123 as an octal number. A {name} naming no variable is refused; a literal one,
-# for a job or a Jenkinsfile to fill, is written doubled, as `{{date}}` in `source-copy` below.
+# for a job or a Jenkinsfile to fill, is written doubled, as `{{date}}` is in
+# pipelines/example-pipeline.yaml.
 variables:
   account: "123456789012"
   region: us-east-2
@@ -74,7 +84,7 @@ defaults:
   environment: dev
   aws_profile: ""
 
-# The Jenkins dectl reaches for `jenkins`. Both this block and a pipeline's own `jenkins` below
+# The Jenkins dectl reaches for `jenkins`. Both this block and a pipeline file's own `jenkins`
 # have to be present for the command to appear at all, because the whole tree is assembled from
 # what the config declares.
 jenkins:
@@ -83,156 +93,166 @@ jenkins:
   # the credential out of the file. Every other value in this config is used exactly as written.
   user: ${JENKINS_USER}
   token: ${JENKINS_API_TOKEN}
+"""
 
-pipelines:
-  example-pipeline:
-    # The directory the relative paths below resolve from — every glue `scripts` entry, lambda
-    # `source_dir` and step function `definition_file` — so a deploy reaches the same files from
-    # any directory. Absolute or ~-rooted; a relative value is rejected.
+# Each one is `pipelines/<name>.yaml` beside config.yaml, and the file's name is the pipeline's.
+TEMPLATE_PIPELINES = {
+    'example-pipeline': """\
+# The directory the relative paths below resolve from — every glue `scripts` entry, lambda
+# `source_dir` and step function `definition_file` — so a deploy reaches the same files from
+# any directory. Absolute or ~-rooted; a relative value is rejected.
+#
+# Left out, those paths resolve from the directory dectl is run in, so a deploy has to be run
+# from the checkout. Set it and `config validate` checks the directory and every path
+# resolving from it, which is why the example below stays commented.
+# resolve_paths_from: ~/code/example-pipeline
+# This pipeline's own, beside those in config.yaml.
+variables:
+  raw_bucket: "{company}-{env}-raw-data-bucket"
+  curated_bucket: "{company}-{env}-curated-data-bucket"
+glue_jobs:
+  source-copy:
+    name: "{company}-{env}-source-copy-job"
+    script_bucket: "{company}-script-bucket"
+    # The two halves of each script's S3 key, joined as written. Neither resolves against
+    # resolve_paths_from — a prefix names nothing on disk, and a script's key comes from
+    # this string rather than from where the file was found. Both are plain relative
+    # segments: no leading ~ or /, no . or .. segment, no // and no trailing /.
+    script_prefix: scripts
+    scripts:
+      - my-source-copy.py
+    role: "{glue_role}"
+    # Authoritative: a connection dropped from this list is detached on the next deploy.
+    # Omit the key entirely to leave the job's connections alone.
+    connections:
+      - "{company}-{env}-vpc-connection"
+    # A Glue job sizes one of two ways and dectl refuses a config naming both. A Python
+    # shell job takes max_capacity, which is 0.0625 (1 GB) or 1 (16 GB). A Spark job takes
+    # the worker pair below instead.
+    max_capacity: 1
+    arguments:
+      SOURCE_BUCKET: "{raw_bucket}"
+      SOURCE_PREFIX: incoming
+      TARGET_BUCKET: "{curated_bucket}"
+      # The job fills {date} itself, so it reaches Glue with single braces.
+      OUTPUT_PATTERN: out/{{date}}/
+  # A second job, sized the other way, and naming every optional key so each one is here to
+  # copy. A real config names only the fields it wants dectl to decide; `dectl PIPELINE list`
+  # prints which those are.
+  conform:
+    name: "{company}-{env}-conform-job"
+    script_bucket: "{company}-script-bucket"
+    scripts:
+      - conform.py
+      - lib/shared.py            # every script after the first becomes --extra-py-files
+    role: "{glue_role}"
+    # Spark sizing. Glue takes the two together, so dectl refuses one without the other.
+    worker_type: G.1X
+    number_of_workers: 4
+    glue_version: "5.0"
+    python_version: "3"
+    # Glue counts this in minutes.
+    timeout_minutes: 60
+    # Zero is the one worth setting by hand: a job at three retries takes three runs to
+    # report a failure, which is three tracebacks to read instead of one.
+    max_retries: 0
+    max_concurrent_runs: 1
+    # STANDARD or FLEX. FLEX runs on spare capacity for less money and starts when it
+    # starts, which is the trade an iteration loop usually wants and a schedule does not.
+    execution_class: FLEX
+lambdas:
+  my-function:
+    name: "{company}-{env}-lambda-function"
+    source_dir: modules/lambda/my_function/code
+    live_alias: live
+  my-workflow:
+    name: "{company}-{env}-durable-workflow"
+    source_dir: modules/lambda/my_workflow/code
+    live_alias: live
+    # Adds the durable execution verbs (executions, history) and qualifies every invoke,
+    # which Lambda requires for durable functions.
+    durable: true
+step_functions:
+  my-flow:
+    name: "{company}-{env}-state-machine"
+    log_group: /aws/vendedlogs/states/{company}-{env}-state-machine
+    # The definition Terraform renders with templatefile(). Setting it adds `plan` and
+    # `deploy`, which render the file the same way and replace only the definition: the role
+    # and logging stay as Terraform set them.
     #
-    # Left out, those paths resolve from the directory dectl is run in, so a deploy has to be run
-    # from the checkout. Set it and `config validate` checks the directory and every path
-    # resolving from it, which is why the example below stays commented.
-    # resolve_paths_from: ~/code/example-pipeline
-    # This pipeline's own, beside the top-level ones above.
-    variables:
-      raw_bucket: "{company}-{env}-raw-data-bucket"
-      curated_bucket: "{company}-{env}-curated-data-bucket"
-    glue_jobs:
-      source-copy:
-        name: "{company}-{env}-source-copy-job"
-        script_bucket: "{company}-script-bucket"
-        # The two halves of each script's S3 key, joined as written. Neither resolves against
-        # resolve_paths_from — a prefix names nothing on disk, and a script's key comes from
-        # this string rather than from where the file was found. Both are plain relative
-        # segments: no leading ~ or /, no . or .. segment, no // and no trailing /.
-        script_prefix: scripts
-        scripts:
-          - my-source-copy.py
-        role: "{glue_role}"
-        # Authoritative: a connection dropped from this list is detached on the next deploy.
-        # Omit the key entirely to leave the job's connections alone.
-        connections:
-          - "{company}-{env}-vpc-connection"
-        # A Glue job sizes one of two ways and dectl refuses a config naming both. A Python
-        # shell job takes max_capacity, which is 0.0625 (1 GB) or 1 (16 GB). A Spark job takes
-        # the worker pair below instead.
-        max_capacity: 1
-        arguments:
-          SOURCE_BUCKET: "{raw_bucket}"
-          SOURCE_PREFIX: incoming
-          TARGET_BUCKET: "{curated_bucket}"
-          # The job fills {date} itself, so it reaches Glue with single braces.
-          OUTPUT_PATTERN: out/{{date}}/
-      # A second job, sized the other way, and naming every optional key so each one is here to
-      # copy. A real config names only the fields it wants dectl to decide; `dectl PIPELINE list`
-      # prints which those are.
-      conform:
-        name: "{company}-{env}-conform-job"
-        script_bucket: "{company}-script-bucket"
-        scripts:
-          - conform.py
-          - lib/shared.py            # every script after the first becomes --extra-py-files
-        role: "{glue_role}"
-        # Spark sizing. Glue takes the two together, so dectl refuses one without the other.
-        worker_type: G.1X
-        number_of_workers: 4
-        glue_version: "5.0"
-        python_version: "3"
-        # Glue counts this in minutes.
-        timeout_minutes: 60
-        # Zero is the one worth setting by hand: a job at three retries takes three runs to
-        # report a failure, which is three tracebacks to read instead of one.
-        max_retries: 0
-        max_concurrent_runs: 1
-        # STANDARD or FLEX. FLEX runs on spare capacity for less money and starts when it
-        # starts, which is the trade an iteration loop usually wants and a schedule does not.
-        execution_class: FLEX
-    lambdas:
-      my-function:
-        name: "{company}-{env}-lambda-function"
-        source_dir: modules/lambda/my_function/code
-        live_alias: live
-      my-workflow:
-        name: "{company}-{env}-durable-workflow"
-        source_dir: modules/lambda/my_workflow/code
-        live_alias: live
-        # Adds the durable execution verbs (executions, history) and qualifies every invoke,
-        # which Lambda requires for durable functions.
-        durable: true
-    step_functions:
-      my-flow:
-        name: "{company}-{env}-state-machine"
-        log_group: /aws/vendedlogs/states/{company}-{env}-state-machine
-        # The definition Terraform renders with templatefile(). Setting it adds `plan` and
-        # `deploy`, which render the file the same way and replace only the definition: the role
-        # and logging stay as Terraform set them.
-        #
-        # The file is read the way templatefile() reads it, and only ${ and %{ mean anything.
-        # A JSONata {% ... %} expression needs nothing, and a ${name} inside one is substituted
-        # like any other. A ${ or %{ the definition itself has to hold, such as JSONata's
-        # `$orders.${ customer: $sum(total) }`, is written $${ or %%{ in the file. Any other
-        # ${...}, and every %{...} directive, is refused rather than rendered.
-        definition_file: modules/step_functions/my_flow.asl.json
-        # One entry per ${name} in that file. {env} and the variables above are substituted
-        # here, never in the file. A number or boolean is written into the definition the way
-        # Terraform writes it, 2.0 as 2 and true as true, so either can stand outside a JSON
-        # string or inside a JSONata expression.
-        definition_substitutions:
-          process_function_arn: "{lambda_arn_prefix}:{company}-{env}-lambda-function"
-          raw_bucket: "{raw_bucket}"
-          copy_job_name: "{company}-{env}-source-copy-job"
-          copy_timeout_seconds: 3600
-          min_orders: 1
-          load_enabled: true
-          # A whole JSONata expression as the value. It lands inside a JSON string in the
-          # definition, so its string literals take single quotes and the YAML value takes
-          # double. {raw_bucket} inside it is a variable like any other. JSONata's own braces
-          # always hold more than a name, as {'stage': ...} does, so no variable matches them.
-          landing_key: "{% 's3://{raw_bucket}/incoming/' & $states.input.date & '.json' %}"
-          loaded_output: "{% $merge([$states.input, {'stage': 'loaded'}]) %}"
-        # The alias `deploy --publish` moves to the version it publishes. Leave it out and
-        # --publish still publishes a version, moving nothing.
-        live_alias: live
-      # With no definition_file there is no plan or deploy: run, runs and logs only.
-      reporting-history-only:
-        name: "{company}-{env}-reporting-machine"
-    buckets:
-      raw: "{raw_bucket}"
-      curated: "{curated_bucket}"
-    iceberg_tables:
-      # Glue Data Catalog database + table. dectl reads the table's own metadata file, so the
-      # only requirement is that the table is registered in Glue with table_type ICEBERG.
-      events:
-        database: "{company}-{env}-catalog"
-        table: events
-    monitor:
-      lambdas:
-        - my-function
-      step_functions:
-        - my-flow
-    # Which Jenkins job `dectl example-pipeline jenkins` builds. Every build posts `parameters`.
-    # Each action is a verb posting its own on top, so `jenkins plan` here sends ACTION=dry_run.
-    # Needs the top-level `jenkins` block as well; either one missing and the command is not built.
-    jenkins:
-      job_path: data-engineering/example-pipeline-deploy
-      parameters:
-        ENVIRONMENT: "{env}"
-      actions:
-        apply:
-          ACTION: deploy
-        plan:
-          ACTION: dry_run
+    # The file is read the way templatefile() reads it, and only ${ and %{ mean anything.
+    # A JSONata {% ... %} expression needs nothing, and a ${name} inside one is substituted
+    # like any other. A ${ or %{ the definition itself has to hold, such as JSONata's
+    # `$orders.${ customer: $sum(total) }`, is written $${ or %%{ in the file. Any other
+    # ${...}, and every %{...} directive, is refused rather than rendered.
+    definition_file: modules/step_functions/my_flow.asl.json
+    # One entry per ${name} in that file. {env} and the variables above are substituted
+    # here, never in the file. A number or boolean is written into the definition the way
+    # Terraform writes it, 2.0 as 2 and true as true, so either can stand outside a JSON
+    # string or inside a JSONata expression.
+    definition_substitutions:
+      process_function_arn: "{lambda_arn_prefix}:{company}-{env}-lambda-function"
+      raw_bucket: "{raw_bucket}"
+      copy_job_name: "{company}-{env}-source-copy-job"
+      copy_timeout_seconds: 3600
+      min_orders: 1
+      load_enabled: true
+      # A whole JSONata expression as the value. It lands inside a JSON string in the
+      # definition, so its string literals take single quotes and the YAML value takes
+      # double. {raw_bucket} inside it is a variable like any other. JSONata's own braces
+      # always hold more than a name, as {'stage': ...} does, so no variable matches them.
+      landing_key: "{% 's3://{raw_bucket}/incoming/' & $states.input.date & '.json' %}"
+      loaded_output: "{% $merge([$states.input, {'stage': 'loaded'}]) %}"
+    # The alias `deploy --publish` moves to the version it publishes. Leave it out and
+    # --publish still publishes a version, moving nothing.
+    live_alias: live
+  # With no definition_file there is no plan or deploy: run, runs and logs only.
+  reporting-history-only:
+    name: "{company}-{env}-reporting-machine"
+buckets:
+  raw: "{raw_bucket}"
+  curated: "{curated_bucket}"
+iceberg_tables:
+  # Glue Data Catalog database + table. dectl reads the table's own metadata file, so the
+  # only requirement is that the table is registered in Glue with table_type ICEBERG.
+  events:
+    database: "{company}-{env}-catalog"
+    table: events
+monitor:
+  lambdas:
+    - my-function
+  step_functions:
+    - my-flow
+# Which Jenkins job `dectl example-pipeline jenkins` builds. Every build posts `parameters`.
+# Each action is a verb posting its own on top, so `jenkins plan` here sends ACTION=dry_run.
+# Needs the `jenkins` block in config.yaml as well; either one missing and the command is not built.
+jenkins:
+  job_path: data-engineering/example-pipeline-deploy
+  parameters:
+    ENVIRONMENT: "{env}"
+  actions:
+    apply:
+      ACTION: deploy
+    plan:
+      ACTION: dry_run
+""",
+    'buckets-only': """\
+# A pipeline holding only buckets gets an `s3` command and nothing else, because each
+# pipeline's commands are built from what it declares. Its variables are its own, and
+# example-pipeline's `raw_bucket` is out of reach here.
+variables:
+  landing: "{company}-{env}-landing"
+buckets:
+  landing: "{landing}"
+  archive: "{landing}-archive"
+""",
+}
 
-  # A pipeline holding only buckets gets an `s3` command and nothing else, because each
-  # pipeline's commands are built from what it declares. Its variables are its own, and
-  # example-pipeline's `raw_bucket` is out of reach here.
-  buckets-only:
-    variables:
-      landing: "{company}-{env}-landing"
-    buckets:
-      landing: "{landing}"
-      archive: "{landing}-archive"
+# What `config edit NAME` writes for a pipeline that has no file yet.
+PIPELINE_STUB = """\
+# Each block names one resource type, as `dectl config example` shows. The file's name is the
+# pipeline's, so this one is `dectl {name}`.
+buckets: {{}}
 """
 
 
@@ -471,10 +491,11 @@ class PipelineConfig(ResourceModel):
 
 
 class DectlConfig(StrictModel):
-    # Substituted as {name} into every string in the file at load, by `variables.expand_variables`.
+    # Substituted as {name} into every string of every file at load, by `variables.expand_variables`.
     variables: dict[str, str] = {}
     defaults: Defaults
     jenkins: JenkinsConfig | None = None
+    # Read from `pipelines/<name>.yaml`, never from config.yaml: `read_config_files` builds it.
     pipelines: dict[str, PipelineConfig]
 
     @model_validator(mode='wrap')
@@ -931,13 +952,53 @@ def config_value_faults(config: DectlConfig) -> list[UnusableValue]:
     return problems
 
 
+def pipelines_dir() -> Path:
+    return CONFIG_PATH.parent / 'pipelines'
+
+
+def read_yaml(path: Path) -> Any:
+    # The open file rather than its text, so a YAML error's position names the file.
+    with path.open('rb') as handle:
+        return yaml.safe_load(handle)
+
+
+def pipelines_fault(kind: str, message: str, value: Any) -> InitErrorDetails:
+    return InitErrorDetails(type=PydanticCustomError(kind, message), loc=('pipelines',), input=value)
+
+
+def read_config_files() -> Any:
+    """config.yaml, with each `pipelines/<name>.yaml` beside it held under `pipelines` as `<name>`.
+
+    A file in `pipelines/` that would not be read is refused rather than skipped, because a
+    pipeline saved as `sales.yml` would leave the command tree with nothing said. A dotfile is
+    skipped, since an editor's swap file is no pipeline."""
+    raw = read_yaml(CONFIG_PATH)
+    if not isinstance(raw, dict):
+        return raw
+    faults = []
+    if 'pipelines' in raw:
+        held = raw['pipelines']
+        message = f'config.yaml cannot hold pipelines; each one is its own file, pipelines/<name>{PIPELINE_SUFFIX}'
+        faults.append(pipelines_fault('pipelines_in_config', message, list(held) if isinstance(held, dict) else held))
+    directory = pipelines_dir()
+    pipelines = {}
+    for path in sorted(directory.iterdir()) if directory.is_dir() else []:
+        if path.name.startswith('.'):
+            continue
+        if path.suffix != PIPELINE_SUFFIX or not path.is_file():
+            message = f'{path.name} is not a pipeline file; a pipeline is pipelines/<name>{PIPELINE_SUFFIX}'
+            faults.append(pipelines_fault('not_a_pipeline_file', message, path.name))
+            continue
+        pipelines[path.stem] = read_yaml(path)
+    if faults:
+        raise ValidationError.from_exception_data('DectlConfig', faults)
+    return {**raw, 'pipelines': pipelines}
+
+
 def load_config() -> DectlConfig | None:
     if not CONFIG_PATH.exists():
         return None
-    # The open file rather than its text, so a YAML error's position names the file.
-    with CONFIG_PATH.open('rb') as handle:
-        raw = yaml.safe_load(handle)
-    return DectlConfig.model_validate(raw)
+    return DectlConfig.model_validate(read_config_files())
 
 
 # The two ways a config that exists still fails to load: YAML that will not parse, and YAML that
@@ -961,23 +1022,23 @@ def config_error_outcome(exc: yaml.YAMLError | ValidationError) -> str:
 
 
 def config_error_headline(exc: yaml.YAMLError | ValidationError) -> str:
-    """The one-line summary: which file, and which of the two failures it hit."""
+    """The one-line summary: which directory, and which of the two failures it hit. Each detail line names its file."""
     kind = 'is not valid YAML' if isinstance(exc, yaml.YAMLError) else 'does not match the expected schema'
-    return f'config at {CONFIG_PATH} {kind}:'
+    return f'config in {CONFIG_PATH.parent} {kind}:'
 
 
 def describe_config_error(exc: yaml.YAMLError | ValidationError) -> list[str]:
     """The failure as indented detail lines: where it is, what is wrong, and what was rejected.
 
     The rejected value is carried because it is what identifies the offending key when the
-    location alone is ambiguous — `pipelines.p.step_function` names a plausible spelling, and
+    location alone is ambiguous — `pipelines/p.yaml step_function` names a plausible spelling, and
     the value is the block the reader has to go and find. Pydantic's error code and docs URL
     are dropped, since both restate the message in the line above them.
     """
     if isinstance(exc, ValidationError):
         lines = []
         for err in exc.errors():
-            location = '.'.join(str(part) for part in err['loc']) or '(root)'
+            location = file_and_key(tuple(err['loc']))
             rejected = repr(err['input'])
             if len(rejected) > MAX_INPUT_CHARS:
                 rejected = f'{rejected[:MAX_INPUT_CHARS]}…'
@@ -1007,7 +1068,18 @@ def report_config_error(exc: yaml.YAMLError | ValidationError) -> None:
     stderr_console.print(EDIT_CONFIG)
 
 
+def template_files() -> dict[str, str]:
+    """Every file of the example config, by its path within the config directory."""
+    pipelines = {f'pipelines/{name}{PIPELINE_SUFFIX}': text for name, text in TEMPLATE_PIPELINES.items()}
+    return {'config.yaml': TEMPLATE_CONFIG, **pipelines}
+
+
 def init_config() -> Path:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    """Write the example config. A pipeline file already there is left as it is."""
+    pipelines_dir().mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(TEMPLATE_CONFIG)
+    for name, text in TEMPLATE_PIPELINES.items():
+        path = pipelines_dir() / f'{name}{PIPELINE_SUFFIX}'
+        if not path.exists():
+            path.write_text(text)
     return CONFIG_PATH

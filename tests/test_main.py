@@ -31,10 +31,11 @@ runner = RefusalRunner()
 
 
 def dectl_with_config(config: Path, tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    """The installed entry point in a fresh process, because main.py builds the tree from the file at import."""
+    """The installed entry point in a fresh process, because main.py builds the tree from the files at import."""
     home = tmp_path / 'xdg-config'
     (home / 'dectl').mkdir(parents=True, exist_ok=True)
     shutil.copy(config, home / 'dectl' / 'config.yaml')
+    shutil.copytree(config.parent / 'pipelines', home / 'dectl' / 'pipelines', dirs_exist_ok=True)
     env = {key: value for key, value in os.environ.items() if key != 'DECTL_ENV'}
     env |= {'XDG_CONFIG_HOME': str(home), 'XDG_CACHE_HOME': str(tmp_path / 'xdg-cache')}
     entry_point = Path(sys.executable).parent / 'dectl'
@@ -217,7 +218,7 @@ def test_list_reports_the_validation_error_not_a_missing_config(invalid_config):
 
     assert result.exit_code == 1
     assert 'does not match the expected schema' in result.stderr
-    assert 'pipelines.p.step_function' in result.stderr
+    assert 'pipelines/p.yaml step_function' in result.stderr
     assert 'config init' not in result.stderr
 
 
@@ -234,7 +235,7 @@ def test_search_reports_the_validation_error_before_touching_aws(invalid_config)
     result = runner.invoke(app, ['search', 'anything'])
 
     assert result.exit_code == 1
-    assert 'pipelines.p.step_function' in result.stderr
+    assert 'pipelines/p.yaml step_function' in result.stderr
 
 
 def test_an_aws_refusal_no_command_handles_ends_in_its_own_sentence(monkeypatch):
@@ -276,7 +277,7 @@ def test_the_bare_banner_carries_the_whole_diagnostic(invalid_config):
     # reason rather than a pointer to the command that would print it.
     result = runner.invoke(app, [])
 
-    assert 'pipelines.p.step_function: Extra inputs are not permitted' in result.stderr
+    assert 'pipelines/p.yaml step_function: Extra inputs are not permitted' in result.stderr
     # Not 'Usage: dectl': rich styles the two words differently, so an escape sequence sits
     # between them wherever color is on, and the phrase is only contiguous without it.
     assert 'Usage:' in result.stdout

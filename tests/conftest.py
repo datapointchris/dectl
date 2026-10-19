@@ -18,12 +18,14 @@ import re
 os.environ.pop('FORCE_COLOR', None)
 
 import json
+import shutil
 import time
 import uuid
 from pathlib import Path
 
 import boto3
 import pytest
+import yaml
 from botocore.exceptions import ClientError
 from typer.testing import CliRunner
 
@@ -48,10 +50,31 @@ from dectl.output import stderr_console
 console.width = 160
 stderr_console.width = 160
 
-# A config in the shape a real multi-pipeline one takes, and the definition it deploys: one
-# top-level variable fanned out to two pipelines through each one's prefix, a YAML merge, and
-# JSONata substitutions.
+# A config in the shape a real multi-pipeline one takes, and the definition it deploys: variables
+# in config.yaml fanned out to two pipeline files through each one's prefix, and JSONata
+# substitutions.
 LAYERED_CONFIG = Path(__file__).parent / 'layered_pipelines_config' / 'config.yaml'
+
+
+def write_config_files(directory: Path, text: str) -> Path:
+    """One document written the way dectl reads it: each `pipelines` entry to its own file.
+
+    A document that does not parse, or holds no `pipelines` mapping, goes to config.yaml whole."""
+    config = directory / 'config.yaml'
+    pipelines = directory / 'pipelines'
+    shutil.rmtree(pipelines, ignore_errors=True)
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError:
+        raw = None
+    if not (isinstance(raw, dict) and isinstance(raw.get('pipelines'), dict)):
+        config.write_text(text)
+        return config
+    pipelines.mkdir()
+    for name, pipeline in raw.pop('pipelines').items():
+        (pipelines / f'{name}.yaml').write_text(yaml.safe_dump(pipeline))
+    config.write_text(yaml.safe_dump(raw))
+    return config
 
 
 class RefusalRunner(CliRunner):

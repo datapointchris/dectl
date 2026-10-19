@@ -2,11 +2,11 @@
 
 A variable is static, so it is replaced once, at load, in the raw mapping YAML parsed. `{env}` is
 not: `--env` is parsed after the command tree is built, so it passes through untouched for
-`env.substitute_env` to replace at each command. The top-level block reaches the whole file, and
-a pipeline's block reaches that pipeline alone.
+`env.substitute_env` to replace at each command. The block in `config.yaml` reaches every
+pipeline, and a pipeline file's block reaches that pipeline alone.
 
 Nothing a variable could replace is overwritten. `env` cannot be a variable's name, a pipeline
-cannot redefine a top-level variable, and a `{name}` with no variable defined for it is refused
+cannot redefine one from `config.yaml`, and a `{name}` with no variable defined for it is refused
 rather than left in place to reach AWS as a literal name. `{{name}}` is the escape, and renders
 as `{name}`. Mapping keys are aliases and are never substituted.
 
@@ -56,6 +56,22 @@ class Expansion(NamedTuple):
 
 def dotted(location: Location) -> str:
     return '.'.join(str(part) for part in location)
+
+
+def file_and_key(location: Location) -> str:
+    """A location in the assembled config as the file a reader opens, then the key within it.
+
+    `pipelines` alone is the directory, which is where a refusal about a pipeline file is placed."""
+    if location == ('pipelines',):
+        return 'pipelines/'
+    if location[:1] == ('pipelines',):
+        file, key = f'pipelines/{location[1]}.yaml', location[2:]
+    else:
+        file, key = 'config.yaml', location
+    return f'{file} {dotted(key)}' if key else file
+
+
+TOP_LEVEL_VARIABLES = file_and_key(('variables',))
 
 
 class Pass:
@@ -119,14 +135,14 @@ class Pass:
             where = ' and '.join(definition.origin for definition in self.defined[name])
             unseen = f'variable {token} is defined in {where}, which this value cannot see'
             if location[0] != 'pipelines' or len(location) < 2:
-                return f"{unseen}. A pipeline's variables reach that pipeline alone; move it to the top-level variables block"
-            here = f'pipelines.{location[1]}.variables'
+                return f"{unseen}. A pipeline's variables reach that pipeline alone; move it to {TOP_LEVEL_VARIABLES}"
+            here = file_and_key(('pipelines', location[1], 'variables'))
             built_from = self.pipeline_variables_in(name)
             if built_from:
                 return f'{unseen}. It is built from the pipeline variables {built_from}, so define {token} in {here} too'
             return (
                 f"{unseen}. A pipeline's variables reach that pipeline alone: define it in {here} too, or move it "
-                'to the top-level variables block if every pipeline shares its value'
+                f'to {TOP_LEVEL_VARIABLES} if every pipeline shares its value'
             )
         missing = f'variable {token} cannot be found'
         escape = f'If a job or Jenkinsfile fills {token} itself, write {{{token}}}'
@@ -138,7 +154,7 @@ class Pass:
 
     def pipeline_variables_in(self, name: str) -> str:
         """The `{name}`s a definition of `name` uses that no top-level variable supplies, joined for a message."""
-        top_level = {other for other, definitions in self.defined.items() if any(d.origin == 'variables' for d in definitions)}
+        top_level = {other for other, definitions in self.defined.items() if any(d.origin == TOP_LEVEL_VARIABLES for d in definitions)}
         found: list[str] = []
         for definition in self.defined[name]:
             if isinstance(definition.written, str):
@@ -168,7 +184,7 @@ class Pass:
         for position, (name, value) in enumerate(block.items()):
             here = (*location, name)
             # Defined as itself whenever it is refused, so its references report nothing more.
-            placeholder = Variable(f'{{{name}}}', dotted(here))
+            placeholder = Variable(f'{{{name}}}', file_and_key(here))
             if not isinstance(name, str) or not NAME.fullmatch(name):
                 self.fault(
                     'invalid_variable_name',
@@ -179,7 +195,9 @@ class Pass:
             elif name == RESERVED_NAME:
                 self.fault('reserved_variable', f'{ENV_PLACEHOLDER} is the environment and cannot be a variable', here, value)
             elif name in inherited:
-                self.fault('shadowed_variable', f'{{{name}}} is a top-level variable; a pipeline cannot redefine it', here, value)
+                self.fault(
+                    'shadowed_variable', f'{{{name}}} is defined in {TOP_LEVEL_VARIABLES}; a pipeline cannot redefine it', here, value
+                )
             elif unquoted_token(value):
                 self.unquoted(value, scope, here)
                 scope[name] = placeholder
@@ -189,7 +207,7 @@ class Pass:
             else:
                 substituted = self.substitute(value, scope, here, frozenset(names[position + 1 :]))
                 built_from = self.changed[here][1].variables if here in self.changed else ()
-                scope[name] = Variable(substituted, dotted(here), built_from)
+                scope[name] = Variable(substituted, file_and_key(here), built_from)
             resolved[name] = scope[name].value if name in scope and name not in inherited else value
         return resolved, scope
 
@@ -214,10 +232,12 @@ def unquoted_token(value: Any) -> bool:
 
 def defined_variables(raw: dict[Any, Any]) -> dict[str, list[Definition]]:
     """Every variable name the file defines, at either level, and each block defining it."""
-    blocks: list[tuple[str, Any]] = [('variables', raw.get('variables'))]
+    blocks: list[tuple[str, Any]] = [(TOP_LEVEL_VARIABLES, raw.get('variables'))]
     pipelines = raw.get('pipelines')
     if isinstance(pipelines, dict):
-        blocks += [(f'pipelines.{name}.variables', p.get('variables')) for name, p in pipelines.items() if isinstance(p, dict)]
+        blocks += [
+            (file_and_key(('pipelines', name, 'variables')), p.get('variables')) for name, p in pipelines.items() if isinstance(p, dict)
+        ]
     defined: dict[str, list[Definition]] = {}
     for origin, block in blocks:
         if isinstance(block, dict):
