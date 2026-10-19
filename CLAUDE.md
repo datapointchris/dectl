@@ -279,8 +279,9 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
 - **A wait is chosen per invocation, not per function.** A synchronous run waits on the function,
   a durable one on the whole execution, and `--async` only on Lambda taking the event.
   `invoke_read_timeout` tells them apart, which is why it resolves after `--async` is read.
-- **A durable Lambda's unit of work is the execution**, so `durable: true` *swaps* `run`/`logs`
-  for `executions`, `history` and `logs EXECUTION` (`add_durable_verbs`). `history` reads the
+- **A durable Lambda's unit of work is the execution**, so `durable: true` *swaps* the ordinary
+  `run`/`logs` for durable ones and adds `executions` and `history` (`add_durable_verbs`). Its
+  `run` starts an execution and prints the ARN, and `logs` takes an EXECUTION. `history` reads the
   checkpoint log via `GetDurableExecutionHistory`; `logs` reads CloudWatch filtered on the
   execution ARN. `GetDurableExecution` returns `Error` unwrapped, while history events wrap it in
   a `Payload`/`Truncated` envelope.
