@@ -211,6 +211,8 @@ def test_validate_json_emits_the_unusable_paths_as_objects(monkeypatch, tmp_path
                 'alias': 'notifier',
                 'field': 'source_dir',
                 'configured': 'modules/code',
+                'written': None,
+                'variables': [],
                 'path': str(root / 'modules' / 'code'),
                 'fault': 'absent',
             }

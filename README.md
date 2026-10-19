@@ -484,13 +484,19 @@ another. `config show` and `list` print the substituted values.
 
 Each of these is refused when the config loads, naming the key:
 
-- a variable named `env`;
+- a variable named `env`, or named with anything but letters, digits, `_` and `-`;
 - a pipeline variable redefining a top-level one;
 - a `{name}` that names no variable, so a typo never reaches AWS as a literal name;
+- an unquoted `{name}`, which YAML reads as a mapping;
 - a value that is not a string.
 
-`${NAME}` is never a variable, so a Terraform placeholder or an environment-variable reference
-passes through. Neither is a brace holding anything but a name, such as a JSON payload.
+A value another program fills, such as a Glue argument `s3://b/out/{date}/`, writes the braces
+doubled: `s3://b/out/{{date}}/` reaches the job as `s3://b/out/{date}/`. `${NAME}` is never a
+variable, so a Terraform placeholder or an environment-variable reference passes through. Neither
+is a brace holding anything but a name, such as a JSON payload.
+
+A fault found in a substituted value, such as a bucket name S3 refuses, prints the value as the
+file wrote it beside the variables it used, since the character to fix may sit in a variable.
 
 Quote a value that starts with `{`. YAML reads a leading brace as an inline mapping, so
 `raw: {raw_bucket}` parses as a mapping and `raw: {company}-raw` does not parse. A brace later in

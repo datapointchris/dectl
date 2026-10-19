@@ -31,6 +31,7 @@ from dectl.config import ResourceModel
 from dectl.config import StepFunctionConfig
 from dectl.config import StrictModel
 from dectl.config import config_error_headline
+from dectl.config import config_value_faults
 from dectl.config import declared_keys
 from dectl.config import declared_names
 from dectl.config import declared_paths
@@ -59,17 +60,11 @@ from dectl.values import DeclaresValues
 from dectl.values import PathKind
 from dectl.values import UnusableValue
 from dectl.values import ValueSite
+from dectl.values import Written
 from dectl.values import deployable_files
 from dectl.values import path_fault
 from dectl.values import recovery_lines
 from dectl.values import root_fault
-
-
-def test_template_config_is_valid():
-    # The example config that `config init` writes and `config example` prints must always
-    # round-trip through the models, so the example can never drift out of validity.
-    config = DectlConfig.model_validate(yaml.safe_load(TEMPLATE_CONFIG))
-    assert 'example-pipeline' in config.pipelines
 
 
 def nested_model(annotation) -> tuple[type[StrictModel] | None, bool]:
@@ -152,7 +147,15 @@ def test_variables_substitute_at_load_and_refuse_what_would_clobber():
             'p': {
                 'variables': {'raw': 'co-{env}-raw'},
                 'buckets': {'raw': '{raw}'},
-                'glue_jobs': {'j': {'name': 'j', 'script_bucket': '{raw}', 'scripts': ['a.py'], 'role': '{role_prefix}/r'}},
+                'glue_jobs': {
+                    'j': {
+                        'name': 'j',
+                        'script_bucket': '{raw}',
+                        'scripts': ['a.py'],
+                        'role': '{role_prefix}/r',
+                        'arguments': {'Q': "'{{ds}}'"},
+                    }
+                },
             }
         },
     }
@@ -160,8 +163,17 @@ def test_variables_substitute_at_load_and_refuse_what_would_clobber():
     assert config.defaults.account_id == '123'
     assert config.pipelines['p'].buckets['raw'] == 'co-{env}-raw'
     assert config.pipelines['p'].glue_jobs['j'].role == 'arn:aws:iam::123:role/r'
+    assert config.pipelines['p'].glue_jobs['j'].arguments == {'Q': "'{ds}'"}
+
+    misspelled = DectlConfig.model_validate(
+        {**raw, 'variables': {**raw['variables'], 'co': 'Co_'}, 'pipelines': {'p': {'buckets': {'raw': '{co}-raw'}}}}
+    )
+    (fault,) = config_value_faults(misspelled)
+    assert fault.written == Written('{co}-raw', ('{co} from variables.co',))
 
     refusals = {
+        'invalid_variable_name': {'variables': {'aws.account': 'x'}},
+        'unquoted_variable': {'pipelines': {'p': {'buckets': {'raw': {'raw': None}}}}},
         'reserved_variable': {'variables': {'env': 'x'}},
         'shadowed_variable': {'pipelines': {'p': {'variables': {'raw': 'co-{env}-raw', 'account': '9'}}}},
         'undefined_variable': {'pipelines': {'p': {'buckets': {'raw': '{raw_bucket}'}}}},

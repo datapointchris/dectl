@@ -12,6 +12,8 @@ from pydantic import BaseModel
 from pydantic import BeforeValidator
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import ModelWrapValidatorHandler
+from pydantic import PrivateAttr
 from pydantic import ValidationError
 from pydantic import field_validator
 from pydantic import model_validator
@@ -29,6 +31,7 @@ from dectl.values import DeclaresValues
 from dectl.values import PathKind
 from dectl.values import UnusableValue
 from dectl.values import ValueSite
+from dectl.values import Written
 from dectl.values import bucket_fault
 from dectl.values import expand_home
 from dectl.values import home_fault
@@ -54,7 +57,8 @@ TEMPLATE_CONFIG = """\
 # Quote a value that starts with `{`. YAML reads a leading brace as an inline mapping, so
 # `x: {company}-raw` does not parse and `x: {env}` parses as a mapping. A brace later in the
 # value, as in the ARNs below, needs no quotes. Quote an account id as well, because YAML reads
-# an unquoted 0123 as an octal number.
+# an unquoted 0123 as an octal number. A {name} naming no variable is refused; a literal one,
+# for a job or a Jenkinsfile to fill, is written doubled, as `{{date}}` in `source-copy` below.
 variables:
   account: "123456789012"
   region: us-east-2
@@ -116,6 +120,8 @@ pipelines:
         arguments:
           SOURCE_BUCKET: "{raw_bucket}"
           SOURCE_PREFIX: incoming
+          # The job fills {date} itself, so it reaches Glue with single braces.
+          OUTPUT_PATTERN: out/{{date}}/
       # A second job, sized the other way, and naming every optional key so each one is here to
       # copy. A real config names only the fields it wants dectl to decide; `dectl PIPELINE list`
       # prints which those are.
@@ -442,6 +448,9 @@ class PipelineConfig(ResourceModel):
     resolve_paths_from: str | None = None
     # Substituted as {name} into this pipeline's strings at load, by `variables.expand_variables`.
     variables: dict[str, str] = {}
+    # Location within this pipeline -> (value after variables, what the file wrote), for each
+    # string a variable changed. Set by `DectlConfig`, read by `written_for`.
+    _writings: dict[tuple[str | int, ...], tuple[str, Written]] = PrivateAttr(default_factory=dict)
     glue_jobs: dict[str, GlueJobConfig] = {}
     lambdas: dict[str, LambdaConfig] = {}
     step_functions: dict[str, StepFunctionConfig] = {}
@@ -460,10 +469,39 @@ class DectlConfig(StrictModel):
     jenkins: JenkinsConfig | None = None
     pipelines: dict[str, PipelineConfig]
 
-    @model_validator(mode='before')
+    @model_validator(mode='wrap')
     @classmethod
-    def substitute_variables(cls, raw: Any) -> Any:
-        return expand_variables(raw)
+    def substitute_variables(cls, raw: Any, handler: ModelWrapValidatorHandler['DectlConfig']) -> 'DectlConfig':
+        expansion = expand_variables(raw)
+        config = handler(expansion.config)
+        for name, pipeline in config.pipelines.items():
+            pipeline._writings = expansion.writings.get(name, {})
+        return config
+
+
+def site_of(pipeline: PipelineConfig, location: tuple[str | int, ...]) -> tuple[str, str, str] | None:
+    """The (resource, alias, field) a location within the pipeline is reported under, as `ValueSite` spells it."""
+    head = str(location[0])
+    if head in PipelineConfig.FIELD_RESOURCE:
+        alias = str(location[1]) if len(location) > 1 else ''
+        return PipelineConfig.site_resource(head), alias, head
+    held = getattr(pipeline, head, None)
+    if not isinstance(held, (ResourceModel, dict)):
+        return PipelineConfig.RESOURCE, '', head
+    if isinstance(held, ResourceModel) and len(location) > 1:
+        return type(held).site_resource(str(location[1])), '', str(location[1])
+    member = held.get(location[1]) if isinstance(held, dict) and len(location) > 2 else None
+    if isinstance(member, ResourceModel):
+        return type(member).site_resource(str(location[2])), str(location[1]), str(location[2])
+    return None
+
+
+def written_for(pipeline: PipelineConfig, site: ValueSite, configured: str) -> Written | None:
+    """What the file wrote for this resolved value at this site, where a config variable changed it."""
+    for location, (value, written) in pipeline._writings.items():
+        if site_of(pipeline, location) == tuple(site) and substitute_env(value) == configured:
+            return written
+    return None
 
 
 # The resource is `pipeline` because the key belongs to the pipeline block rather than to any
@@ -762,7 +800,7 @@ def pipeline_value_faults(
         return (not resource or site.resource == resource) and (not alias or site.alias == alias)
 
     def row(site: ValueSite, path: Path | None, fault: ConfigFault, configured: str) -> UnusableValue:
-        return UnusableValue(pipeline_name, site, path, fault, configured)
+        return UnusableValue(pipeline_name, site, path, fault, configured, written_for(pipeline, site, configured))
 
     def refused_values(found: list[UnusableValue]) -> set[tuple[ValueSite, str]]:
         """Which (site, value) pairs already carry a fault, so nothing reports one twice.
