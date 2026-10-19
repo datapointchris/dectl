@@ -6,6 +6,10 @@ and the test compares what each asked for. A write must match exactly, because a
 something else is the bug this verb could ship. A read the block makes must be one the verb makes.
 The verb may read more, because dectl also reads to report and to refuse.
 
+Each verb runs in the state where every check passes, and in each state where it refuses or falls
+back to another lookup. In a refusal both exit non-zero and write the same, which is nothing
+before the refusing call.
+
 Runs on the committed layered config's sales pipeline under `--env prod`. It configures every
 resource type, so every kind of block is driven."""
 
@@ -30,18 +34,20 @@ from typing import NamedTuple
 import pytest
 
 from dectl.asl import render_definition
-from dectl.commands.glue import build_job_update
+from dectl.commands.shell_equivalents import ICEBERG_FILTERS
 from dectl.commands.stepfunctions import read_definition_template
 from dectl.config import load_config
 from dectl.env import DEFAULT_ENV
 from dectl.env import render_env_model
 from dectl.env import set_active_environment
+from dectl.iceberg import epoch_datetime
+from dectl.iceberg import retention_summary
 from tests.conftest import LAYERED_CONFIG
 from tests.recording_endpoint import Call
 from tests.recording_endpoint import RecordingEndpoint
 from tests.recording_endpoint import Reply
 from tests.recording_endpoint import error_reply
-from tests.test_iceberg import four_commit_table
+from tests.test_iceberg import rolled_back_table
 
 PIPELINE = 'sales'
 ENVIRONMENT = 'prod'
@@ -65,10 +71,22 @@ RUN_ID = 'jr_5f0c1d'
 STARTED = 1760860980.5
 FIRST_EVENT_MS = 1760860981250
 LIVE_VERSION = '3'
+PREVIOUS_VERSION = '2'
 PUBLISHED_VERSION = '4'
+FUNCTION_VERSIONS = ('$LATEST', '1', PREVIOUS_VERSION, LIVE_VERSION)
 METADATA_BUCKET = 'acme-prod-sales-lake'
 METADATA_KEY = 'events/metadata/00004-c0ffee.gz.metadata.json'
-METADATA = gzip.compress(json.dumps(four_commit_table()).encode())
+
+
+def table_metadata() -> bytes:
+    """Rolled back, so the lineage and the snapshot log disagree, with its tag written ahead of its
+    branches, so a block that does not sort the refs prints them in another order."""
+    table = rolled_back_table()
+    table['refs'] = dict(reversed(table['refs'].items()))
+    return gzip.compress(json.dumps(table).encode())
+
+
+METADATA = table_metadata()
 OBJECT_HEADERS = {'ETag': '"c0ffee"', 'Last-Modified': 'Sun, 19 Oct 2025 07:43:00 GMT'}
 
 # The parameters that say how much to read or how it travelled, never what is read or written.
@@ -89,34 +107,67 @@ TRANSFER_PARAMS = frozenset(
     }
 )
 PAGING_PARAMS = frozenset({'Limit', 'Marker', 'MaxItems', 'MaxResults', 'NextToken', 'interleaved', 'limit', 'maxResults', 'nextToken'})
+READ_DROPPED = TRANSFER_PARAMS | PAGING_PARAMS | {'endTime'}
 # `aws s3 cp` sizes an object before it downloads it.
 TRANSFER_READS = frozenset({('s3', 'HeadObject')})
 READ_PREFIXES = ('Get', 'List', 'Describe', 'Head', 'Filter', 'Validate')
+# The reads whose answer a logs or history verb prints, so a block skipping one shows here.
+ANSWERING_READS = frozenset({'FilterLogEvents', 'GetDurableExecutionHistory', 'GetExecutionHistory'})
+# Writes a verb decides on from what it read, where its block stops at a comment instead.
+DECIDED_BY_DECTL = {('glue', 'deploy'): frozenset({'UpdateJob'})}
+# What a verb is run with here: a Glue deploy confirms a definition change, which nothing here
+# answers, and an iceberg read's rows are held to its block's.
+VERB_OPTIONS = {('glue', 'deploy'): ['--yes'], **{('iceberg', verb): ['--json'] for verb in ICEBERG_FILTERS}}
 
 
-class MachineScenario(NamedTuple):
-    """What the live state machine holds when a definition block runs."""
+class Scenario(NamedTuple):
+    """What the endpoint holds when a verb and its block run, and whether the verb refuses there."""
 
     name: str
-    live_is_rendered: bool
-    revision_id: str | None
+    refuses: bool = False
+    live_is_rendered: bool = False
+    revision_id: str | None = 'revision-1'
+    live_alias_exists: bool = True
+    validation_allowed: bool = True
+    definition_valid: bool = True
+    job_exists: bool = True
+    function_fails: bool = False
+    ran: bool = True
+    execution_version: str = LIVE_VERSION
+    log_groups_written: bool = True
 
 
-DIFFERS = MachineScenario('differs', live_is_rendered=False, revision_id='revision-1')
-UNCHANGED = MachineScenario('unchanged', live_is_rendered=True, revision_id='revision-1')
+# Every lookup finds something, and the live definition differs from the rendered one.
+CHECKS_PASS = Scenario('checks pass')
+UNCHANGED = Scenario('definition unchanged', live_is_rendered=True)
 # Created by Terraform from this file and never updated since, so it carries no revisionId.
-NEVER_UPDATED = MachineScenario('never-updated', live_is_rendered=True, revision_id=None)
+NEVER_UPDATED = Scenario('never updated', live_is_rendered=True, revision_id=None)
+NO_LIVE_ALIAS = Scenario('live alias missing', refuses=True, live_alias_exists=False)
+VALIDATION_DENIED = Scenario('validation denied', validation_allowed=False)
+DEFINITION_REJECTED = Scenario('definition rejected', refuses=True, definition_valid=False)
+# Deployed before Terraform has created the job in this environment.
+JOB_MISSING = Scenario('job missing', refuses=True, job_exists=False)
+FUNCTION_FAILS = Scenario('function error', refuses=True, function_fails=True)
+NOTHING_RAN = Scenario('nothing ran', refuses=True, ran=False)
+# Right after deploy --publish moves the alias, the live version holds no execution yet.
+ON_PREVIOUS_VERSION = Scenario('execution on a previous version', execution_version=PREVIOUS_VERSION)
+UNWRITTEN_LOG_GROUPS = Scenario('log groups never written', log_groups_written=False)
 
 
 class Case(NamedTuple):
     command: str
-    scenario: MachineScenario
+    scenario: Scenario
     named_by_scenario: bool
 
     @property
     def id(self) -> str:
         verb = self.command.removeprefix(f'dectl {PIPELINE} ')
         return f'{verb} [{self.scenario.name}]' if self.named_by_scenario else verb
+
+
+def resource_and_verb(command: str) -> tuple[str, str]:
+    words = [word for word in command.split()[2:] if word != '--publish']
+    return words[0], words[-1]
 
 
 def isolated_environment(config_home: Path, scratch: Path, caller: str = 'COLLECTOR', endpoint_url: str = '') -> dict[str, str]:
@@ -148,17 +199,50 @@ def write_config(config_home: Path, jenkins_url: str) -> None:
     (config_home / 'dectl' / 'config.yaml').write_text(text)
 
 
+def write_tiny_config(config_home: Path, resources: str) -> None:
+    """A config holding one pipeline, `tiny`, whose resources are the YAML given, indented under it."""
+    (config_home / 'dectl').mkdir(parents=True, exist_ok=True)
+    body = ''.join(f'    {line}\n' for line in resources.splitlines())
+    (config_home / 'dectl' / 'config.yaml').write_text(
+        f'defaults:\n  account_id: "{ACCOUNT}"\n  region: {REGION}\npipelines:\n  tiny:\n{body}'
+    )
+
+
+def run_commands(environment: dict[str, str], pipeline: str = PIPELINE, cwd: Path = CONFIG_DIR) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(DECTL), '--env', ENVIRONMENT, pipeline, 'commands', '--json'], capture_output=True, text=True, env=environment, cwd=cwd
+    )
+
+
 def printed_blocks(environment: dict[str, str], pipeline: str = PIPELINE) -> dict[str, str]:
     """Each command `commands --json` names, and the shell it prints for it."""
-    printed = subprocess.run(
-        [str(DECTL), '--env', ENVIRONMENT, pipeline, 'commands', '--json'],
-        capture_output=True,
-        text=True,
-        env=environment,
-        cwd=CONFIG_DIR,
-        check=True,
-    )
+    printed = run_commands(environment, pipeline)
+    assert printed.returncode == 0, printed.stderr
     return {block['command']: block['shell'] for block in json.loads(printed.stdout)['commands']}
+
+
+def scenarios_for(command: str, durable_aliases: set[str]) -> list[Scenario]:
+    """The states a verb runs in: every check passing, and each state it refuses or falls back in."""
+    match command.split()[2:]:
+        case ['sfn', _, 'plan', '--publish']:
+            return [CHECKS_PASS, NO_LIVE_ALIAS]
+        case ['sfn', _, 'deploy']:
+            return [CHECKS_PASS, UNCHANGED, VALIDATION_DENIED, DEFINITION_REJECTED]
+        case ['glue', _, 'deploy']:
+            return [CHECKS_PASS, JOB_MISSING]
+        case ['sfn', _, 'deploy', '--publish']:
+            return [CHECKS_PASS, UNCHANGED, NEVER_UPDATED, NO_LIVE_ALIAS]
+        case ['sfn', _, 'logs']:
+            return [CHECKS_PASS, NOTHING_RAN]
+        case ['glue', _, 'logs']:
+            return [CHECKS_PASS, NOTHING_RAN, UNWRITTEN_LOG_GROUPS]
+        case ['lambda', _, 'run']:
+            return [CHECKS_PASS, FUNCTION_FAILS]
+        case ['lambda', _, 'history']:
+            return [CHECKS_PASS, ON_PREVIOUS_VERSION, NOTHING_RAN]
+        case ['lambda', alias, 'logs'] if alias in durable_aliases:
+            return [CHECKS_PASS, ON_PREVIOUS_VERSION, NOTHING_RAN, UNWRITTEN_LOG_GROUPS]
+    return [CHECKS_PASS]
 
 
 def collect_cases() -> list[Case]:
@@ -166,13 +250,10 @@ def collect_cases() -> list[Case]:
         root = Path(scratch)
         write_config(root / 'config', 'https://jenkins.example.com')
         commands = printed_blocks(isolated_environment(root / 'config', root / 'collector'))
+    durable_aliases = {words[3] for words in map(str.split, commands) if words[2:5:2] == ['lambda', 'executions']}
     cases = []
     for command in commands:
-        words = command.split()
-        if words[2:3] == ['sfn'] and words[4:5] == ['deploy']:
-            scenarios = [DIFFERS, UNCHANGED, NEVER_UPDATED] if '--publish' in words else [DIFFERS, UNCHANGED]
-        else:
-            scenarios = [DIFFERS]
+        scenarios = scenarios_for(command, durable_aliases)
         cases += [Case(command, scenario, len(scenarios) > 1) for scenario in scenarios]
     return cases
 
@@ -181,30 +262,18 @@ CASES = collect_cases()
 MONITOR = next(case for case in CASES if case.command == f'dectl {PIPELINE} monitor')
 
 
-class LiveState(NamedTuple):
-    """What the endpoint holds for the sales pipeline under prod: each Glue job converged with the
-    config, so no deploy sends UpdateJob, and the flow's rendered definition."""
-
-    glue_jobs: dict[str, dict]
-    rendered_definition: str
-
-
-def resolved_live_state() -> LiveState:
+def resolved_live_state() -> str:
+    """The flow's definition rendered for the sales pipeline under prod."""
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr('dectl.config.CONFIG_PATH', LAYERED_CONFIG)
         config = load_config()
     assert config is not None
     set_active_environment(ENVIRONMENT, '--env')
     try:
-        pipeline = config.pipelines[PIPELINE]
-        jobs = {}
-        for configured in pipeline.glue_jobs.values():
-            job = render_env_model(configured)
-            jobs[job.name] = {'Name': job.name, **build_job_update({'Command': {'Name': 'pythonshell'}}, job).definition}
-        flow = render_env_model(pipeline.step_functions['flow'])
+        flow = render_env_model(config.pipelines[PIPELINE].step_functions['flow'])
         assert flow.definition_file is not None
         template = read_definition_template(CONFIG_DIR / flow.definition_file)
-        return LiveState(jobs, render_definition(template, flow.definition_substitutions).text)
+        return render_definition(template, flow.definition_substitutions).text
     finally:
         set_active_environment(DEFAULT_ENV, 'default')
 
@@ -220,22 +289,20 @@ def function_configuration(name: str, version: str = '$LATEST') -> dict:
     }
 
 
-def durable_execution(function_name: str) -> dict:
-    arn = f'arn:aws:lambda:{REGION}:{ACCOUNT}:function:{function_name}:{LIVE_VERSION}/durable-execution/nightly/7a1e'
+def durable_execution(function_name: str, version: str) -> dict:
+    arn = f'arn:aws:lambda:{REGION}:{ACCOUNT}:function:{function_name}:{version}/durable-execution/nightly/7a1e'
     return {
         'DurableExecutionArn': arn,
         'DurableExecutionName': 'nightly',
-        'FunctionArn': f'arn:aws:lambda:{REGION}:{ACCOUNT}:function:{function_name}:{LIVE_VERSION}',
+        'FunctionArn': f'arn:aws:lambda:{REGION}:{ACCOUNT}:function:{function_name}:{version}',
         'Status': 'SUCCEEDED',
         'StartTimestamp': STARTED,
         'EndTimestamp': STARTED + 90,
     }
 
 
-def live_machine(arn: str, scenario: MachineScenario, state: LiveState) -> dict:
-    definition = (
-        state.rendered_definition if scenario.live_is_rendered else state.rendered_definition.replace('Loads a day', 'Loaded a day')
-    )
+def live_machine(arn: str, scenario: Scenario, rendered_definition: str) -> dict:
+    definition = rendered_definition if scenario.live_is_rendered else rendered_definition.replace('Loads a day', 'Loaded a day')
     machine = {
         'stateMachineArn': arn,
         'name': arn.rpartition(':')[2],
@@ -248,15 +315,21 @@ def live_machine(arn: str, scenario: MachineScenario, state: LiveState) -> dict:
     return machine | ({'revisionId': scenario.revision_id} if scenario.revision_id else {})
 
 
-def aws_reply(call: Call, scenario: MachineScenario, state: LiveState) -> Reply | None:
+def aws_reply(call: Call, scenario: Scenario, rendered_definition: str) -> Reply | None:
     params = call.params
     job_run = {'Id': RUN_ID, 'JobName': params.get('JobName'), 'StartedOn': STARTED, 'JobRunState': 'SUCCEEDED'}
     execution_arn = f'{params.get("stateMachineArn", "").replace(":stateMachine:", ":execution:")}:run-1'
+    unwritten = error_reply('ResourceNotFoundException', 'The specified log group does not exist.')
     match call.service, call.operation:
         case 'glue', 'GetJob':
-            return Reply(body={'Job': state.glue_jobs[params['JobName']]})
+            if not scenario.job_exists:
+                return error_reply('EntityNotFoundException', f'Job {params["JobName"]} not found')
+            # A job the config would change, so a deploy sends UpdateJob.
+            return Reply(body={'Job': {'Name': params['JobName'], 'Command': {'Name': 'pythonshell'}}})
+        case 'glue', 'UpdateJob':
+            return Reply(body={'JobName': params['JobName']})
         case 'glue', 'GetJobRuns':
-            return Reply(body={'JobRuns': [job_run]})
+            return Reply(body={'JobRuns': [job_run] if scenario.ran else []})
         case 'glue', 'GetJobRun':
             return Reply(body={'JobRun': job_run})
         case 'glue', 'StartJobRun':
@@ -271,16 +344,20 @@ def aws_reply(call: Call, scenario: MachineScenario, state: LiveState) -> Reply 
         case 's3', 'GetObject':
             return Reply(body=METADATA, headers=OBJECT_HEADERS)
         case 'logs', 'DescribeLogStreams':
+            if not scenario.log_groups_written:
+                return unwritten
             stream = {'logStreamName': '2025/10/19/[$LATEST]c0ffee', 'firstEventTimestamp': FIRST_EVENT_MS}
             return Reply(body={'logStreams': [stream | {'lastEventTimestamp': FIRST_EVENT_MS + 2000}]})
         case 'logs', 'FilterLogEvents':
-            return Reply(body={'events': [], 'searchedLogStreams': []})
+            return Reply(body={'events': [], 'searchedLogStreams': []}) if scenario.log_groups_written else unwritten
         case 'logs', 'StartLiveTail':
             return error_reply('AccessDeniedException', 'this endpoint holds a live tail request but serves no stream')
         case 'lambda', 'GetFunction':
             return Reply(body={'Configuration': function_configuration(params['FunctionName'])})
         case 'lambda', 'GetFunctionConfiguration' | 'UpdateFunctionCode':
             return Reply(body=function_configuration(params['FunctionName']))
+        case 'lambda', 'ListVersionsByFunction':
+            return Reply(body={'Versions': [function_configuration(params['FunctionName'], version) for version in FUNCTION_VERSIONS]})
         case 'lambda', 'PublishVersion':
             return Reply(201, function_configuration(params['FunctionName'], PUBLISHED_VERSION))
         case 'lambda', 'GetAlias' | 'UpdateAlias':
@@ -290,24 +367,41 @@ def aws_reply(call: Call, scenario: MachineScenario, state: LiveState) -> Reply 
         case 'lambda', 'Invoke':
             headers = {'X-Amz-Executed-Version': LIVE_VERSION if 'Qualifier' in params else '$LATEST'}
             if 'Qualifier' in params:
-                headers['X-Amz-Durable-Execution-Arn'] = durable_execution(params['FunctionName'])['DurableExecutionArn']
+                headers['X-Amz-Durable-Execution-Arn'] = durable_execution(params['FunctionName'], LIVE_VERSION)['DurableExecutionArn']
+            if scenario.function_fails:
+                headers['X-Amz-Function-Error'] = 'Unhandled'
+                return Reply(body={'errorMessage': 'the handler raised', 'errorType': 'ValueError'}, headers=headers)
             return Reply(body={'processed': 0}, headers=headers)
         case 'lambda', 'ListDurableExecutionsByFunction':
-            return Reply(body={'DurableExecutions': [durable_execution(params['FunctionName'])]})
+            holds = scenario.ran and params['Qualifier'] == scenario.execution_version
+            executions = [durable_execution(params['FunctionName'], scenario.execution_version)] if holds else []
+            return Reply(body={'DurableExecutions': executions})
         case 'lambda', 'GetDurableExecution':
-            function_name = params['DurableExecutionArn'].split(':function:')[1].split(':')[0]
-            return Reply(body=durable_execution(function_name))
+            function_name, version = params['DurableExecutionArn'].split(':function:')[1].split('/')[0].split(':')
+            return Reply(body=durable_execution(function_name, version))
         case 'lambda', 'GetDurableExecutionHistory':
             return Reply(body={'Events': []})
         case 'stepfunctions', 'DescribeStateMachine':
-            return Reply(body=live_machine(params['stateMachineArn'], scenario, state))
+            return Reply(body=live_machine(params['stateMachineArn'], scenario, rendered_definition))
         case 'stepfunctions', 'ValidateStateMachineDefinition':
+            if not scenario.validation_allowed:
+                return error_reply('AccessDeniedException', 'not authorized to perform: states:ValidateStateMachineDefinition')
+            if not scenario.definition_valid:
+                diagnostic = {
+                    'severity': 'ERROR',
+                    'code': 'SCHEMA_VALIDATION_FAILED',
+                    'message': 'no state named Load',
+                    'location': '/StartAt',
+                }
+                return Reply(body={'result': 'FAIL', 'diagnostics': [diagnostic]})
             return Reply(body={'result': 'OK', 'diagnostics': []})
         case 'stepfunctions', 'UpdateStateMachine':
             return Reply(body={'updateDate': STARTED, 'revisionId': 'revision-2'})
         case 'stepfunctions', 'PublishStateMachineVersion':
             return Reply(body={'creationDate': STARTED, 'stateMachineVersionArn': f'{params["stateMachineArn"]}:{PUBLISHED_VERSION}'})
         case 'stepfunctions', 'DescribeStateMachineAlias':
+            if not scenario.live_alias_exists:
+                return error_reply('ResourceNotFound', f'Resource not found: {params["stateMachineAliasArn"]}')
             machine_arn = params['stateMachineAliasArn'].rpartition(':')[0]
             routing = [{'stateMachineVersionArn': f'{machine_arn}:{LIVE_VERSION}', 'weight': 100}]
             alias = {'stateMachineAliasArn': params['stateMachineAliasArn'], 'name': 'live', 'routingConfiguration': routing}
@@ -318,7 +412,8 @@ def aws_reply(call: Call, scenario: MachineScenario, state: LiveState) -> Reply 
             return Reply(body={'executionArn': execution_arn, 'startDate': STARTED})
         case 'stepfunctions', 'ListExecutions':
             execution = {'executionArn': execution_arn, 'stateMachineArn': params['stateMachineArn'], 'name': 'run-1'}
-            return Reply(body={'executions': [execution | {'status': 'SUCCEEDED', 'startDate': STARTED}]})
+            executions = [execution | {'status': 'SUCCEEDED', 'startDate': STARTED}] if scenario.ran else []
+            return Reply(body={'executions': executions})
         case 'stepfunctions', 'GetExecutionHistory':
             return Reply(body={'events': []})
     return None
@@ -383,7 +478,7 @@ def observe(index: int, case: Case, text: str, endpoint: RecordingEndpoint, conf
     scratch = root / f'case-{index}'
     (scratch / 'home').mkdir(parents=True)
     verb_caller, *shell_callers = callers(index)
-    argv = [str(DECTL), '--env', ENVIRONMENT, *shlex.split(case.command)[1:]]
+    argv = [str(DECTL), '--env', ENVIRONMENT, *shlex.split(case.command)[1:], *VERB_OPTIONS.get(resource_and_verb(case.command), [])]
 
     environment = isolated_environment(config_home, scratch, verb_caller, endpoint.url)
     if case is MONITOR:
@@ -422,13 +517,13 @@ def observed(tmp_path_factory) -> dict[str, Observation]:
         fake = root / 'bin' / name
         fake.write_text(FAKE_COMMAND)
         fake.chmod(0o755)
-    state = resolved_live_state()
+    rendered_definition = resolved_live_state()
     scenarios = {caller: case.scenario for index, case in enumerate(CASES) for caller in callers(index)}
 
     def respond(call: Call) -> Reply | None:
         if call.service == 'jenkins':
             return jenkins_reply(call)
-        return aws_reply(call, scenarios[call.caller], state)
+        return aws_reply(call, scenarios[call.caller], rendered_definition)
 
     with RecordingEndpoint(respond) as endpoint:
         config_home = root / 'config'
@@ -464,21 +559,18 @@ def canonical(call: Call, dropped: frozenset[str] = TRANSFER_PARAMS) -> str:
     return json.dumps([call.service, call.operation, params], sort_keys=True, default=lambda raw: hashlib.sha256(raw).hexdigest())
 
 
-def write_set(run: Run) -> Counter[str]:
-    return Counter(canonical(call) for call in run.calls if writes(call))
+def write_set(run: Run, decided: frozenset[str] = frozenset()) -> Counter[str]:
+    return Counter(canonical(call) for call in run.calls if writes(call) and call.operation not in decided)
 
 
 def read_set(run: Run) -> set[str]:
     return {
-        canonical(call, TRANSFER_PARAMS | PAGING_PARAMS | {'endTime'})
-        for call in run.calls
-        if not writes(call) and (call.service, call.operation) not in TRANSFER_READS
+        canonical(call, READ_DROPPED) for call in run.calls if not writes(call) and (call.service, call.operation) not in TRANSFER_READS
     }
 
 
-def expected_block_exit(case: Case) -> int:
-    # `diff` reports the difference the plan exists to show, and exits 1 for it.
-    return 1 if case.command.endswith(' sfn flow plan') and not case.scenario.live_is_rendered else 0
+def answering_reads(run: Run) -> set[str]:
+    return {canonical(call, READ_DROPPED) for call in run.calls if call.operation in ANSWERING_READS}
 
 
 def block_run(seen: Observation, shell: str) -> Run:
@@ -492,15 +584,46 @@ def block_run(seen: Observation, shell: str) -> Run:
 def test_each_printed_block_makes_the_calls_its_verb_makes(case, shell, observed):
     seen = observed[case.id]
     block = block_run(seen, shell)
-    assert seen.verb.returncode == 0, seen.verb.stderr
-    assert block.returncode == expected_block_exit(case), block.stderr
-    assert write_set(block) == write_set(seen.verb)
+    assert (seen.verb.returncode != 0) == case.scenario.refuses, seen.verb.stderr
+    assert (block.returncode != 0) == case.scenario.refuses, block.stderr
+    assert write_set(block) == write_set(seen.verb, DECIDED_BY_DECTL.get(resource_and_verb(case.command), frozenset()))
     assert read_set(block) <= read_set(seen.verb), seen.text
+    assert answering_reads(block) == answering_reads(seen.verb), seen.text
     assert block.commands == seen.verb.commands
     if case.command.endswith(' s3 export'):
         assert seen.text == seen.verb.stdout
     elif case.command.endswith(' uri'):
         assert block.stdout == seen.verb.stdout
+
+
+def held_to(block: Any, verb: Any, where: str = 'rows') -> None:
+    """Assert a block's jq output carries its verb's --json rows: every field the verb prints, with a
+    timestamp as the epoch milliseconds it was printed from and a retention as the ref's own fields."""
+    if isinstance(verb, list):
+        assert isinstance(block, list) and len(block) == len(verb), where
+        for index, (block_row, verb_row) in enumerate(zip(block, verb, strict=True)):
+            held_to(block_row, verb_row, f'{where}[{index}]')
+        return
+    if not isinstance(verb, dict) or where.endswith('.summary'):
+        assert block == verb, where
+        return
+    assert isinstance(block, dict), where
+    if 'timestamp' in verb:
+        millis = block['timestamp_ms']
+        assert verb['timestamp'] == (None if millis is None else str(epoch_datetime(millis))), f'{where}.timestamp'
+    if 'retention' in verb:
+        ref = {'min-snapshots-to-keep': block['min_snapshots_to_keep'], 'max-snapshot-age-ms': block['max_snapshot_age_ms']}
+        assert verb['retention'] == retention_summary(ref | {'max-ref-age-ms': block['max_ref_age_ms']}), f'{where}.retention'
+    for key in verb.keys() - {'timestamp', 'retention'}:
+        assert key in block, f'{where}.{key}'
+        held_to(block[key], verb[key], f'{where}.{key}')
+
+
+@pytest.mark.parametrize('case', [case for case in CASES if resource_and_verb(case.command)[0] == 'iceberg'], ids=lambda case: case.id)
+def test_each_iceberg_block_prints_its_verbs_rows_for_a_rolled_back_table(case, observed):
+    seen = observed[case.id]
+    block = block_run(seen, 'bash')
+    held_to(json.loads(block.stdout), json.loads(seen.verb.stdout))
 
 
 @pytest.mark.parametrize('shell', SHELLS)
@@ -541,9 +664,38 @@ def test_every_verb_of_the_pipeline_has_a_block(tmp_path):
     assert printed == verbs
 
 
-def test_the_printed_invoke_sends_one_request_where_the_cli_alone_retries(tmp_path):
-    """A retried invoke runs the function again. The CLI retries a failed call by default, which the
-    control arm shows, so it is the block's own AWS_MAX_ATTEMPTS=1 that holds it to one."""
+TEMPLATE_MISSING_A_SUBSTITUTION = '{"StartAt": "${first_state}", "States": {}}\n'
+
+
+@pytest.mark.parametrize('reach', ['a relative lambda source run from another directory', 'a template missing a substitution'])
+def test_commands_refuses_a_pipeline_its_deploy_doors_refuse(reach, tmp_path):
+    """A block naming a file that does not resolve from here, or a definition dectl cannot render,
+    would run against the wrong file or send nothing deploy would send."""
+    config_home = tmp_path / 'config'
+    if reach == 'a relative lambda source run from another directory':
+        write_tiny_config(config_home, 'lambdas:\n  handler:\n    name: tiny-handler\n    source_dir: lambdas/handler')
+        pipeline, expected = 'tiny', 'lambdas/handler'
+    else:
+        template = tmp_path / 'flow.asl.json.tftpl'
+        template.write_text(TEMPLATE_MISSING_A_SUBSTITUTION)
+        write_tiny_config(config_home, f'step_functions:\n  flow:\n    name: tiny-flow\n    definition_file: {template}')
+        pipeline, expected = 'tiny', '${first_state}'
+    ran = run_commands(isolated_environment(config_home, tmp_path / 'scratch'), pipeline, cwd=tmp_path)
+    assert ran.returncode == 1
+    assert ran.stdout == ''
+    assert expected in ran.stderr
+
+
+def test_commands_warns_that_an_env_named_by_no_bucket_changed_nothing(tmp_path):
+    """A bucket naming its environment outright is the same bucket under every --env."""
+    write_tiny_config(tmp_path / 'config', 'buckets:\n  raw: acme-dev-raw')
+    ran = run_commands(isolated_environment(tmp_path / 'config', tmp_path / 'scratch'), 'tiny', cwd=tmp_path)
+    assert ran.returncode == 0, ran.stderr
+    assert f'--env={ENVIRONMENT} changed nothing' in ran.stderr
+
+
+def test_the_printed_invoke_sends_one_request_to_a_function_that_fails_after_it_starts(tmp_path):
+    """A retried invoke runs the function again, and the aws CLI retries a 500 unless told not to."""
     write_config(tmp_path / 'config', 'https://jenkins.example.com')
     (tmp_path / 'scratch' / 'home').mkdir(parents=True)
 
@@ -553,14 +705,9 @@ def test_the_printed_invoke_sends_one_request_where_the_cli_alone_retries(tmp_pa
     with RecordingEndpoint(respond) as endpoint:
         environment = isolated_environment(tmp_path / 'config', tmp_path / 'scratch', 'ONCE', endpoint.url)
         shell = printed_blocks(environment)[f'dectl {PIPELINE} lambda process run']
-        assert 'AWS_MAX_ATTEMPTS=1 ' in shell
-        for caller, text in [('ONCE', shell), ('RETRIED', shell.replace('AWS_MAX_ATTEMPTS=1 ', ''))]:
-            environment = isolated_environment(tmp_path / 'config', tmp_path / 'scratch', caller, endpoint.url)
-            subprocess.run(['bash', '-c', text], capture_output=True, text=True, env=environment, cwd=CONFIG_DIR, timeout=120)
-        once = [call for call in endpoint.calls_from('ONCE') if call.operation == 'Invoke']
-        retried = [call for call in endpoint.calls_from('RETRIED') if call.operation == 'Invoke']
-    assert len(once) == 1
-    assert len(retried) > 1
+        subprocess.run(['bash', '-c', shell], capture_output=True, text=True, env=environment, cwd=CONFIG_DIR, timeout=120)
+        invokes = [call for call in endpoint.calls_from('ONCE') if call.operation == 'Invoke']
+    assert len(invokes) == 1
 
 
 def test_the_printed_zip_leaves_out_what_the_deploy_leaves_out(tmp_path):
@@ -570,11 +717,7 @@ def test_the_printed_zip_leaves_out_what_the_deploy_leaves_out(tmp_path):
         (source / relative).parent.mkdir(parents=True, exist_ok=True)
         (source / relative).write_text(relative)
     config_home = tmp_path / 'config'
-    (config_home / 'dectl').mkdir(parents=True)
-    (config_home / 'dectl' / 'config.yaml').write_text(
-        f'defaults:\n  account_id: "{ACCOUNT}"\n  region: {REGION}\n'
-        f'pipelines:\n  tiny:\n    lambdas:\n      handler:\n        name: tiny-handler\n        source_dir: {source}\n'
-    )
+    write_tiny_config(config_home, f'lambdas:\n  handler:\n    name: tiny-handler\n    source_dir: {source}')
     scratch = tmp_path / 'scratch'
     (scratch / 'home').mkdir(parents=True)
 

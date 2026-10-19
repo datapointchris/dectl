@@ -404,32 +404,50 @@ Run from `/home/me/pipelines` against the full config below, three of its blocks
 
 ```bash
 # The calls behind every dectl sales verb, for environment prod (from --env).
-# Each block runs alone in bash or zsh, with aws (v2), jq, python3, curl or mount-s3 where it uses them.
+# Each block runs alone in bash or zsh, with aws (v2), jq (1.7 or later), python3, curl or mount-s3 where it uses them.
 # Pasted into an interactive zsh, a # line runs as a command unless `setopt interactivecomments` is on.
 
 # dectl sales glue load deploy
+# dectl reads the job before it uploads, so a job it cannot read gets nothing.
+aws glue get-job --job-name acme-prod-sales-load --region us-east-2 > /dev/null &&
 aws s3 cp /home/me/pipelines/load.py s3://acme-prod-sales-scripts/scripts/load.py --no-guess-mime-type --region us-east-2
 # Where the definition differs from the config, dectl then confirms and sends UpdateJob.
 # UpdateJob replaces the whole definition, so plan is where that difference shows.
 
 # dectl sales lambda process run
 # One attempt and no read timeout: a retried invoke runs the function again.
-AWS_MAX_ATTEMPTS=1 aws lambda invoke --function-name acme-prod-sales-process-orders --payload '{}' --cli-binary-format raw-in-base64-out --cli-read-timeout 0 --region us-east-2 /dev/stdout
+PAYLOAD=$(mktemp) &&
+RESPONSE=$(AWS_MAX_ATTEMPTS=1 aws lambda invoke --function-name acme-prod-sales-process-orders --payload '{}' --cli-binary-format raw-in-base64-out --cli-read-timeout 0 --output json --region us-east-2 "$PAYLOAD") &&
+cat "$PAYLOAD" &&
+echo &&
+printf '%s\n' "$RESPONSE" | jq -j 'if .FunctionError then "function returned an error (\(.FunctionError))\n" | halt_error(1) else empty end'
 
 # dectl sales jenkins apply
 curl --silent --show-error --fail-with-body --insecure --user "$JENKINS_USER:$JENKINS_API_TOKEN" --data-urlencode ENVIRONMENT=prod --data-urlencode ACTION=deploy https://jenkins.example.com/job/data-engineering/job/sales-deploy/buildWithParameters
 ```
 
-Each block makes the calls its verb makes. So a verb runs where dectl is not installed, and a
-runbook can carry the exact call. Names are resolved for the active environment, as the verb
-resolves them. File paths are absolute, so a block runs from any directory. Nothing is colored,
-even on a terminal, so a copied line is the line.
+Each block sends the writes its verb sends, in the state where the verb's checks pass. `monitor`
+follows the same log groups through StartLiveTail, which needs `logs:StartLiveTail` and is billed
+per session minute. So a verb runs where dectl is not installed, and a runbook can carry the exact
+call. Names are resolved for the active environment, as the verb resolves them. File paths are
+absolute, so a block runs from any directory. Nothing is colored, even on a terminal, so a copied
+line is the line.
+
+A block stops at its first failure and exits non-zero where its verb refuses. A Lambda `run` exits
+1 when the function returns an error. A `logs` block with no run to read refuses, and one whose
+log group nothing has written to prints that and exits 0. A durable `history` or `logs` block
+looks for the newest execution on the live version, then across the newest published versions
+and `$LATEST`, as the verb does. `commands` itself refuses a pipeline its deploys refuse: a file
+path that does not resolve from where it runs, or a definition template missing a substitution.
 
 A block stops where dectl decides. Glue `plan` prints the `get-job` and a comment, because comparing
-a definition with the config is dectl's work. Glue `deploy` uploads the scripts and says when dectl
-would send `UpdateJob`. The `sfn` deploy blocks write only when the rendered definition's bytes
-differ from the live one, as the verb does. Its `plan` diffs the two as sorted JSON and exits 1
-when they differ.
+a definition with the config is dectl's work. Glue `deploy` reads the job, uploads the scripts and
+says when dectl would send `UpdateJob`. The `sfn` deploy blocks validate the definition before they
+write, and with `--publish` read the live alias too. They write only when the rendered definition's
+bytes differ from the live one, as the verb does. Its `plan` prints the two as a diff of sorted JSON and exits 0 on a
+difference, as the verb does.
+
+The iceberg blocks need jq 1.7 or later, because jq 1.6 rounds a snapshot id's 19 digits.
 
 A Jenkins credential written as `${NAME}` prints as `$NAME`, the variable dectl reads. A token
 written into the config is never printed. The block reads `$JENKINS_TOKEN` instead and says so.

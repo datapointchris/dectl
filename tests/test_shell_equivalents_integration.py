@@ -3,8 +3,10 @@
 Opt-in: `uv run pytest --run-integration`. It creates a bucket, a Glue job, a standard and a
 durable Lambda function and three state machines, prints the blocks for a config naming them, runs
 each in bash, and deletes everything. The offline test pins that a block sends what its verb
-sends. This one runs the blocks against the services, whose answers decide what a block does next:
-whether a definition is unchanged, which revision to publish, which version an alias names.
+sends, and refuses and falls back where its verb does. This one runs the blocks against the
+services, whose answers decide what a block does next: whether a definition is unchanged, which
+revision to publish, which version an alias names, and which earlier version holds the newest
+execution.
 
 It costs a Python Shell run stopped as it starts, a few Lambda invocations and one Step Functions
 execution, which fails at its first state because the flow invokes a function in no real account.
@@ -252,9 +254,9 @@ def invoked(client, name: str, qualifier: str = '$LATEST') -> dict:
     return json.loads(client.invoke(FunctionName=name, Qualifier=qualifier)['Payload'].read())
 
 
-def first_json_value(printed: str) -> object:
-    """The payload `aws lambda invoke ... /dev/stdout` writes ahead of its own response document."""
-    return json.JSONDecoder().raw_decode(printed)[0]
+def printed_payload(printed: str) -> object:
+    """The function's response, which a run block prints last."""
+    return json.loads(printed.splitlines()[-1])
 
 
 def test_the_printed_lambda_blocks_deploy_invoke_and_publish(session, live, lambda_role_arn):
@@ -265,7 +267,7 @@ def test_the_printed_lambda_blocks_deploy_invoke_and_publish(session, live, lamb
         assert invoked(client, name) == {'orders': []}
         assert invoked(client, name, 'live') == BEFORE
 
-        assert first_json_value(run_cleanly(live, 'lambda', 'process', 'run')) == {'orders': []}
+        assert printed_payload(run_cleanly(live, 'lambda', 'process', 'run')) == {'orders': []}
 
         run_cleanly(live, 'lambda', 'process', 'deploy', '--publish')
         assert client.get_alias(FunctionName=name, Name='live')['FunctionVersion'] == '2'
@@ -279,18 +281,29 @@ def test_the_printed_durable_blocks_publish_run_and_find_the_execution(session, 
         run_cleanly(live, 'lambda', 'workflow', 'deploy', '--publish')
         assert client.get_alias(FunctionName=name, Name='live')['FunctionVersion'] == '2'
 
-        assert first_json_value(run_cleanly(live, 'lambda', 'workflow', 'run')) == {'stage': 'done'}
+        started = run_cleanly(live, 'lambda', 'workflow', 'run')
+        assert printed_payload(started) == {'stage': 'done'}
 
         [execution] = json.loads(run_cleanly(live, 'lambda', 'workflow', 'executions'))['DurableExecutions']
         assert execution['FunctionArn'].endswith(f':{name}:2')
-        history = json.loads(run_cleanly(live, 'lambda', 'workflow', 'history'))
-        assert history['Events']
+        assert started.splitlines()[0] == f'durable execution: {execution["DurableExecutionArn"]}'
+        assert json.loads(run_cleanly(live, 'lambda', 'workflow', 'history'))['Events']
+
+        # Right after deploy --publish moves the alias, its version holds no execution, so both
+        # blocks find the run on version 2 through the sweep.
+        client.update_function_configuration(FunctionName=name, Environment={'Variables': {'STAGE': 'after'}})
+        client.get_waiter('function_updated_v2').wait(FunctionName=name)
+        run_cleanly(live, 'lambda', 'workflow', 'deploy', '--publish')
+        assert client.get_alias(FunctionName=name, Name='live')['FunctionVersion'] == '3'
+        assert json.loads(run_cleanly(live, 'lambda', 'workflow', 'history'))['Events']
+        # The role writes no logs, so the group is one nothing has created.
+        assert 'does not exist' in run_cleanly(live, 'lambda', 'workflow', 'logs')
 
 
 @pytest.fixture
 def machines(session, live, states_role_arn):
     sfn = session.client('stepfunctions')
-    rendered = resolved_live_state().rendered_definition
+    rendered = resolved_live_state()
     arns: dict[str, str] = {}
     try:
         for scenario in MACHINES:
@@ -314,7 +327,7 @@ def machines(session, live, states_role_arn):
 
 def test_the_printed_state_machine_blocks_plan_deploy_publish_and_start(session, live, machines):
     sfn = session.client('stepfunctions')
-    rendered = resolved_live_state().rendered_definition
+    rendered = resolved_live_state()
 
     def described(scenario: str) -> dict:
         return sfn.describe_state_machine(stateMachineArn=machines[scenario])
@@ -323,12 +336,10 @@ def test_the_printed_state_machine_blocks_plan_deploy_publish_and_start(session,
         listed = sfn.list_state_machine_versions(stateMachineArn=machines[scenario])['stateMachineVersions']
         return sorted(version['stateMachineVersionArn'] for version in listed)
 
-    planned = run_block(live, 'sfn', 'plain', 'plan')
-    assert planned.returncode == 1, planned.stderr
-    assert '"result": "OK"' in planned.stdout
+    assert '+  "QueryLanguage": "JSONata",' in run_cleanly(live, 'sfn', 'plain', 'plan')
     run_cleanly(live, 'sfn', 'plain', 'deploy')
     assert described('plain')['definition'] == rendered
-    run_cleanly(live, 'sfn', 'plain', 'plan')
+    assert run_cleanly(live, 'sfn', 'plain', 'plan') == ''
 
     changed = machines['changed']
     run_cleanly(live, 'sfn', 'changed', 'deploy', '--publish')

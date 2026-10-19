@@ -83,11 +83,14 @@ names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
   several resources. It tails every resource its `monitor` config block selects as one
   time-ordered stream via `logs.tail_log_groups`.
 - `commands` is the other pipeline-level command, a read printing each verb's aws, curl and
-  mount-s3 lines for the active env. `commands/shell_equivalents.py` builds every block from the
-  constants and renderers its verb uses (`script_uri`, `LOG_START_SLACK_MS`, `invoke_qualifier`,
-  `render_definition`), so a change to a verb reaches its block. A new verb needs a block, and
+  mount-s3 lines for the active env. In `commands/shell_equivalents.py`, names, windows, URIs and
+  qualifiers come from the verb's own constants and renderers (`script_uri`, `LOG_START_SLACK_MS`,
+  `invoke_qualifier`, `render_definition`). The iceberg filters, the archive and start-time
+  scripts, and the order of each block's calls are written again in shell, so a change to a verb's
+  refusals or fallbacks needs the same change in its block. A new verb needs a block, and
   `test_every_verb_of_the_pipeline_has_a_block` fails until it has one. A block stops where dectl
   decides: Glue's `plan` and `deploy` print a comment where dectl would diff and send `UpdateJob`.
+  `commands` runs the deploy doors' refusals first, so a pipeline they refuse prints no blocks.
 
 ## Config
 
@@ -411,8 +414,11 @@ is an HTTP server that decodes each request with botocore's own models into an o
 parameters, whichever of body, query string or header carried them. `test_shell_equivalents.py`
 runs each of `sales`' verbs through dectl and its block through bash and zsh, with the real aws
 CLI, jq, python3 and curl, each under its own access key. A write must match exactly, and a block's
-reads must be ones the verb makes. The zsh half runs where zsh is installed, which CI's runner is
-not. `AWS_DISABLE_HOST_PREFIX_INJECTION` keeps StartLiveTail on the endpoint rather than a
+reads must be ones the verb makes. `scenarios_for` runs a verb in every state it refuses or falls
+back in as well, and the two must exit alike there. A write dectl decides from what it read, which
+its block leaves to a comment, is named in `DECIDED_BY_DECTL` and left out of the comparison. Each
+iceberg block's jq output is held to its verb's `--json` rows on a rolled-back table. The zsh half
+runs where zsh is installed, which CI's runner is not. `AWS_DISABLE_HOST_PREFIX_INJECTION` keeps StartLiveTail on the endpoint rather than a
 `streaming-` host. `test_shell_equivalents_integration.py` then runs the writing blocks against
 resources it creates, because a block's next step reads the service's answer.
 
