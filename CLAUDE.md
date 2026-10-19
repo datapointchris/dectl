@@ -8,7 +8,7 @@ Jenkins deploys) from a single config file. Installed via `uv tool install`; the
 
 There is no static command tree. `src/dectl/main.py` calls `load_config()` **at module import**
 and then builds the Typer app dynamically: it loops over the pipelines in
-`$XDG_CONFIG_HOME/dectl/config.yaml` and, for each one, attaches only the resource sub-apps
+`$XDG_CONFIG_HOME/dectl/pipelines/` and, for each one, attaches only the resource sub-apps
 that the pipeline actually defines. A pipeline with just `buckets` gets an `s3` command and
 nothing else; add `glue_jobs` and a `glue` command appears. Running `dectl` with no config still works
 (commands like `config init` are always present) because `load_config()` returns `None` rather
@@ -86,8 +86,22 @@ names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
 ## Config
 
 `src/dectl/config.py` holds the Pydantic models plus `load_config()` / `init_config()`. Config
-lives at `$XDG_CONFIG_HOME/dectl/config.yaml`, resolved by `pyclisteno.paths.config_home()`, so
-the variable is honored rather than `~/.config` being hardcoded. `buckets`, `glue_jobs` and
+lives in `$XDG_CONFIG_HOME/dectl/`, resolved by `pyclisteno.paths.config_home()`, so the variable
+is honored rather than `~/.config` being hardcoded. `config.yaml` holds `defaults`, `jenkins` and
+`variables`. Each pipeline is `pipelines/<name>.yaml`, and the file stem is the pipeline's name.
+
+**The split ends at the loader.** `read_config_files` joins the files into the one mapping
+`DectlConfig` validates, each pipeline under `pipelines.<stem>`, so everything after loading sees
+the same shape a single file once gave it. It refuses a `pipelines` key in `config.yaml` and any
+file in `pipelines/` not named `<name>.yaml`, skipping one whose name starts with `.`. Both refusals are
+`ValidationError`s located at `('pipelines',)`, so the one renderer reports them. Locations are
+rendered by `variables.file_and_key`, which turns `('pipelines', name, ...)` into
+`pipelines/<name>.yaml <keys>` and anything else into `config.yaml <keys>`. The fault rows and
+variable origins use it too. Every path is derived from `CONFIG_PATH.parent` at the call, because
+tests point `CONFIG_PATH` at a temporary directory in both `config` and `config_cmd`.
+`tests/conftest.py`'s `write_config_files` writes a one-document test config the same way.
+
+`buckets`, `glue_jobs` and
 `lambdas` are all `alias -> real-name` mappings. A lambda's `live_alias` (not `alias`, which would
 collide with the CLI's "alias" = the config key) is the AWS Lambda alias that `deploy --publish`
 repoints. Its `durable` flag selects the durable verb set and is the invocation qualifier's
@@ -101,14 +115,15 @@ because it would share that command's name and only one of the two would survive
 
 **`variables` is substituted before the models see the file, and `{env}` is not.**
 `variables.expand_variables` runs inside `DectlConfig`'s `wrap` validator. It replaces `{name}` in
-every string of the raw mapping: the top-level block reaches the whole file, a pipeline's block
+every string of the raw mapping: the block in `config.yaml` reaches every file, a pipeline's block
 that pipeline alone. So every field downstream, the path checks included, sees a substituted value
 and needs no change for a new field to take variables. `{env}` passes through to the `resolve_*`
-chokepoints. A pipeline variable redefining a top-level one, a variable named `env` or a name
+chokepoints. A pipeline variable redefining one from `config.yaml`, a variable named `env` or a name
 `{name}` cannot reach, an undefined `{name}`, an unquoted `{name}` YAML read as a mapping, and a
 non-string value are each a `ValidationError` carrying the key's own location. dectl gives YAML
-anchors and merges no handling of its own. `{{name}}` is the escape for a literal `{name}` another program fills. `${NAME}` is skipped by the token's
-lookbehind, which keeps the Jenkins credentials and Terraform placeholders out of reach.
+anchors and merges no handling of its own. `{{name}}` is the escape for a literal `{name}` another
+program fills. `${NAME}` is skipped by the token's lookbehind, which keeps the Jenkins credentials
+and Terraform placeholders out of reach.
 `aws_names_only` drops `variables`, because a `{env}` held there names nothing and would silence
 the env-effect guard.
 
@@ -119,12 +134,13 @@ variables in it, not only a value no line of the file holds. A new door building
 
 This is interpolation and references between keys, which the general advice is to answer with a
 generated config instead. It is here because an account id, a company prefix and a bucket recur
-inside many names of one hand-written file, and nothing generates this one.
+inside many names of a hand-written config, and nothing generates this one.
 
-**`TEMPLATE_CONFIG` is the single source for the example config.** `config init` writes it and
-`config example` prints it (highlighted on a TTY, plain when piped). It holds one of every option
-and every form a value takes, and names each alias for what it shows. A test asserts it
-round-trips through the models, so update it with any model change. Its
+**`TEMPLATE_CONFIG` and `TEMPLATE_PIPELINES` are the single source for the example config.**
+`template_files` maps each to its path. `config init` writes them and `config example` prints
+each under a `# <path>` line (highlighted on a TTY, plain when piped). Together they hold one of
+every option and every form a value takes, and name each alias for what it shows. A test asserts
+they round-trip through the models, so update them with any model change. Its
 `resolve_paths_from` line stays commented: uncommented, it names a directory no machine has, and
 `config init` would write a config that fails `config validate`.
 
@@ -137,8 +153,9 @@ stderr, keeps the rejected value because it identifies an ambiguous location, an
 because a rejected list renders as `['a']`, which rich would eat as a style tag.
 
 `config edit` resolves the editor via `$VISUAL` → `$EDITOR` with no hardcoded fallback,
-`shlex.split`s it, resolves the binary with `shutil.which`, and seeds the template first if no
-config exists.
+`shlex.split`s it, and resolves the binary with `shutil.which`, before writing anything. Bare, it
+opens `config.yaml`, seeding the template first if none exists. `config edit NAME` opens
+`pipelines/NAME.yaml`, writing `PIPELINE_STUB` first if it is absent.
 
 ### Paths
 
@@ -380,16 +397,17 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
 `--run-integration`, because they create and delete real resources.
 
 **`tests/layered_pipelines_config/` is a config in the shape a real multi-pipeline one takes, and
-the README's full example is that file verbatim.** It configures every resource type. Top-level
-variables fan out to two pipelines through each one's prefix, and `finance` is written out like
-`sales` under its own pipeline and dataset. The scripts and Lambda sources it names sit beside it,
-so its relative paths resolve. `test_config.py` loads it through `load_config` for the load-time
-faults and refusals. Its README test holds the README's config and template blocks equal to these
-files. `test_main.py` starts the installed `dectl`
-against it in a fresh process, because `main.py` builds the tree from the file at import.
+the README's full example is its `config.yaml` and `pipelines/sales.yaml` verbatim.** It
+configures every resource type. The variables in `config.yaml` fan out to two pipeline files
+through each one's prefix, and `finance.yaml` is written out like `sales.yaml` under its own
+pipeline and dataset. The scripts and Lambda sources it names sit beside it, so its relative paths
+resolve. `test_config.py` loads it through `load_config` for the load-time faults and refusals.
+Its README test holds the README's config and template blocks equal to these files.
+`test_main.py` starts the installed `dectl` against it in a fresh process, because `main.py`
+builds the tree from the files at import.
 `test_stepfunctions_integration.py` deploys its `flow.asl.json.tftpl` with `finance`'s
 substitutions, so live Step Functions validates the JSONata. A config shape that has to work goes
-in this file rather than in a test's inline dict. The template is named `.tftpl`, Terraform's
+in these files rather than in a test's inline dict. The template is named `.tftpl`, Terraform's
 extension for a `templatefile()` template, so the JSON hook does not read it before it is rendered.
 
 **Anything that writes to AWS gets a live test.** A failure here is read once, from output, with

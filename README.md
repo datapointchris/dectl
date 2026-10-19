@@ -463,8 +463,10 @@ Every model rejects unknown keys. `config validate` checks that the files parse,
 and name values that can be used. Each fault names its file and the key within it, as in
 `pipelines/sales.yaml glue_jobs.load.role`. A `pipelines` block in `config.yaml` is refused, and so
 is any file in `pipelines/` not named `<name>.yaml`, so a pipeline is never silently left out. A
-dotfile there, such as an editor's swap file, is skipped. Bucket names are checked on any machine. `script_bucket` and
-every entry under `buckets` must be a name S3 accepts, as the active environment resolves it. A
+file there whose name starts with `.`, such as an editor's swap file, is skipped.
+
+Bucket names are checked on any machine. `script_bucket` and every entry under `buckets` must be a
+name S3 accepts, as the active environment resolves it. A
 refused name is printed beside every arm of S3's naming rule, reserved prefixes and suffixes
 included. How each Glue script key is written is checked on any machine too. Whether a file is
 present needs a directory to look in, which `resolve_paths_from` supplies.
