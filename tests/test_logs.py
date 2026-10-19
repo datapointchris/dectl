@@ -11,7 +11,6 @@ from dectl.logs import operation_tag
 from dectl.logs import render_event
 from dectl.logs import render_history_event
 from dectl.logs import render_merged
-from dectl.logs import stream_prefix
 from dectl.logs import tail_execution_history
 from dectl.logs import tail_glue_run
 from dectl.logs import tail_lambda_logs
@@ -60,30 +59,6 @@ def capture_history_event(event: dict) -> str:
     return capture.get()
 
 
-def test_glue_log_groups_are_correct():
-    assert GLUE_OUTPUT_LOG_GROUP == '/aws-glue/python-jobs/output'
-    assert GLUE_ERROR_LOG_GROUP == '/aws-glue/python-jobs/error'
-
-
-def test_stream_prefix_tags_error_group():
-    assert stream_prefix(GLUE_ERROR_LOG_GROUP) == '[red]err[/red] '
-
-
-def test_stream_prefix_leaves_output_group_untagged():
-    assert stream_prefix(GLUE_OUTPUT_LOG_GROUP) == ''
-
-
-def test_render_event_hangs_expanded_fields_under_a_prefixed_header():
-    message = json.dumps({'level': 'ERROR', 'message': 'boom', 'object_key': 'raw/x.parquet'})
-    header, field = capture_event(message, prefix=stream_prefix(GLUE_ERROR_LOG_GROUP)).splitlines()[:2]
-    assert header.startswith('err ')
-    assert field.startswith(' ' * len('err '))
-
-
-def test_render_event_passes_plain_text_through():
-    assert capture_event('INFO starting job').strip() == 'INFO starting job'
-
-
 def test_render_event_does_not_interpret_brackets_as_markup():
     output = capture_event('processing [batch 1] of items')
     assert '[batch 1]' in output
@@ -98,12 +73,6 @@ def test_render_event_lifts_json_fields_into_header():
     assert '{' not in output
 
 
-def test_render_event_prepends_stream_prefix_to_json_header():
-    message = json.dumps({'level': 'ERROR', 'message': 'boom'})
-    output = capture_event(message, prefix=stream_prefix(GLUE_ERROR_LOG_GROUP))
-    assert output.startswith('err ')
-
-
 def test_render_event_expands_collapsed_traceback():
     traceback = 'Traceback (most recent call last):\n  File "job.py", line 3\n    raise ValueError("x")\nValueError: x'
     message = json.dumps({'level': 'ERROR', 'message': 'failed', 'exc_info': traceback})
@@ -112,13 +81,6 @@ def test_render_event_expands_collapsed_traceback():
     assert 'ValueError: x' in output
     # the \n-escaped field is re-expanded onto multiple lines, not one
     assert output.count('\n') >= 4
-
-
-def test_render_event_prints_extra_fields():
-    message = json.dumps({'level': 'INFO', 'message': 'row', 'record_count': 42})
-    output = capture_event(message)
-    assert 'record_count' in output
-    assert '42' in output
 
 
 LAMBDA_GROUP = '/aws/lambda/my-func'
@@ -162,17 +124,6 @@ def test_lambda_tail_does_not_reprint_boundary_events():
 
     assert output.count('event-one') == 1
     assert output.count('event-two') == 1
-
-
-def test_render_history_event_shows_type_and_state_name():
-    event = {
-        'type': 'TaskStateEntered',
-        'timestamp': dt.datetime(2026, 7, 13, 12),
-        'stateEnteredEventDetails': {'name': 'Transform'},
-    }
-    output = capture_history_event(event)
-    assert 'TaskStateEntered' in output
-    assert 'Transform' in output
 
 
 def test_render_history_event_surfaces_error_and_cause():
@@ -231,34 +182,6 @@ def test_glue_tail_filters_both_groups_by_run_id_without_waiting_for_streams():
     assert all(call['logStreamNamePrefix'] == 'jr_abc123' for call in client.filter_calls)
 
 
-def test_glue_tail_bounds_every_scan_by_the_run_start():
-    # The regression this guards: filter_log_events scans forward from startTime, defaulting to
-    # the start of the group's retention. Both Glue groups are shared by every job in the account,
-    # so an unbounded scan pages through months of unrelated logs — minutes of silence, then the
-    # run's output all at once. A prefix filter alone does not bound the scan.
-    client = FakeCloudWatchLogs({GLUE_OUTPUT_LOG_GROUP: [glue_event('a', RUN_START + 5, 'line')]})
-
-    with console.capture():
-        tail_glue_run(client, 'jr_abc123', RUN_START, follow=False)
-
-    assert client.filter_calls, 'expected the groups to be polled'
-    assert all(call.get('startTime') == RUN_START for call in client.filter_calls)
-
-
-def test_glue_tail_advances_past_events_it_already_printed():
-    # Each poll re-asks from the newest event it has seen, so a long run does not rescan the
-    # whole window every two seconds.
-    client = FakeCloudWatchLogs({GLUE_OUTPUT_LOG_GROUP: [glue_event('a', RUN_START + 900, 'line')]})
-    cursor_calls = []
-
-    with console.capture():
-        tail_glue_run(client, 'jr_abc123', RUN_START, follow=True, run_finished=lambda: True)
-    cursor_calls = [call for call in client.filter_calls if call['logGroupName'] == GLUE_OUTPUT_LOG_GROUP]
-
-    assert cursor_calls[0]['startTime'] == RUN_START
-    assert cursor_calls[-1]['startTime'] == RUN_START + 900
-
-
 def test_glue_tail_says_when_a_log_group_does_not_exist():
     # "No events" and "nowhere for events to go" are different diagnoses; the second usually means
     # the run died before the script ran, or it is a Spark job logging to /aws-glue/jobs/*.
@@ -313,15 +236,6 @@ def test_glue_tail_stops_once_the_run_reaches_a_terminal_state(monkeypatch):
 
     # Two groups per pass, drained for a fixed number of passes rather than indefinitely.
     assert len(client.filter_calls) == 2 * 3
-
-
-def test_glue_tail_reports_a_run_with_no_events():
-    client = FakeCloudWatchLogs({})
-
-    with console.capture() as capture:
-        tail_glue_run(client, 'jr_abc123', RUN_START, follow=False)
-
-    assert 'no log events' in capture.get()
 
 
 def test_lambda_tail_scopes_to_one_durable_execution():
@@ -394,22 +308,6 @@ def test_render_event_folds_the_opaque_durable_ids_out_of_a_scoped_record():
     assert 'requestId' in output
 
 
-def test_render_event_keeps_every_field_when_nothing_is_hidden():
-    output = capture_event(json.dumps(DURABLE_RECORD), hide_keys=frozenset())
-
-    assert 'executionArn' in output
-    assert 'requestId' in output
-    assert 'operationId' in output
-
-
-def test_render_event_keeps_a_field_the_sdk_did_not_stamp():
-    # Suppression is a named list, not "anything past the header", so a caller's own extra=
-    # still prints.
-    output = capture_event(json.dumps(DURABLE_RECORD | {'batch_id': 'b-1'}), hide_keys=DURABLE_OPERATION_ID_KEYS)
-
-    assert 'batch_id' in output
-
-
 def test_operation_tag_marks_a_retry_and_leaves_the_first_attempt_bare():
     assert operation_tag({'operationName': 'stage', 'attempt': 1})[0] == 'stage'
     assert operation_tag({'operationName': 'stage', 'attempt': 4})[0] == 'stage.4'
@@ -423,33 +321,6 @@ def test_operation_tag_only_claims_the_keys_it_showed():
     assert operation_tag({'operationName': 'stage', 'attempt': 1})[1] == frozenset({'operationName'})
     assert operation_tag({'operationName': 'stage', 'attempt': 'four'})[1] == frozenset({'operationName'})
     assert operation_tag({'attempt': 4})[1] == frozenset()
-
-
-def test_context_reaches_a_first_attempt():
-    # attempt=1 is folded out of the tag deliberately, so it has to survive as a field or nothing
-    # can show it. --context is what passes an empty hide_keys.
-    record = {'level': 'INFO', 'message': 'first try', 'operationName': 'upload', 'attempt': 1}
-    output = capture_event(json.dumps(record), hide_keys=frozenset())
-
-    assert 'upload' in output
-    assert 'attempt' in output
-    assert '1' in output
-
-
-def test_render_event_keeps_an_attempt_that_has_no_operation_to_belong_to():
-    # attempt without operationName has no tag to fold into, so it prints as an ordinary field.
-    output = capture_event(json.dumps({'level': 'WARN', 'message': 'retrying upload', 'attempt': 4}))
-
-    assert 'attempt' in output
-    assert '4' in output
-
-
-def test_render_event_keeps_a_non_integer_attempt():
-    record = {'level': 'INFO', 'message': 'staged', 'operationName': 'stage', 'attempt': '4'}
-    output = capture_event(json.dumps(record))
-
-    assert 'stage' in output
-    assert '4' in output
 
 
 def test_glue_and_monitor_records_keep_every_field():

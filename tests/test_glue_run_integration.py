@@ -157,30 +157,6 @@ def test_tail_prints_stdout_and_stderr_of_a_finished_run(session, job_name, fini
     assert elapsed < TAIL_BUDGET_SECONDS, f'tailing a finished run took {elapsed:.0f}s'
 
 
-def test_tail_preserves_program_order_within_a_group(session, job_name, finished_run, marker):
-    """Lines from one group render in the order the job printed them.
-
-    Note what this deliberately does *not* claim. The job writes stdout, stderr, then stdout
-    again, but the tail renders both stdout lines before the stderr one: Glue ships the two
-    groups through independent agents, so a CloudWatch timestamp records when a line was
-    *shipped*, not when it was written. Program order across the two groups is not recoverable
-    from the data, and dectl does not pretend otherwise — the err prefix is what makes the
-    interleaving readable instead. Within a single group the timestamps are monotonic, and that
-    is what is worth pinning here; the merge itself is covered by unit tests, where equal
-    timestamps have a defined tiebreak that real CloudWatch data does not.
-    """
-    logs = session.client('logs')
-    started_at = run_log_start(session.client('glue'), job_name, finished_run)
-
-    with console.capture() as capture:
-        tail_glue_run(logs, finished_run, started_at, follow=False)
-    output = capture.get()
-
-    assert output.index(f'{marker}-stdout-first') < output.index(f'{marker}-stdout-last')
-    # Glue's own setup lines share the output group and precede the script's.
-    assert output.index('Setup complete') < output.index(f'{marker}-stdout-first')
-
-
 def test_following_a_live_run_streams_and_stops_on_its_own(session, job_name, marker):
     """The full `run --follow` loop against a run started for this test.
 

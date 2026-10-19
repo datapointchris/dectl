@@ -1,14 +1,14 @@
 # dectl
 
 Data engineering control CLI for driving AWS pipelines (Glue, Lambda, Step Functions, S3,
-Jenkins deploys) from a single config file. Installed via `uv tool install`; the entry point is
+Jenkins deploys) from one config directory. Installed via `uv tool install`; the entry point is
 `dectl.main:app`.
 
 ## The core idea: the CLI surface is assembled from config at import time
 
 There is no static command tree. `src/dectl/main.py` calls `load_config()` **at module import**
 and then builds the Typer app dynamically: it loops over the pipelines in
-`$XDG_CONFIG_HOME/dectl/config.yaml` and, for each one, attaches only the resource sub-apps
+`$XDG_CONFIG_HOME/dectl/pipelines/` and, for each one, attaches only the resource sub-apps
 that the pipeline actually defines. A pipeline with just `buckets` gets an `s3` command and
 nothing else; add `glue_jobs` and a `glue` command appears. Running `dectl` with no config still works
 (commands like `config init` are always present) because `load_config()` returns `None` rather
@@ -16,8 +16,8 @@ than raising.
 
 This means the command you see depends entirely on the user's config. When adding a resource
 type, you touch two places: the resource's own `make_*_app` module, and the pipeline loop in
-`main.py` that conditionally wires it in (plus the `resources` summary line,
-`pipeline_view.render_pipeline`, and its blocks in `commands/shell_equivalents.py`).
+`main.py` that conditionally wires it in (plus the `resources` summary line and
+`pipeline_view.render_pipeline`).
 
 ## Grammar: `PIPELINE RESOURCE ALIAS VERB` (verb last)
 
@@ -25,7 +25,7 @@ The command shape is `dectl PIPELINE RESOURCE ALIAS VERB [OPTIONS]` — the **ve
 deploy → run → logs loop on one resource changes only the trailing word. One rule governs the
 whole surface: **aliased = one thing, unaliased = the set/pipeline.** Instance verbs take an
 alias (`glue JOB run`, `s3 BUCKET mount`); set verbs take none (`s3 export`, `jenkins status`,
-`list`, `monitor`, `commands`). Scope is structural: the argument's presence selects it, never a flag.
+`list`, `monitor`). Scope is structural: the argument's presence selects it, never a flag.
 Whether a command writes is structural too: a write's rehearsal is a `plan` verb beside it,
 never a flag on the write, and no namespace acts bare. `glue` and `sfn` `plan` write nothing.
 A resource is named for the system it drives, so the Jenkins job is `jenkins`, never a word
@@ -82,21 +82,29 @@ names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
 - `monitor` is a **pipeline-level** command registered on `pipeline_app`, because it spans
   several resources. It tails every resource its `monitor` config block selects as one
   time-ordered stream via `logs.tail_log_groups`.
-- `commands` is the other pipeline-level command, a read printing each verb's aws, curl and
-  mount-s3 lines for the active env. In `commands/shell_equivalents.py`, names, windows, URIs and
-  qualifiers come from the verb's own constants and renderers (`script_uri`, `LOG_START_SLACK_MS`,
-  `invoke_qualifier`, `render_definition`). The iceberg filters, the archive and start-time
-  scripts, and the order of each block's calls are written again in shell, so a change to a verb's
-  refusals or fallbacks needs the same change in its block. A new verb needs a block, and
-  `test_every_verb_of_the_pipeline_has_a_block` fails until it has one. A block stops where dectl
-  decides: Glue's `plan` and `deploy` print a comment where dectl would diff and send `UpdateJob`.
-  `commands` runs the deploy doors' refusals first, so a pipeline they refuse prints no blocks.
 
 ## Config
 
 `src/dectl/config.py` holds the Pydantic models plus `load_config()` / `init_config()`. Config
-lives at `$XDG_CONFIG_HOME/dectl/config.yaml`, resolved by `pyclisteno.paths.config_home()`, so
-the variable is honored rather than `~/.config` being hardcoded. `buckets`, `glue_jobs` and
+lives in `$XDG_CONFIG_HOME/dectl/`, resolved by `pyclisteno.paths.config_home()`, so the variable
+is honored rather than `~/.config` being hardcoded. `config.yaml` holds `defaults`, `jenkins` and
+`variables`. Each pipeline is `pipelines/<name>.yaml`, and the file stem is the pipeline's name.
+
+**The files are joined at the loader, and nothing after it knows there are several.**
+`read_config_files` joins them into the one mapping `DectlConfig` validates, so everything after
+loading sees each pipeline under `pipelines.<stem>`. It refuses a `pipelines` key in
+`config.yaml`. In `pipelines/` it refuses what looks like a misnamed pipeline: a `.yml`, `.yaml` in
+another case, or a stem in `GLOBAL_COMMAND_NAMES`, which the root's own command would hide. It
+skips everything else, since one editor backup refused would take every pipeline down with it.
+`config edit NAME` runs the same `pipeline_name_fault` before it writes a file. The refusals are
+`ValidationError`s located at `('pipelines',)`, so the one renderer reports them. Locations are
+rendered by `variables.file_and_key`, which turns `('pipelines', name, ...)` into
+`pipelines/<name>.yaml <keys>` and anything else into `config.yaml <keys>`. The fault rows and
+variable origins use it too. Every path is derived from `CONFIG_PATH.parent` at the call, because
+tests point `CONFIG_PATH` at a temporary directory in both `config` and `config_cmd`.
+`tests/conftest.py`'s `write_config_files` writes a one-document test config the same way.
+
+`buckets`, `glue_jobs` and
 `lambdas` are all `alias -> real-name` mappings. A lambda's `live_alias` (not `alias`, which would
 collide with the CLI's "alias" = the config key) is the AWS Lambda alias that `deploy --publish`
 repoints. Its `durable` flag selects the durable verb set and is the invocation qualifier's
@@ -110,17 +118,17 @@ because it would share that command's name and only one of the two would survive
 
 **`variables` is substituted before the models see the file, and `{env}` is not.**
 `variables.expand_variables` runs inside `DectlConfig`'s `wrap` validator. It replaces `{name}` in
-every string of the raw mapping: the top-level block reaches the whole file, a pipeline's block
+every string of the raw mapping: the block in `config.yaml` reaches every file, a pipeline's block
 that pipeline alone. So every field downstream, the path checks included, sees a substituted value
 and needs no change for a new field to take variables. `{env}` passes through to the `resolve_*`
-chokepoints. A pipeline variable redefining a top-level one, a variable named `env` or a name
-`{name}` cannot reach, an undefined `{name}`, an unquoted `{name}` YAML read as a mapping, a quoted
-`"*name"` naming an anchor, and a non-string value are each a `ValidationError` carrying the key's
-own location. `load_config` parses with `AnchorRecordingLoader` and hands each anchor's name and
-line in through the validation context, so `{raw}` written for an anchor `&raw` is told the `*raw`
-that works. A config validated without that context sees no anchors. `{{name}}` is the
-escape for a literal `{name}` another program fills. `${NAME}` is skipped by the token's
-lookbehind, which keeps the Jenkins credentials and Terraform placeholders out of reach.
+chokepoints. A pipeline variable redefining one from `config.yaml`, a variable named `env` or a name
+`{name}` cannot reach, an undefined `{name}`, an unquoted `{name}` YAML read as a mapping, and a
+non-string value are each a `ValidationError` carrying the key's own location. An anchor or merge
+is YAML's, resolved before the pass sees the mapping, and reaches only within one file. The pass
+builds new mappings rather than editing the one it was handed, because YAML gives an anchored block
+to each alias and merge of it as one object. `{{name}}` is the escape for a literal `{name}` another
+program fills. `${NAME}` is skipped by the token's lookbehind, which keeps the Jenkins credentials
+and Terraform placeholders out of reach.
 `aws_names_only` drops `variables`, because a `{env}` held there names nothing and would silence
 the env-effect guard.
 
@@ -129,21 +137,15 @@ share as `_writings`. `written_for` reads it, so a fault row names the line to e
 variables in it, not only a value no line of the file holds. A new door building an
 `UnusableValue` passes `written_for(...)` as `written`.
 
-**The pass builds a new mapping at every level and never writes into the one it was handed.** YAML
-gives an anchored block to each alias and `<<:` merge as the same Python object, so a pipeline
-merged from another shares its `buckets`, `glue_jobs` and `arguments` until the pass runs.
-Substituted in place, the second pipeline inherits the first's names, and an escaped `{{date}}`
-shared by two jobs is unescaped twice and refused. `test_the_layered_config_resolves_each_pipeline_under_its_own_names`
-catches both.
-
 This is interpolation and references between keys, which the general advice is to answer with a
 generated config instead. It is here because an account id, a company prefix and a bucket recur
-inside many names of one hand-written file, and nothing generates this one.
+inside many names of a hand-written config, and nothing generates this one.
 
-**`TEMPLATE_CONFIG` is the single source for the example config.** `config init` writes it and
-`config example` prints it (highlighted on a TTY, plain when piped). It holds one of every option
-and every form a value takes, and names each alias for what it shows. A test asserts it
-round-trips through the models, so update it with any model change. Its
+**`TEMPLATE_CONFIG` and `TEMPLATE_PIPELINES` are the single source for the example config.**
+`template_files` maps each to its path. `config init` writes them and `config example` prints
+each under a `# <path>` line (highlighted on a TTY, plain when piped). Together they hold one of
+every option and every form a value takes, and name each alias for what it shows. A test asserts
+they round-trip through the models, so update them with any model change. Its
 `resolve_paths_from` line stays commented: uncommented, it names a directory no machine has, and
 `config init` would write a config that fails `config validate`.
 
@@ -156,8 +158,9 @@ stderr, keeps the rejected value because it identifies an ambiguous location, an
 because a rejected list renders as `['a']`, which rich would eat as a style tag.
 
 `config edit` resolves the editor via `$VISUAL` → `$EDITOR` with no hardcoded fallback,
-`shlex.split`s it, resolves the binary with `shutil.which`, and seeds the template first if no
-config exists.
+`shlex.split`s it, and resolves the binary with `shutil.which`, before writing anything. Bare, it
+opens `config.yaml`, seeding the template first if none exists. `config edit NAME` opens
+`pipelines/NAME.yaml`, writing `PIPELINE_STUB` first if it is absent.
 
 ### Paths
 
@@ -176,8 +179,7 @@ docstring before changing either. What a new field or resource has to meet:
   `--json` and the printed row all come from the declaration. **A new resource *kind* costs six
   edits**: the `--json` section, its `paths` key, the human section, its `print_paths` call,
   `resource_types`, and the pipeline loop in `main.py`. `s3` has neither a `print_paths` call nor
-  a `paths` key today. `test_every_resolved_path_reaches_both_renderers` catches a kind with
-  declared paths and no display.
+  a `paths` key today.
 - **A new `ConfigFault` needs a `FAULT_WORDING` entry, a `SPELLING_FAULTS` decision, and a line in
   `recovery_lines`.** `test_every_fault_has_a_sentence` pins the first.
 - **`join_uri` joins three strings and all three are guarded.** `key_fault` covers the prefix and
@@ -201,7 +203,6 @@ rendered job. `configured_uris` is handed a raw one, because the help panel is b
 `--env` is parsed. `script_uris` renders its own operands, because a renderer must not reach
 `render_env_model`. Mixing conventions names an object nothing wrote, but only when the
 environment's own name carries the token.
-`test_every_site_composing_a_script_destination_substitutes_exactly_once` drives all four.
 
 `deploy` runs everything that can refuse before it writes anything: `resolve_scripts`, then
 `confirm_glue_job_update`, then the upload, then `apply_glue_job_update`. A refusal after the
@@ -257,9 +258,8 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
   before-image `job_definition_changes` diffs against, and the copy is shallow. Writing through a
   nested dict such as `Command` makes the diff compare it with itself and skip `UpdateJob`.
 - **`JobUpdate.derived` tells the diff that a key the API forced out is not a change.** Its
-  docstring is the one copy of the mechanism. The `sizing_named` half of
-  `test_a_worker_sized_job_converges_after_one_deploy` catches an inverted read; its
-  `sizing_unmanaged` twin passes either way.
+  docstring is the one copy of the mechanism. `test_a_worker_sized_job_converges_after_one_deploy`
+  catches an inverted read.
 - **`glue deploy` is two writes with different owners.** The script upload is always yours. The
   job *definition* is Terraform's once a pipeline is established, but dectl can still write it
   before then. So `deploy` diffs its computed update against the live definition, skips
@@ -398,46 +398,30 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
 `typer.testing.CliRunner`. Live AWS tests are marked `integration` and run only with
 `--run-integration`, because they create and delete real resources.
 
-**`tests/layered_pipelines_config/` is a config in the shape a real multi-pipeline one takes, and
-the README's full example is that file verbatim.** It configures every resource type. Top-level
-variables fan out to two pipelines through each one's prefix, `finance` is a YAML merge of
-`sales`, and values repeat by variable, by anchor and by `<<:` block. The scripts and Lambda
-sources it names sit beside it, so its relative paths resolve. The live block test deploys those
-sources, so `workflow_handler.py` is a real durable handler. `test_config.py` loads it through
-`load_config` for the load-time faults and refusals. Its README test holds the README's config and
-template blocks equal to these files, checks each resolution row against `finance` under `prod`,
-and loads each mistake row for its exact message. `test_main.py` starts the installed `dectl`
-against it in a fresh process, because `main.py` builds the tree from the file at import.
+**`tests/layered_pipelines_config/` is a config in the shape a real multi-pipeline one takes.** It
+configures every resource type. The variables in `config.yaml` fan out to two pipeline files
+through each one's prefix, and `finance.yaml` is written out like `sales.yaml` under its own
+pipeline and dataset. The scripts and Lambda sources it names sit beside it, so its relative paths
+resolve. `test_config.py` loads it through `load_config` for the load-time faults and refusals.
+`test_main.py` starts the installed `dectl` against it in a fresh process, because `main.py`
+builds the tree from the files at import.
 `test_stepfunctions_integration.py` deploys its `flow.asl.json.tftpl` with `finance`'s
 substitutions, so live Step Functions validates the JSONata. A config shape that has to work goes
-in this file rather than in a test's inline dict. The template is named `.tftpl`, Terraform's
+in these files rather than in a test's inline dict. The template is named `.tftpl`, Terraform's
 extension for a `templatefile()` template, so the JSON hook does not read it before it is rendered.
-
-**A printed block is held to its verb by sending both to one endpoint.** `tests/recording_endpoint.py`
-is an HTTP server that decodes each request with botocore's own models into an operation and its
-parameters, whichever of body, query string or header carried them. `test_shell_equivalents.py`
-runs each of `sales`' verbs through dectl and its block through bash and zsh, with the real aws
-CLI, jq, python3 and curl, each under its own access key. A write must match exactly, and a block's
-reads must be ones the verb makes. `scenarios_for` runs a verb in every state it refuses or falls
-back in as well, and the two must exit alike there. A write dectl decides from what it read, which
-its block leaves to a comment, is named in `DECIDED_BY_DECTL` and left out of the comparison. Each
-iceberg block's jq output is held to its verb's `--json` rows on a rolled-back table. The zsh half
-runs where zsh is installed, which CI's runner is not. `AWS_DISABLE_HOST_PREFIX_INJECTION` keeps StartLiveTail on the endpoint rather than a
-`streaming-` host. `test_shell_equivalents_integration.py` then runs the writing blocks against
-resources it creates, because a block's next step reads the service's answer.
 
 **Anything that writes to AWS gets a live test.** A failure here is read once, from output, with
 no debugger and no second attempt, and a fake holds only the service rules somebody already knew.
 The exemptions are real cost and setup too extensive to maintain, never "the fake covers it".
 
 **Every resource under test is created and deleted by the test**, never a real pipeline's job. A
-role is the exception, as a precondition like credentials. `DECTL_IT_ROLE_ARN` names the Glue one,
-`DECTL_IT_STATES_ROLE_ARN` the Step Functions one and `DECTL_IT_LAMBDA_ROLE_ARN` the Lambda one.
-The fixtures in `conftest.py` create their own when any is unset:
+role is the exception, as a precondition like credentials. `DECTL_IT_ROLE_ARN` names the Glue one
+and `DECTL_IT_STATES_ROLE_ARN` the Step Functions one, and the fixtures in `conftest.py` create
+their own when either is unset:
 
 ```bash
-# Least privilege: glue:*, lambda:*, logs:*, s3:*, states:*, and iam:PassRole on those three roles
-DECTL_IT_ROLE_ARN=<arn> DECTL_IT_STATES_ROLE_ARN=<arn> DECTL_IT_LAMBDA_ROLE_ARN=<arn> DECTL_IT_REGION=<region> uv run pytest --run-integration
+# Least privilege: glue:*, logs:*, s3:*, states:*, and iam:PassRole on those two roles
+DECTL_IT_ROLE_ARN=<arn> DECTL_IT_STATES_ROLE_ARN=<arn> DECTL_IT_REGION=<region> uv run pytest --run-integration
 
 # No setup, broader credentials: the fixture creates and deletes a role, needing iam:CreateRole
 DECTL_IT_AWS_PROFILE=<profile> DECTL_IT_REGION=<region> uv run pytest --run-integration
@@ -458,12 +442,6 @@ old routing when read at once, so a test reading an alias back polls for it.
 `PublishStateMachineVersion` on a machine never updated since version 1 returns version 1 rather
 than publishing another.
 
-**What live Lambda does that no fake would have told you.** Lambda delivers an invocation's logs
-seconds after `Invoke` returns, creating the log group if it is gone. A function whose role may
-write logs therefore recreates its group after the test deleted it, so the created role carries
-only the two durable checkpoint actions. A durable execution's `FunctionArn` names the version it
-ran.
-
 **A fake enforces the service's constraints rather than replaying responses.** `FakeCloudWatchLogs`
 applies `startTime`, `endTime`, `logStreamNamePrefix` and `filterPattern`, and raises on a
 `filter_log_events` with no `startTime`. The Lambda fakes raise on an alias `Qualifier` and on an
@@ -476,7 +454,12 @@ covers a spelling the reader can miss.
 counts the requests arriving at a socket that accepts connections and never answers. It is the
 only place `total_max_attempts: 1` is shown to mean one request, and it needs no AWS.
 
+**What live Lambda does that no fake would have told you.** Lambda delivers an invocation's logs
+seconds after `Invoke` returns, creating the log group if it is gone. So a function whose role may
+write logs recreates a group the test deleted. A test's role for a durable function needs only
+`lambda:CheckpointDurableExecution` and `lambda:GetDurableExecutionState`. A durable execution's
+`FunctionArn` names the version it ran.
+
 **Latency is invisible to any fake.** `test_glue_run_integration.py` runs a real Python Shell job
-against a wall-clock budget. It costs money, as does `test_shell_equivalents_integration.py`, which
-starts a Glue run and stops it, invokes two functions and starts one execution. The deploy
-integration test never starts a run.
+against a wall-clock budget, and it is the only module that costs money. The deploy integration
+test never starts a run.

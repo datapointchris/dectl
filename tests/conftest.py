@@ -1,7 +1,6 @@
 import contextlib
 import operator
 import os
-import re
 
 # The same reasoning as the width pinned below, for the other thing a terminal decides. A console
 # that believes it is writing to one emits SGR escapes, so `'names nothing to deploy' in
@@ -18,12 +17,14 @@ import re
 os.environ.pop('FORCE_COLOR', None)
 
 import json
+import shutil
 import time
 import uuid
 from pathlib import Path
 
 import boto3
 import pytest
+import yaml
 from botocore.exceptions import ClientError
 from typer.testing import CliRunner
 
@@ -43,15 +44,35 @@ from dectl.output import stderr_console
 # before any statement here runs. An explicit width cannot regress on import order.
 #
 # Wide enough that every table under test renders its columns unfolded, which is what makes an
-# assertion about a rendered value an assertion about the value. A test whose subject *is* the
-# width sets its own through `at_width`: pinned wide, a fold and an ellipsis render alike.
+# assertion about a rendered value an assertion about the value.
 console.width = 160
 stderr_console.width = 160
 
-# A config in the shape a real multi-pipeline one takes, and the definition it deploys: one
-# top-level variable fanned out to two pipelines through each one's prefix, a YAML merge, and
-# JSONata substitutions.
+# A config in the shape a real multi-pipeline one takes, and the definition it deploys: variables
+# in config.yaml fanned out to two pipeline files through each one's prefix, and JSONata
+# substitutions.
 LAYERED_CONFIG = Path(__file__).parent / 'layered_pipelines_config' / 'config.yaml'
+
+
+def write_config_files(directory: Path, text: str) -> Path:
+    """One document written the way dectl reads it: each `pipelines` entry to its own file.
+
+    A document that does not parse, or holds no `pipelines` mapping, goes to config.yaml whole."""
+    config = directory / 'config.yaml'
+    pipelines = directory / 'pipelines'
+    shutil.rmtree(pipelines, ignore_errors=True)
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError:
+        raw = None
+    if not (isinstance(raw, dict) and isinstance(raw.get('pipelines'), dict)):
+        config.write_text(text)
+        return config
+    pipelines.mkdir()
+    for name, pipeline in raw.pop('pipelines').items():
+        (pipelines / f'{name}.yaml').write_text(yaml.safe_dump(pipeline))
+    config.write_text(yaml.safe_dump(raw))
+    return config
 
 
 class RefusalRunner(CliRunner):
@@ -153,42 +174,6 @@ def fresh_environment():
     set_active_environment(DEFAULT_ENV, 'default')
 
 
-ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*m')
-
-
-def unwrapped(text: str) -> str:
-    """Captured output as its words, for comparing it against text a renderer was given.
-
-    Two things stand between a capture and the message it carries. The wrap: a line longer than
-    the console still breaks, and the lines it breaks into are not the ones the renderer
-    produced — rich breaks at spaces rather than mid-word, so collapsing whitespace recovers it.
-    And the color: whether escapes are emitted depends on what the process thinks it is writing
-    to, which is not the same locally and on CI. Measured — this suite passed here and failed
-    there on `no row-per-file view`, where Click's help formatter had put a reset and a dim
-    between `file` and `view`.
-
-    For comparing whole messages. An `in` check against the collapse can match a phrase spanning
-    two unrelated lines, which is why `test_render_pipeline_prints_alias_to_name_lines` asserts
-    tokens instead."""
-    return ' '.join(ANSI_ESCAPE.sub('', text).split())
-
-
-@contextlib.contextmanager
-def at_width(console, columns: int):
-    """Render into `console` at a fixed width, for a test whose subject is the width.
-
-    The suite pins a wide console so a rendered value is not a fact about the runner's window.
-    That is the right default and the wrong one for a guard on folding: a column wide enough to
-    hold its value renders identically whether it folds, truncates or does neither, so such a
-    test passes on the behavior it was written to refuse. Those set the width they mean."""
-    original = console.width
-    console.width = columns
-    try:
-        yield
-    finally:
-        console.width = original
-
-
 def log_event(event_id: str, timestamp: int, message: str, stream: str = 'stream-a') -> dict:
     return {'eventId': event_id, 'timestamp': timestamp, 'message': message, 'logStreamName': stream}
 
@@ -196,10 +181,6 @@ def log_event(event_id: str, timestamp: int, message: str, stream: str = 'stream
 # What every live AWS module needs before it can do anything: a session, and a role its service
 # will assume. Here once, so each role variable reaches every live module that needs that role.
 GLUE_MANAGED_POLICY = 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
-# The two calls a durable function checkpoints through, and no logs permission. Lambda delivers an
-# invocation's logs seconds after it returns, so a function allowed to log recreates its log group
-# after the test has deleted it.
-DURABLE_CHECKPOINT_ACTIONS = ('lambda:CheckpointDurableExecution', 'lambda:GetDurableExecutionState')
 
 
 def trust_policy(service: str) -> dict:
@@ -210,9 +191,7 @@ def trust_policy(service: str) -> dict:
 
 
 @contextlib.contextmanager
-def service_role(
-    session, supplied_variable: str, service: str, managed_policies: tuple[str, ...] = (), allowed_actions: tuple[str, ...] = ()
-):
+def service_role(session, supplied_variable: str, service: str, managed_policies: tuple[str, ...] = ()):
     """The role `supplied_variable` names, or one created for `service` and deleted afterwards."""
     supplied = os.environ.get(supplied_variable)
     if supplied:
@@ -224,17 +203,12 @@ def service_role(
     created = iam.create_role(RoleName=role_name, AssumeRolePolicyDocument=json.dumps(trust_policy(service)))
     for policy in managed_policies:
         iam.attach_role_policy(RoleName=role_name, PolicyArn=policy)
-    if allowed_actions:
-        document = {'Version': '2012-10-17', 'Statement': [{'Effect': 'Allow', 'Action': list(allowed_actions), 'Resource': '*'}]}
-        iam.put_role_policy(RoleName=role_name, PolicyName='allowed-actions', PolicyDocument=json.dumps(document))
     time.sleep(10)
     try:
         yield created['Role']['Arn']
     finally:
         for policy in managed_policies:
             iam.detach_role_policy(RoleName=role_name, PolicyArn=policy)
-        if allowed_actions:
-            iam.delete_role_policy(RoleName=role_name, PolicyName='allowed-actions')
         iam.delete_role(RoleName=role_name)
 
 
@@ -292,16 +266,6 @@ def states_role_arn(session):
     Its own role rather than the Glue one with a second trusted service, so each stays the least
     a supplied role has to be. A machine of Pass states calls nothing, so it needs no policy."""
     with service_role(session, 'DECTL_IT_STATES_ROLE_ARN', 'states.amazonaws.com') as arn:
-        yield arn
-
-
-@pytest.fixture(scope='module')
-def lambda_role_arn(session):
-    """A role Lambda can assume: the one `DECTL_IT_LAMBDA_ROLE_ARN` names, or one created.
-
-    A supplied role needs the durable checkpoint actions, because a durable function checkpoints
-    through its own role. One that may also write logs leaves a function's log group behind."""
-    with service_role(session, 'DECTL_IT_LAMBDA_ROLE_ARN', 'lambda.amazonaws.com', allowed_actions=DURABLE_CHECKPOINT_ACTIONS) as arn:
         yield arn
 
 

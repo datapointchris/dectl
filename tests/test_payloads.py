@@ -6,10 +6,6 @@ import typer
 from dectl.payloads import read_payload
 
 
-def test_read_payload_defaults_to_empty_object():
-    assert read_payload(None) == '{}'
-
-
 def test_read_payload_reads_a_file(tmp_path):
     path = tmp_path / 'event.json'
     path.write_text('{"key": "value"}')

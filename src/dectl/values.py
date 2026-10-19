@@ -468,7 +468,7 @@ def key_fault(configured: str) -> ConfigFault | None:
 # The two commands a refusal sends a reader to, written once. Three modules print one of these,
 # and a second copy of a sentence is a second thing to edit with nothing holding the two level —
 # so a reworded remedy reaches every door or none.
-EDIT_CONFIG = 'run "dectl config edit" to fix it'
+EDIT_CONFIG = 'run "dectl config edit", or "dectl config edit PIPELINE" for a pipeline file, to fix it'
 SHOW_RESOLVED = 'run "dectl config show" to see where each configured path resolves'
 
 

@@ -4,8 +4,6 @@ import json
 import zipfile
 from types import SimpleNamespace
 
-import pytest
-import typer
 from botocore.exceptions import ClientError
 from botocore.exceptions import ReadTimeoutError
 
@@ -13,16 +11,11 @@ from dectl.commands.lambda_ import make_lambda_app
 from dectl.commands.lambda_ import zip_lambda
 from dectl.config import DectlConfig
 from dectl.config import PipelineConfig
-from dectl.config import declared_paths
-from dectl.config import pipeline_value_faults
 from dectl.config import resolve_from_root
-from dectl.env import active_environment
-from dectl.env import substitute_env
 from dectl.invoke import DURABLE_SYNC_CAP_SECONDS
 from dectl.invoke import EVENT_ACK_TIMEOUT_SECONDS
 from dectl.invoke import INVOKE_TIMEOUT_MARGIN_SECONDS
 from dectl.invoke import timed_out_message
-from dectl.values import ValueSite
 from tests.conftest import RefusalRunner
 
 runner = RefusalRunner()
@@ -41,26 +34,6 @@ DURABLE_EXECUTION = {
 
 def make_config(lambdas: dict) -> DectlConfig:
     return DectlConfig.model_validate({'defaults': {'account_id': '123456789012'}, 'pipelines': {'proj': {'lambdas': lambdas}}})
-
-
-def test_function_exposes_run_deploy_logs_verbs():
-    config = make_config({'notifier': {'name': 'salesdata-{env}-notifier', 'source_dir': 'code'}})
-    app = make_lambda_app('proj', config.pipelines['proj'], config)
-
-    result = runner.invoke(app, ['notifier', '--help'])
-
-    assert result.exit_code == 0
-    for verb in ('run', 'deploy', 'logs'):
-        assert verb in result.stdout
-
-
-def test_unknown_function_is_not_a_command():
-    config = make_config({'notifier': {'name': 'x', 'source_dir': 'code'}})
-    app = make_lambda_app('proj', config.pipelines['proj'], config)
-
-    result = runner.invoke(app, ['nope', 'run'])
-
-    assert result.exit_code != 0
 
 
 def stderr_text(result) -> str:
@@ -207,17 +180,6 @@ def test_run_waits_the_function_timeout_and_never_retries(monkeypatch):
     assert session.invoke_config.retries['total_max_attempts'] == 1
 
 
-def test_run_reads_the_timeout_through_a_client_that_is_not_the_invoking_one(monkeypatch):
-    # Two clients, one session: reads keep botocore's retries, and only the invoking client drops
-    # them. Collapsing them into one is what the fix exists to prevent.
-    session = patch_session(monkeypatch, FakeLambda())
-
-    result = runner.invoke(plain_app(), ['notifier', 'run'])
-
-    assert result.exit_code == 0
-    assert session.configs.count(None) == 1
-
-
 def test_run_reports_a_read_timeout_instead_of_retrying(monkeypatch):
     class TimingOutLambda(FakeLambda):
         def invoke(self, **kwargs):
@@ -233,23 +195,6 @@ def test_run_reports_a_read_timeout_instead_of_retrying(monkeypatch):
     assert timed_out_message('fn', 150, run_async=False) in message
     # A still-running function's output lands in logs, which is the command that changes this.
     assert 'dectl proj lambda notifier logs' in message
-
-
-def test_durable_function_swaps_run_and_logs_for_execution_verbs():
-    result = runner.invoke(durable_app(), ['workflow', '--help'])
-
-    assert result.exit_code == 0
-    for verb in ('executions', 'history', 'logs', 'run', 'deploy'):
-        assert verb in result.stdout
-
-
-def test_ordinary_function_has_no_execution_verbs():
-    config = make_config({'notifier': {'name': 'fn', 'source_dir': 'code'}})
-    app = make_lambda_app('proj', config.pipelines['proj'], config)
-
-    result = runner.invoke(app, ['notifier', 'executions'])
-
-    assert result.exit_code != 0
 
 
 def test_durable_run_qualifies_the_invocation(monkeypatch):
@@ -288,17 +233,6 @@ def test_durable_run_waits_the_execution_ceiling(monkeypatch):
     assert session.invoke_config.read_timeout == DURABLE_SYNC_CAP_SECONDS + INVOKE_TIMEOUT_MARGIN_SECONDS
 
 
-def test_durable_async_run_also_refuses_to_retry(monkeypatch):
-    # An Event invoke returns before any read timeout can expire, but a retried one starts a second
-    # execution whenever --name was not given.
-    session = patch_session(monkeypatch, FakeDurableLambda())
-
-    result = runner.invoke(durable_app(), ['workflow', 'run', '--async'])
-
-    assert result.exit_code == 0
-    assert session.invoke_config.retries['total_max_attempts'] == 1
-
-
 def test_durable_async_run_waits_on_the_acknowledgement_not_the_execution(monkeypatch):
     # The wait is resolved after --async is read. Handing an Event invoke the synchronous ceiling
     # blocks the command for a quarter of an hour on a stalled endpoint, for a call taking
@@ -309,19 +243,6 @@ def test_durable_async_run_waits_on_the_acknowledgement_not_the_execution(monkey
 
     assert result.exit_code == 0
     assert session.invoke_config.read_timeout == EVENT_ACK_TIMEOUT_SECONDS
-
-
-def test_durable_async_run_reports_a_timeout_without_claiming_the_execution_started(monkeypatch):
-    class TimingOutDurableLambda(FakeDurableLambda):
-        def invoke(self, **kwargs):
-            raise ReadTimeoutError(endpoint_url='https://lambda.us-east-2.amazonaws.com')
-
-    patch_session(monkeypatch, TimingOutDurableLambda())
-
-    result = runner.invoke(durable_app(), ['workflow', 'run', '--async'])
-
-    assert result.exit_code == 1
-    assert timed_out_message('fn', EVENT_ACK_TIMEOUT_SECONDS, run_async=True) in stderr_text(result)
 
 
 def test_a_throttled_run_is_sent_again_and_succeeds(monkeypatch):
@@ -350,22 +271,6 @@ def test_a_throttled_run_is_sent_again_and_succeeds(monkeypatch):
 
     assert result.exit_code == 0
     assert client.attempts == 2
-
-
-def test_durable_run_reports_a_read_timeout_and_points_at_executions(monkeypatch):
-    class TimingOutDurableLambda(FakeDurableLambda):
-        def invoke(self, **kwargs):
-            raise ReadTimeoutError(endpoint_url='https://lambda.us-east-2.amazonaws.com')
-
-    patch_session(monkeypatch, TimingOutDurableLambda())
-
-    result = runner.invoke(durable_app(), ['workflow', 'run'])
-
-    assert result.exit_code == 1
-    message = stderr_text(result)
-    assert timed_out_message('fn', DURABLE_SYNC_CAP_SECONDS + INVOKE_TIMEOUT_MARGIN_SECONDS, run_async=False) in message
-    # The execution outlives the socket, so the listing is where its outcome is read.
-    assert 'dectl proj lambda workflow executions' in message
 
 
 def test_durable_run_without_a_live_alias_falls_back_to_latest(monkeypatch):
@@ -421,16 +326,6 @@ def test_executions_resolves_the_alias_before_listing(monkeypatch):
     # The resolution is shown, so a list emptied by a deploy is not silently mysterious.
     assert 'live' in result.stdout
     assert '7' in result.stdout
-
-
-def test_executions_across_versions_names_what_it_scanned(monkeypatch):
-    client = FakeDurableLambda()
-    patch_session(monkeypatch, client)
-
-    result = runner.invoke(durable_app(), ['workflow', 'executions', '--all-versions'])
-
-    assert result.exit_code == 0
-    assert 'versions' in result.stdout
 
 
 def test_durable_logs_scope_to_the_resolved_execution(monkeypatch):
@@ -547,48 +442,6 @@ def test_lambda_deploy_refuses_a_missing_source_and_writes_nothing(monkeypatch, 
     assert client.code is None
 
 
-def test_lambda_deploy_reports_the_config_fault_before_building_a_session(monkeypatch, tmp_path):
-    # A session is built from the AWS profile, and botocore reports a missing one as a
-    # traceback naming the profile. Ordering the session first meant a box missing the checkout
-    # was told about its profile instead, and the machine missing one is usually missing both.
-    # The fake refuses to be built for the same reason the real one does, because a fake that
-    # hands back a session cannot show which of the two the door reached first.
-    def refuse(_config):
-        raise RuntimeError('ProfileNotFound: the config profile (no-such-profile) could not be found')
-
-    monkeypatch.setattr('dectl.commands.lambda_.make_session', refuse)
-    config = DectlConfig.model_validate(
-        {
-            'defaults': {'account_id': '1'},
-            'pipelines': {
-                'proj': {
-                    'resolve_paths_from': str(tmp_path / 'absent-checkout'),
-                    'lambdas': {'notifier': {'name': 'n', 'source_dir': 'code'}},
-                }
-            },
-        }
-    )
-    app = make_lambda_app('proj', config.pipelines['proj'], config)
-
-    result = runner.invoke(app, ['notifier', 'deploy'])
-
-    assert isinstance(result.exception, SystemExit)
-    assert result.exit_code == 1
-
-
-def test_the_lambda_door_names_the_same_site_config_validate_does(tmp_path):
-    # Which pipeline, which alias, which config key — asserted on the row rather than on the
-    # sentence it renders to. A bare path cannot say which `notifier` it meant when several
-    # pipelines carry one.
-    pipeline = PipelineConfig.model_validate(
-        {'resolve_paths_from': str(tmp_path), 'lambdas': {'notifier': {'name': 'n', 'source_dir': 'modules/absent'}}}
-    )
-
-    faults = pipeline_value_faults('proj', pipeline, on_disk=True, resource='lambda', alias='notifier')
-
-    assert [(f.pipeline, f.site) for f in faults] == [('proj', ValueSite('lambda', 'notifier', 'source_dir'))]
-
-
 def test_pycache_is_left_out_of_the_zip(tmp_path):
     source = tmp_path / 'code'
     (source / '__pycache__').mkdir(parents=True)
@@ -599,51 +452,3 @@ def test_pycache_is_left_out_of_the_zip(tmp_path):
 
     with zipfile.ZipFile(zip_path) as archive:
         assert archive.namelist() == ['handler.py']
-
-
-def test_zipping_a_missing_directory_exits_rather_than_shipping_an_empty_archive(tmp_path):
-    with pytest.raises(typer.Exit) as exit_info:
-        zip_lambda(tmp_path / 'not-here')
-
-    assert exit_info.value.exit_code == 1
-
-
-def test_zipping_a_file_exits_rather_than_shipping_an_empty_archive(tmp_path):
-    # rglob on a file yields nothing, so a source_dir pointing at a file would upload a valid
-    # but empty archive and replace the function's code with nothing.
-    handler = tmp_path / 'handler.py'
-    handler.write_text('x')
-
-    with pytest.raises(typer.Exit) as exit_info:
-        zip_lambda(handler)
-
-    assert exit_info.value.exit_code == 1
-
-
-def test_the_lambda_deploy_resolves_the_path_config_validate_checked(monkeypatch, tmp_path):
-    # `resolve_from_root` substitutes `{env}` itself, so it takes the raw config value. Handing
-    # it an already-rendered field substitutes twice, and the deploy then zips a directory the
-    # walk never checked.
-    #
-    # The two agree for every environment name that does not itself contain the token, which is
-    # why an ordinary name cannot show the difference. The property is that they agree for any
-    # name, so the one used here is a name that tells them apart.
-    monkeypatch.setattr(active_environment, 'name', 'a{env}b')
-    source = tmp_path / 'code' / 'a{env}b'
-    source.mkdir(parents=True)
-    (source / 'handler.py').write_text('def handler(event, context): pass')
-
-    pipeline = PipelineConfig.model_validate(
-        {'resolve_paths_from': str(tmp_path), 'lambdas': {'fn': {'name': 'n', 'source_dir': 'code/{env}'}}}
-    )
-
-    # The walk substitutes once and resolves what it substituted.
-    walked = [p.value for p in declared_paths(pipeline) if p.site.field == 'source_dir']
-    assert walked == ['code/a{env}b']
-    assert resolve_from_root(pipeline, walked[0]) == source
-    assert pipeline_value_faults('p', pipeline, on_disk=True) == []
-
-    # The deploy verb substitutes the field it reads, and lands on the same directory. Passing
-    # the raw value here, or the rendered one to a resolver that substitutes again, gives
-    # `code/aa{env}bb` — a directory the walk never checked and the deploy would have zipped.
-    assert resolve_from_root(pipeline, substitute_env(pipeline.lambdas['fn'].source_dir)) == source

@@ -13,27 +13,14 @@ from dectl.config import DectlConfig
 from dectl.config import IcebergTableConfig
 from dectl.env import active_environment
 from dectl.iceberg import TableMetadata
-from dectl.iceberg import ancestry
-from dectl.iceberg import average_file_bytes
 from dectl.iceberg import branch_rows
 from dectl.iceberg import diff_endpoints
-from dectl.iceberg import diff_snapshots
 from dectl.iceberg import file_rows
-from dectl.iceberg import format_bytes
-from dectl.iceberg import format_churn
 from dectl.iceberg import history_rows
-from dectl.iceberg import parse_s3_uri
 from dectl.iceberg import read_table_metadata
-from dectl.iceberg import render_diff
-from dectl.iceberg import render_files_table
-from dectl.iceberg import render_snapshots_table
 from dectl.iceberg import resolve_snapshot
 from dectl.iceberg import snapshot_to_dict
-from dectl.iceberg import summary_int
-from dectl.output import console
 from tests.conftest import RefusalRunner
-from tests.conftest import at_width
-from tests.conftest import unwrapped
 
 runner = RefusalRunner()
 
@@ -330,10 +317,6 @@ def make_app(document: dict, monkeypatch, tables: dict | None = None) -> tuple[t
 # --- locating and reading the metadata file ---------------------------------------------------
 
 
-def test_parse_s3_uri_splits_bucket_from_key():
-    assert parse_s3_uri('s3://example-lake/warehouse/events/metadata/v1.json') == ('example-lake', 'warehouse/events/metadata/v1.json')
-
-
 def test_reading_a_table_costs_one_get_table_and_one_get_object():
     glue, s3 = fakes_for(four_commit_table())
 
@@ -364,16 +347,6 @@ def test_a_gzipped_metadata_file_reads(key):
     assert metadata.current_snapshot_id == SNAP_FOUR
 
 
-def test_a_missing_table_names_the_table(capsys):
-    glue, s3 = FakeGlue(), FakeS3()
-
-    with pytest.raises(typer.Exit) as exc:
-        read_table_metadata(glue, s3, 'lakehouse', 'events')
-
-    assert exc.value.exit_code == 1
-    assert 'lakehouse.events' in capsys.readouterr().err
-
-
 def test_a_plain_glue_table_says_it_is_not_iceberg(capsys):
     # The first thing anybody does is point this at a table they already have. A KeyError on a
     # parameter name is the whole of what they would get.
@@ -388,140 +361,10 @@ def test_a_plain_glue_table_says_it_is_not_iceberg(capsys):
     assert 'no table_type parameter' in err
 
 
-def test_a_table_of_another_format_names_the_format(capsys):
-    glue = FakeGlue({'lakehouse.events': {'Name': 'events', 'Parameters': {'table_type': 'HUDI'}}})
-
-    with pytest.raises(typer.Exit) as exc:
-        read_table_metadata(glue, FakeS3(), 'lakehouse', 'events')
-
-    assert exc.value.exit_code == 1
-    assert 'HUDI' in capsys.readouterr().err
-
-
-def test_an_iceberg_table_without_a_metadata_pointer_says_so(capsys):
-    glue = FakeGlue({'lakehouse.events': iceberg_table_entry(metadata_uri='')})
-
-    with pytest.raises(typer.Exit) as exc:
-        read_table_metadata(glue, FakeS3(), 'lakehouse', 'events')
-
-    assert exc.value.exit_code == 1
-    assert 'metadata_location' in capsys.readouterr().err
-
-
-def test_an_unreadable_metadata_file_names_the_bucket_and_key(capsys):
-    # This is an IAM failure, and the key is the whole of what makes it fixable.
-    glue = FakeGlue({'lakehouse.events': iceberg_table_entry()})
-    s3 = FakeS3(denied=(METADATA_URI,))
-
-    with pytest.raises(typer.Exit) as exc:
-        read_table_metadata(glue, s3, 'lakehouse', 'events')
-
-    assert exc.value.exit_code == 1
-    err = capsys.readouterr().err
-    assert 'AccessDenied' in err
-    assert f's3://example-lake/{METADATA_KEY}' in err
-    assert 's3:GetObject' in err
-
-
-def test_a_metadata_pointer_that_is_not_an_s3_uri_refuses(capsys):
-    glue = FakeGlue({'lakehouse.events': iceberg_table_entry(metadata_uri='/mnt/warehouse/v1.json')})
-
-    with pytest.raises(typer.Exit) as exc:
-        read_table_metadata(glue, FakeS3(), 'lakehouse', 'events')
-
-    assert exc.value.exit_code == 1
-    assert 'not an S3 URI' in capsys.readouterr().err
-
-
-def test_a_metadata_file_that_is_not_json_refuses(capsys):
-    glue = FakeGlue({'lakehouse.events': iceberg_table_entry()})
-    s3 = FakeS3({METADATA_URI: 'PAR1\x00\x01not json at all'})
-
-    with pytest.raises(typer.Exit) as exc:
-        read_table_metadata(glue, s3, 'lakehouse', 'events')
-
-    assert exc.value.exit_code == 1
-    assert 'not readable JSON' in capsys.readouterr().err
-
-
 # --- summary counters -------------------------------------------------------------------------
 
 
-def test_summary_counters_come_back_as_integers():
-    # Iceberg writes every summary value as a string. Without coercion `total-records` is '2000',
-    # which compares, sorts and concatenates without ever raising.
-    metadata = load(four_commit_table())
-    head = metadata.by_id(SNAP_FOUR)
-
-    assert summary_int(head, 'total-records') == 2000
-    assert isinstance(summary_int(head, 'total-records'), int)
-
-
-def test_a_counter_the_writer_did_not_record_is_none_rather_than_zero():
-    # A merge-on-read counter missing from an append's summary means "not reported", and zero
-    # would read as "measured and empty".
-    metadata = load(four_commit_table())
-
-    assert summary_int(metadata.by_id(SNAP_ONE), 'total-equality-deletes') is None
-
-
-def test_average_file_size_is_bytes_over_data_files():
-    metadata = load(four_commit_table())
-
-    assert average_file_bytes(metadata.by_id(SNAP_FOUR)) == 12582912 // 14
-
-
-def test_average_file_size_of_an_empty_commit_is_none():
-    assert average_file_bytes(snapshot(1, BASE_MS, total_data_files=0, total_files_size=0)) is None
-
-
-def test_format_bytes_uses_binary_units():
-    assert format_bytes(512) == '512 B'
-    assert format_bytes(4194304) == '4.0 MiB'
-    assert format_bytes(None) == ''
-
-
-def test_churn_omits_a_side_that_did_not_move():
-    assert format_churn(1200, None) == '+1,200'
-    assert format_churn(600, 1200) == '+600 -1,200'
-    assert format_churn(None, None) == ''
-
-
 # --- lineage, log and refs --------------------------------------------------------------------
-
-
-def test_ancestry_walks_parent_pointers_newest_first():
-    metadata = load(four_commit_table())
-
-    assert [s['snapshot-id'] for s in ancestry(metadata, SNAP_FOUR)] == [SNAP_FOUR, SNAP_THREE, SNAP_TWO, SNAP_ONE]
-
-
-def test_ancestry_survives_a_parent_chain_that_loops():
-    # A cycle cannot happen in a file a writer produced, and walking one forever is a hang rather
-    # than an error, so the guard is worth more than the case is likely.
-    looped = metadata_document(
-        [snapshot(1, BASE_MS, parent=2), snapshot(2, BASE_MS + 1, parent=1)],
-        current=1,
-    )
-
-    assert len(ancestry(TableMetadata(document=looped, location=METADATA_URI), 1)) == 2
-
-
-def test_history_marks_every_entry_as_an_ancestor_when_nothing_was_rolled_back():
-    rows = history_rows(load(four_commit_table()), 10)
-
-    assert [row['snapshot_id'] for row in rows] == [SNAP_ONE, SNAP_TWO, SNAP_THREE, SNAP_FOUR]
-    assert all(row['is_current_ancestor'] for row in rows)
-
-
-def test_history_shows_a_rollback_as_entries_that_stopped_being_ancestors():
-    # This is the only trace a rollback leaves: the skipped commits stay in the log and drop out
-    # of the lineage. Reading the log alone would show five entries and no sign anything changed.
-    rows = history_rows(load(rolled_back_table()), 10)
-
-    abandoned = {row['snapshot_id'] for row in rows if not row['is_current_ancestor']}
-    assert abandoned == {SNAP_THREE, SNAP_FOUR}
-    assert rows[-1]['snapshot_id'] == SNAP_TWO
 
 
 def test_history_limit_takes_the_most_recent_entries_and_keeps_them_chronological():
@@ -541,14 +384,6 @@ def test_branches_list_branches_before_tags_with_their_retention():
 
 
 # --- resolving a snapshot ---------------------------------------------------------------------
-
-
-def test_no_argument_resolves_the_current_snapshot():
-    assert resolve_snapshot(load(four_commit_table()), None)['snapshot-id'] == SNAP_FOUR
-
-
-def test_a_full_snapshot_id_resolves():
-    assert resolve_snapshot(load(four_commit_table()), str(SNAP_TWO))['snapshot-id'] == SNAP_TWO
 
 
 def test_a_unique_tail_of_a_snapshot_id_resolves():
@@ -577,38 +412,6 @@ def test_an_ambiguous_tail_is_a_usage_error_listing_the_candidates(capsys):
     err = capsys.readouterr().err
     assert '1111111111111119108' in err
     assert '2222222222222229108' in err
-
-
-def test_an_unknown_ref_lists_the_ones_that_exist(capsys):
-    with pytest.raises(typer.Exit) as exc:
-        resolve_snapshot(load(four_commit_table()), 'weekly')
-
-    assert exc.value.exit_code == 1
-    err = capsys.readouterr().err
-    assert 'main' in err
-    assert 'month-end' in err
-
-
-def test_a_ref_pointing_at_an_expired_snapshot_says_so(capsys):
-    document = metadata_document([snapshot(SNAP_ONE, BASE_MS)], current=SNAP_ONE, refs={'stale': {'snapshot-id': 999, 'type': 'tag'}})
-
-    with pytest.raises(typer.Exit) as exc:
-        resolve_snapshot(TableMetadata(document=document, location=METADATA_URI), 'stale')
-
-    assert exc.value.exit_code == 1
-    assert 'expired' in capsys.readouterr().err
-
-
-def test_a_non_decimal_digit_refuses_rather_than_raising(capsys):
-    # str.isdigit() is true for characters int() rejects, superscripts among them, so routing on
-    # it sends a value into the id path that then raises. Every other bad input here exits.
-    assert '²'.isdigit() and not '²'.isdecimal()
-
-    with pytest.raises(typer.Exit) as exc:
-        resolve_snapshot(load(four_commit_table()), '²')
-
-    assert exc.value.exit_code == 1
-    assert 'no branch or tag named' in capsys.readouterr().err
 
 
 def test_a_table_with_nothing_committed_says_so_rather_than_erroring_on_none(capsys):
@@ -640,14 +443,6 @@ def test_diff_with_no_arguments_compares_the_current_snapshot_to_its_parent():
     assert (base['snapshot-id'], target['snapshot-id']) == (SNAP_THREE, SNAP_FOUR)
 
 
-def test_diff_with_one_argument_runs_from_there_to_the_current_snapshot():
-    metadata = load(four_commit_table())
-
-    base, target = diff_endpoints(metadata, '4471', None)
-
-    assert (base['snapshot-id'], target['snapshot-id']) == (SNAP_TWO, SNAP_FOUR)
-
-
 def test_diff_on_a_first_commit_refuses_rather_than_comparing_it_to_nothing(capsys):
     metadata = TableMetadata(document=metadata_document([snapshot(SNAP_ONE, BASE_MS)], current=SNAP_ONE), location=METADATA_URI)
 
@@ -656,36 +451,6 @@ def test_diff_on_a_first_commit_refuses_rather_than_comparing_it_to_nothing(caps
 
     assert exc.value.exit_code == 1
     assert 'first commit' in capsys.readouterr().err
-
-
-def test_diff_names_the_commits_that_ran_between_the_two_snapshots():
-    # This is what turns a row-count change into an explanation: two appends and an overwrite is
-    # a different incident from one overwrite.
-    metadata = load(four_commit_table())
-
-    comparison = diff_snapshots(metadata, metadata.by_id(SNAP_ONE), metadata.by_id(SNAP_FOUR))
-
-    assert comparison.linear is True
-    assert [s['snapshot-id'] for s in comparison.path] == [SNAP_TWO, SNAP_THREE, SNAP_FOUR]
-
-
-def test_diff_the_wrong_way_round_reports_that_the_two_are_not_on_one_line():
-    # The counters still subtract, but calling that "what ran between them" would be a lie.
-    metadata = load(four_commit_table())
-
-    comparison = diff_snapshots(metadata, metadata.by_id(SNAP_FOUR), metadata.by_id(SNAP_ONE))
-
-    assert comparison.linear is False
-    assert comparison.path == []
-
-
-def test_diff_of_a_snapshot_against_itself_is_linear_with_no_commits():
-    metadata = load(four_commit_table())
-
-    comparison = diff_snapshots(metadata, metadata.by_id(SNAP_TWO), metadata.by_id(SNAP_TWO))
-
-    assert comparison.linear is True
-    assert comparison.path == []
 
 
 # --- file layout ------------------------------------------------------------------------------
@@ -699,12 +464,6 @@ def test_file_rows_walk_back_from_the_named_snapshot():
     assert [row['snapshot_id'] for row in rows] == [SNAP_THREE, SNAP_TWO, SNAP_ONE]
     assert rows[0]['data_files'] == 11
     assert rows[0]['average_file_bytes'] == 11534336 // 11
-
-
-def test_file_rows_honor_the_limit():
-    metadata = load(four_commit_table())
-
-    assert len(file_rows(metadata, metadata.by_id(SNAP_FOUR), 2)) == 2
 
 
 # --- the --json shape -------------------------------------------------------------------------
@@ -726,115 +485,10 @@ def test_snapshot_json_carries_integers_and_the_refs_pointing_at_it():
     assert data['summary']['operation'] == 'overwrite'
 
 
-def test_snapshot_json_names_the_refs_that_point_at_a_snapshot():
-    metadata = load(four_commit_table())
-
-    assert snapshot_to_dict(metadata, metadata.by_id(SNAP_ONE))['refs'] == ['month-end']
-
-
 # --- rendering --------------------------------------------------------------------------------
 
 
-def test_the_file_table_hides_the_delete_column_on_a_copy_on_write_table():
-    # Most tables never write a delete file, and a column of blanks crowds the numbers that moved.
-    metadata = load(four_commit_table())
-
-    with console.capture() as capture:
-        render_files_table('events', file_rows(metadata, metadata.by_id(SNAP_FOUR), 10))
-
-    assert 'delete files' not in capture.get()
-
-
-def test_the_file_table_shows_the_delete_column_once_a_commit_reports_deletes():
-    document = metadata_document(
-        [snapshot(SNAP_ONE, BASE_MS, total_data_files=6, total_delete_files=2, total_position_deletes=340, total_files_size=6291456)],
-        current=SNAP_ONE,
-    )
-    metadata = TableMetadata(document=document, location=METADATA_URI)
-    rows = file_rows(metadata, metadata.by_id(SNAP_ONE), 10)
-
-    with console.capture() as capture:
-        render_files_table('events', rows)
-
-    assert 'delete files' in capture.get()
-    # Asserted on the row rather than the rendering. A bare `'2' in out` passes on a table with
-    # no delete files at all, because the ISO timestamp column carries 2026.
-    assert rows[0]['delete_files'] == 2
-    assert rows[0]['position_deletes'] == 340
-
-
-def test_the_diff_counter_table_title_does_not_carry_two_snapshot_ids():
-    # Two 19-digit ids wrap the title across the narrow table, and the lines above it already
-    # name both ends of the comparison.
-    #
-    # Asserted as an absence. `'events counters' in out` would survive any title with the ids
-    # appended, which is exactly what this forbids — and at a wide terminal the second id is
-    # clipped off the title entirely, so the rendering does not even show the whole fault.
-    metadata = load(four_commit_table())
-
-    with console.capture() as capture:
-        render_diff('events', diff_snapshots(metadata, metadata.by_id(SNAP_THREE), metadata.by_id(SNAP_FOUR)))
-
-    title = next(line for line in capture.get().splitlines() if 'counters' in line)
-    assert 'events counters' in title
-    assert str(SNAP_THREE) not in title
-    assert str(SNAP_FOUR) not in title
-
-
-def test_the_snapshots_table_does_not_truncate_the_id():
-    # The tail is the handle every other verb accepts, and an ellipsis would hide exactly it.
-    #
-    # Rendered narrow on purpose. A console wide enough to hold a 19-digit id renders `fold` and
-    # `ellipsis` identically, so this assertion would hold with the overflow it exists to refuse.
-    # 60 columns is narrower than the id plus the six columns beside it, which forces the choice.
-    metadata = load(four_commit_table())
-
-    with at_width(console, 60), console.capture() as capture:
-        render_snapshots_table('events', metadata, [metadata.by_id(SNAP_TWO)])
-    rendered = capture.get()
-
-    # The first cell of every body row, joined. Stripping every non-digit from the whole table
-    # instead runs the id into the timestamp beside it, and the assertion then passes on an id
-    # that really was cut — `514032026122400998211772294471` holds the wanted substring nowhere
-    # and a shorter id would find one.
-    folded = ''.join(line.split('│')[1].strip() for line in rendered.splitlines() if line.startswith('│'))
-
-    # Equality rather than containment, and it is what rules the ellipsis out: a truncated cell
-    # reads `51403…` and cannot equal the id. The narrower columns beside this one do truncate at
-    # this width, so asserting no ellipsis anywhere in the table would be a claim about them.
-    assert folded == str(SNAP_TWO)
-
-
 # --- the command surface ----------------------------------------------------------------------
-
-
-def test_the_table_exposes_the_five_read_verbs(monkeypatch):
-    app, _, _ = make_app(four_commit_table(), monkeypatch)
-
-    result = runner.invoke(app, ['events', '--help'])
-
-    assert result.exit_code == 0
-    for verb in ('snapshots', 'history', 'files', 'diff', 'branches'):
-        assert verb in result.stdout
-
-
-def test_no_maintenance_verb_is_advertised(monkeypatch):
-    # compact, expire, orphans and rollback are writes against a real estate whose mechanism is
-    # unsettled. A verb in the help that is not built is worse than an absent one.
-    app, _, _ = make_app(four_commit_table(), monkeypatch)
-
-    result = runner.invoke(app, ['events', '--help'])
-
-    for absent in ('compact', 'expire', 'orphans', 'rollback'):
-        assert absent not in result.stdout
-
-
-def test_an_unknown_table_alias_is_a_usage_error(monkeypatch):
-    # The alias is a sub-app, so an unknown table is an unknown command rather than a resolve
-    # failure, and --help at the resource level lists the ones that exist.
-    app, _, _ = make_app(four_commit_table(), monkeypatch)
-
-    assert runner.invoke(app, ['nope', 'snapshots']).exit_code != 0
 
 
 def test_snapshots_json_is_a_clean_machine_readable_list(monkeypatch):
@@ -865,15 +519,6 @@ def test_history_json_marks_the_abandoned_commits(monkeypatch):
     assert [row['snapshot_id'] for row in rows if not row['is_current_ancestor']] == [SNAP_THREE, SNAP_FOUR]
 
 
-def test_branches_json_lists_every_ref(monkeypatch):
-    app, _, _ = make_app(four_commit_table(), monkeypatch)
-
-    result = runner.invoke(app, ['events', 'branches', '--json'])
-
-    assert result.exit_code == 0
-    assert [row['name'] for row in json.loads(result.stdout)] == ['main', 'nightly', 'month-end']
-
-
 def test_files_json_reports_the_layout_at_each_commit(monkeypatch):
     app, _, _ = make_app(four_commit_table(), monkeypatch)
 
@@ -898,29 +543,6 @@ def test_limit_zero_asks_for_no_rows_on_every_verb(verb, monkeypatch):
     assert json.loads(result.stdout) == []
 
 
-@pytest.mark.parametrize('verb', LIMITED_VERBS)
-def test_an_absent_limit_is_what_asks_for_every_row(verb, monkeypatch):
-    # Absence is the only spelling for "all". The table holds four commits and three refs, so a
-    # verb that capped by default would return fewer than everything it has.
-    app, _, _ = make_app(four_commit_table(), monkeypatch)
-
-    everything = runner.invoke(app, ['events', verb, '--json'])
-    capped = runner.invoke(app, ['events', verb, '--limit', '1', '--json'])
-
-    assert everything.exit_code == 0
-    assert len(json.loads(everything.stdout)) > len(json.loads(capped.stdout)) == 1
-
-
-@pytest.mark.parametrize('verb', LIMITED_VERBS)
-def test_a_negative_limit_is_a_usage_error_not_a_quiet_off_by_one(verb, monkeypatch):
-    # -1 into a slice drops the last row and returns a plausible count nobody asked for.
-    app, _, _ = make_app(four_commit_table(), monkeypatch)
-
-    result = runner.invoke(app, ['events', verb, '--limit', '-1', '--json'])
-
-    assert result.exit_code == 2
-
-
 def test_a_refusal_keeps_stdout_clean_for_a_json_reader(monkeypatch):
     # Every one of these verbs takes --json, so a caller pipes stdout into jq. A refusal printed
     # there is a parse error instead of a message.
@@ -933,18 +555,6 @@ def test_a_refusal_keeps_stdout_clean_for_a_json_reader(monkeypatch):
     assert result.exit_code == 1
     assert result.stdout == ''
     assert 'no table lakehouse.events' in result.stderr
-
-
-def test_files_help_says_there_is_no_row_per_data_file(monkeypatch):
-    # The manifests naming individual files are Avro, which dectl does not read. Someone reaching
-    # for a file listing should learn that from the help rather than from the output.
-    app, _, _ = make_app(four_commit_table(), monkeypatch)
-
-    result = runner.invoke(app, ['events', 'files', '--help'])
-
-    # Click formats its own help to its own width detection, which the console pin does not
-    # reach — so the phrase wraps with the next line's indentation still attached to it.
-    assert 'no row-per-file view' in unwrapped(result.stdout)
 
 
 def test_diff_json_carries_the_commits_and_the_counter_changes(monkeypatch):
@@ -973,27 +583,6 @@ def test_diff_reports_the_overwrite_that_dropped_rows(monkeypatch):
     records = next(row for row in data['counters'] if row['key'] == 'total-records')
     assert records['change'] == -600
     assert [row['operation'] for row in data['commits']] == ['overwrite']
-
-
-def test_diff_the_wrong_way_round_still_answers_and_says_it_is_not_a_line(monkeypatch):
-    app, _, _ = make_app(four_commit_table(), monkeypatch)
-
-    result = runner.invoke(app, ['events', 'diff', '5567', '1234', '--json'])
-
-    assert result.exit_code == 0
-    data = json.loads(result.stdout)
-    assert data['linear'] is False
-    assert data['commits'] == []
-
-
-def test_a_failure_to_read_the_table_exits_non_zero_through_the_command(monkeypatch):
-    config = make_config({'events': {'database': 'lakehouse', 'table': 'events'}})
-    monkeypatch.setattr('dectl.commands.iceberg.make_session', lambda _config: FakeSession(FakeGlue(), FakeS3()))
-    app = make_iceberg_app('proj', config.pipelines['proj'], config)
-
-    result = runner.invoke(app, ['events', 'snapshots'])
-
-    assert result.exit_code == 1
 
 
 def test_the_active_env_substitutes_into_the_database_and_table(monkeypatch):

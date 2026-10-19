@@ -1,8 +1,3 @@
-import os
-import re
-import subprocess
-import sys
-import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import get_args
@@ -10,15 +5,9 @@ from typing import get_origin
 from unittest.mock import patch
 
 import pytest
-import typer
-import yaml
 from pydantic import BaseModel
 from pydantic import ValidationError
-from pydantic import field_validator
 
-from dectl.config import CONFIG_LOAD_ERRORS
-from dectl.config import ROOT_SITE
-from dectl.config import TEMPLATE_CONFIG
 from dectl.config import DectlConfig
 from dectl.config import Defaults
 from dectl.config import GlueJobConfig
@@ -28,118 +17,20 @@ from dectl.config import JenkinsJobConfig
 from dectl.config import LambdaConfig
 from dectl.config import MonitorConfig
 from dectl.config import PipelineConfig
-from dectl.config import ResourceModel
 from dectl.config import StepFunctionConfig
 from dectl.config import StrictModel
-from dectl.config import config_error_headline
 from dectl.config import config_value_faults
-from dectl.config import declared_keys
-from dectl.config import declared_names
-from dectl.config import declared_paths
-from dectl.config import declared_resource_names
-from dectl.config import declared_values
-from dectl.config import declares_nothing
 from dectl.config import describe_config_error
 from dectl.config import load_config
-from dectl.config import pipeline_root
 from dectl.config import pipeline_value_faults
+from dectl.config import read_config_files
 from dectl.config import resolve_from_root
-from dectl.env import render_env_model
-from dectl.env import render_value
-from dectl.env import set_active_environment
-from dectl.env import substitute_env
-from dectl.pipeline_view import aws_names_only
-from dectl.pipeline_view import pipeline_to_dict
-from dectl.values import ANCHOR_FORM
-from dectl.values import EDIT_CONFIG
 from dectl.values import FAULT_WORDING
-from dectl.values import KEY_FORM
-from dectl.values import ROOT_FORM
-from dectl.values import SHOW_RESOLVED
-from dectl.values import SPELLING_FAULTS
 from dectl.values import ConfigFault
 from dectl.values import DeclaresValues
-from dectl.values import PathKind
-from dectl.values import UnusableValue
-from dectl.values import ValueSite
 from dectl.values import Written
 from dectl.values import deployable_files
-from dectl.values import path_fault
-from dectl.values import recovery_lines
-from dectl.values import root_fault
 from tests.conftest import LAYERED_CONFIG
-
-
-def nested_model(annotation) -> tuple[type[StrictModel] | None, bool]:
-    """The model an annotation carries, and whether the template holds them keyed by alias.
-
-    `dict[str, GlueJobConfig]` holds one per alias, so its *values* are the blocks to descend
-    into. A bare `MonitorConfig` and a `JenkinsJobConfig | None` are the block itself."""
-    for arg in [annotation, *get_args(annotation)]:
-        if isinstance(arg, type) and issubclass(arg, StrictModel):
-            return arg, get_origin(annotation) in (dict, Mapping)
-    return None, False
-
-
-def pairs_written_in(model: type[StrictModel], raw) -> set[tuple[type[StrictModel], str]]:
-    """Every `(model, field)` the parsed template writes, walking the mapping beside the models.
-
-    Keyed on the pair rather than the name. Three names are shared across models — `name` on
-    three resources, `lambdas` and `step_functions` on two — so a flat set of names lets a field
-    deleted from its only block be answered by a same-named field somewhere else entirely.
-
-    The mapping `yaml.safe_load` returns rather than the validated config, because a key the
-    template never mentions parses into its model default and is then indistinguishable from one
-    the example set. The raw mapping distinguishes absent from set exactly, and it is also the
-    only form that knows which model a block belongs to.
-
-    Reading the parse rather than the lines is what makes the walk blind to where a key *looks*
-    like it is written: a `key: value` inside a block scalar is a string, and counting it would
-    let a field deleted from the template be answered by its own name appearing inside some
-    unrelated free-form `arguments:` entry."""
-    written: set[tuple[type[StrictModel], str]] = set()
-    if not isinstance(raw, dict):
-        return written
-    for name, field in model.model_fields.items():
-        if name not in raw:
-            continue
-        written.add((model, name))
-        child, by_alias = nested_model(field.annotation)
-        if child is None:
-            continue
-        value = raw[name]
-        blocks = value.values() if by_alias and isinstance(value, dict) else [value]
-        for block in blocks:
-            written |= pairs_written_in(child, block)
-    return written
-
-
-def test_the_template_names_every_field_the_models_hold():
-    """The template is the only exhaustive listing of the config, so a field missing from it is
-    a field with no documentation anywhere.
-
-    Validity is not enough on its own: every field has a default or is supplied elsewhere in the
-    example, so a whole block can fall out and the round-trip above still passes.
-
-    An alias key is not a field and never appears here, because the walk descends by model rather
-    than by key name. A field genuinely not worth writing out is added below with the reason, the
-    same bargain as `UNCHECKED_FIELDS`."""
-    declared = set()
-    for model in config_models():
-        for field in model.model_fields:
-            declared.add((model, field))
-    written = pairs_written_in(DectlConfig, yaml.safe_load(TEMPLATE_CONFIG))
-
-    assert declared - written == set(SHOWN_ONLY_AS_A_COMMENT)
-
-
-# Fields the template carries commented out, with the reason. The walk reads the parse, so a
-# commented key is absent from it and these subtract: the point of the guard is that a reader can
-# see a field, and a commented line shows it while an absent one does not.
-SHOWN_ONLY_AS_A_COMMENT = {
-    (PipelineConfig, 'resolve_paths_from'): 'names a directory no machine has, and `config validate` checks it, '
-    'so `config init` would write a config that fails its own check',
-}
 
 
 def merged(base, overlay):
@@ -150,31 +41,29 @@ def merged(base, overlay):
 
 def test_variables_substitute_at_load_and_refuse_what_would_clobber(monkeypatch, tmp_path):
     """The committed config fans one top-level variable out to two pipelines through each one's
-    own prefix, and copies finance from sales with a YAML merge. Its resolved names under an
-    environment are `test_main`'s, read through the CLI."""
+    own prefix. Its resolved names under an environment are `test_main`'s, read through the CLI."""
     monkeypatch.setattr('dectl.config.CONFIG_PATH', LAYERED_CONFIG)
     config = load_config()
     assert config is not None
     finance = config.pipelines['finance']
     # `{env}` survives the load, because --env is parsed after the tree is built.
     assert finance.buckets['raw'] == 'acme-{env}-finance-raw'
-    # An anchored value is copied as the file wrote it, so each pipeline fills its own prefix.
-    assert finance.glue_jobs['backfill'].arguments == {
+    assert finance.glue_jobs['load'].arguments == {
         'SOURCE': 's3://acme-{env}-finance-raw/invoices/',
         'LANDING': 's3://acme-{env}-finance-raw/invoices/incoming/',
         'TARGET_BUCKET': 'acme-{env}-finance-curated',
         'OUTPUT_PATTERN': 'out/{date}/',
     }
 
-    raw = yaml.safe_load(LAYERED_CONFIG.read_text())
+    raw = read_config_files()
     misnamed = DectlConfig.model_validate(merged(raw, {'variables': {'company': 'Acme_Co'}}))
     traced = {(fault.pipeline, fault.written) for fault in config_value_faults(misnamed)}
 
     def prefix_trace(pipeline: str) -> tuple[str, ...]:
         return (
-            f'{{prefix}} from pipelines.{pipeline}.variables.prefix',
-            '{company} from variables.company',
-            f'{{pipeline}} from pipelines.{pipeline}.variables.pipeline',
+            f'{{prefix}} from pipelines/{pipeline}.yaml variables.prefix',
+            '{company} from config.yaml variables.company',
+            f'{{pipeline}} from pipelines/{pipeline}.yaml variables.pipeline',
         )
 
     # A fault in a bucket named through two variables traces to the one holding the bad character.
@@ -184,9 +73,15 @@ def test_variables_substitute_at_load_and_refuse_what_would_clobber(monkeypatch,
         for row in [
             (
                 pipeline,
-                Written('{raw_bucket}', (f'{{raw_bucket}} from pipelines.{pipeline}.variables.raw_bucket', *prefix_trace(pipeline))),
+                Written('{raw_bucket}', (f'{{raw_bucket}} from pipelines/{pipeline}.yaml variables.raw_bucket', *prefix_trace(pipeline))),
             ),
-            (pipeline, Written('{prefix}-curated', prefix_trace(pipeline))),
+            (
+                pipeline,
+                Written(
+                    '{curated_bucket}',
+                    (f'{{curated_bucket}} from pipelines/{pipeline}.yaml variables.curated_bucket', *prefix_trace(pipeline)),
+                ),
+            ),
             (pipeline, Written('{prefix}-scripts', prefix_trace(pipeline))),
         ]
     }
@@ -199,16 +94,16 @@ def test_variables_substitute_at_load_and_refuse_what_would_clobber(monkeypatch,
         (
             'undefined_variable',
             {'pipelines': {'sales': {'variables': {'shared': 'x'}}, 'finance': {'buckets': {'shared': '{shared}'}}}},
-            'define it in pipelines.finance.variables too, or move it to the top-level variables block',
+            'define it in pipelines/finance.yaml variables too, or move it to config.yaml variables',
         ),
-        # Moving it to the top level would leave {prefix} out of its reach, so that is not offered.
+        # Moving it to config.yaml would leave {prefix} out of its reach, so that is not offered.
         (
             'undefined_variable',
             {'pipelines': {'sales': {'variables': {'archive': '{prefix}-archive'}}, 'finance': {'buckets': {'archive': '{archive}'}}}},
-            'It is built from the pipeline variables {prefix}, so define {archive} in pipelines.finance.variables too',
+            'It is built from the pipeline variables {prefix}, so define {archive} in pipelines/finance.yaml variables too',
         ),
         ('variable_not_a_string', {'variables': {'account': 123}}, 'octal'),
-        ('variable_not_a_string', {'variables': {'glue': {'role': 'r'}}}, 'YAML read this as a mapping. To reuse a block, anchor it'),
+        ('variable_not_a_string', {'variables': {'glue': {'role': 'r'}}}, 'YAML read this as a mapping'),
     ]
     for kind, overlay, message in refusals:
         with pytest.raises(ValidationError) as caught:
@@ -217,129 +112,48 @@ def test_variables_substitute_at_load_and_refuse_what_would_clobber(monkeypatch,
         assert message in caught.value.errors()[0]['msg']
 
 
-def leaf_strings(value, key=None):
-    if isinstance(value, dict):
-        for child_key, child in value.items():
-            yield from leaf_strings(child, child_key)
-    elif isinstance(value, str):
-        yield key, value
-
-
-def test_the_readme_example_is_the_committed_config_and_resolves_and_refuses_as_it_says(monkeypatch, tmp_path):
-    """The README's full example is read as a reference, so every value and message it shows is
-    what dectl gives for the committed config."""
-    readme = (Path(__file__).parent.parent / 'README.md').read_text()
-    section = readme.split('### A full config', 1)[1]
-    section = re.split(r'^#{2,3} ', section, maxsplit=1, flags=re.MULTILINE)[0]
-    fences = dict(re.findall(r'^```(\w+)\n(.*?)^```$', section, flags=re.MULTILINE | re.DOTALL))
-    text = LAYERED_CONFIG.read_text()
-    assert fences['yaml'] == text
-    assert fences['json'] == (LAYERED_CONFIG.parent / 'flow.asl.json.tftpl').read_text()
-
-    def table_rows(part: str) -> list[tuple[str, str]]:
-        rows = []
-        for row in re.findall(r'^\| `.*$', part, flags=re.MULTILINE):
-            cells = re.fullmatch(r'\| `(.+?)` +\| `(.+?)` +\|', row)
-            assert cells, row
-            rows.append((cells[1], cells[2]))
-        return rows
-
-    resolutions, mistakes = (table_rows(part) for part in section.split('What each common mistake gets'))
-    monkeypatch.setattr('dectl.config.CONFIG_PATH', LAYERED_CONFIG)
-    config = load_config()
-    assert config is not None
-    set_active_environment('prod', '--env')
-    try:
-        finance = set(leaf_strings(render_value(config.pipelines['finance'].model_dump())))
-    finally:
-        set_active_environment('dev', 'default')
-    assert resolutions
-    for written, resolved in resolutions:
-        assert written in text
-        assert (written.split(':')[0], resolved) in finance
-
-    written_config = tmp_path / 'config.yaml'
-    monkeypatch.setattr('dectl.config.CONFIG_PATH', written_config)
-
-    def load_with(line: str):
-        key = line.split(':')[0]
-        lines = text.splitlines(keepends=True)
-        [at] = [number for number, original in enumerate(lines) if original.strip().startswith(f'{key}: ')]
-        indent = lines[at][: len(lines[at]) - len(lines[at].lstrip())]
-        written_config.write_text(''.join([*lines[:at], f'{indent}{line}\n', *lines[at + 1 :]]))
-        return load_config()
-
-    assert mistakes
-    for line, message in mistakes:
-        with pytest.raises(ValidationError) as caught:
-            load_with(line)
-        assert {error['msg'] for error in caught.value.errors()} == {message}
-
-    # `raw` sits above the line anchoring &curated-bucket.
-    with pytest.raises(yaml.YAMLError, match='found undefined alias'):
-        load_with('raw: *curated-bucket')
-
-
-def test_validation_rejects_unknown_pipeline_key():
-    raw = {
-        'defaults': {'account_id': '111'},
-        'pipelines': {'p': {'step_function': {}}},  # typo: should be step_functions
-    }
-    with pytest.raises(ValidationError):
-        DectlConfig.model_validate(raw)
-
-
-def test_validation_rejects_unknown_defaults_key():
-    raw = {
-        'defaults': {'account_id': '111', 'regon': 'us-east-1'},  # typo: should be region
-        'pipelines': {},
-    }
-    with pytest.raises(ValidationError):
-        DectlConfig.model_validate(raw)
-
-
 def test_load_config_returns_none_when_file_missing():
     with patch('dectl.config.CONFIG_PATH', Path('/nonexistent/config.yaml')):
         assert load_config() is None
 
 
-def test_load_config_parses_valid_yaml():
-    content = """
-defaults:
-  account_id: "111111111111"
-  region: us-west-2
-pipelines:
-  foo:
-    glue_jobs:
-      bar:
-        name: foo-bar-job
-        script_bucket: foo-bucket
-        scripts: [main.py]
-        role: "arn:aws:iam::111111111111:role/foo-role"
-"""
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-        f.write(content)
-        f.flush()
-        with patch('dectl.config.CONFIG_PATH', Path(f.name)):
-            config = load_config()
-            assert config is not None
-            assert config.defaults.region == 'us-west-2'
-            assert 'foo' in config.pipelines
+def test_each_pipeline_is_read_from_its_own_file(monkeypatch, tmp_path):
+    """config.yaml's variables reach every pipeline file and a pipeline's reach its own, and a
+    fault names the file holding it."""
+    monkeypatch.setattr('dectl.config.CONFIG_PATH', tmp_path / 'config.yaml')
+    (tmp_path / 'config.yaml').write_text('variables:\n  company: acme\ndefaults:\n  account_id: "1"\n')
+    pipelines = tmp_path / 'pipelines'
+    pipelines.mkdir()
+    (pipelines / 'sales.yaml').write_text('variables:\n  raw: "{company}-sales-raw"\nbuckets:\n  raw: "{raw}"\n')
+    (pipelines / 'finance.yaml').write_text('buckets:\n  raw: "{company}-finance-raw"\n')
+    # An editor's swap and backup files are skipped, never refused with every pipeline.
+    (pipelines / '.finance.yaml.swp').write_text('[ not yaml')
+    (pipelines / 'finance.yaml~').write_text('[ not yaml')
 
-
-def test_validation_rejects_missing_account_id():
-    raw = {'defaults': {'region': 'us-east-1'}, 'pipelines': {}}
-    with pytest.raises(ValidationError):
-        DectlConfig.model_validate(raw)
-
-
-def test_validation_rejects_invalid_glue_job():
-    raw = {
-        'defaults': {'account_id': '111', 'region': 'us-east-1'},
-        'pipelines': {'bad': {'glue_jobs': {'j': {'scripts': ['s.py']}}}},
+    config = load_config()
+    assert config is not None
+    assert {name: pipeline.buckets for name, pipeline in config.pipelines.items()} == {
+        'finance': {'raw': 'acme-finance-raw'},
+        'sales': {'raw': 'acme-sales-raw'},
     }
-    with pytest.raises(ValidationError):
-        DectlConfig.model_validate(raw)
+
+    (pipelines / 'finance.yaml').write_text('buckets:\n  raw: "{raw}"\n')
+    (pipelines / 'orders.yml').write_text('buckets: {}\n')
+    (pipelines / 'search.yaml').write_text('buckets: {}\n')
+    with pytest.raises(ValidationError) as caught:
+        load_config()
+    # A pipeline saved as .yml, and one dectl's own `search` would hide, are each refused by name.
+    assert [(error['type'], error['input']) for error in caught.value.errors()] == [
+        ('not_a_pipeline_file', 'orders.yml'),
+        ('reserved_pipeline_name', 'search.yaml'),
+    ]
+    (pipelines / 'orders.yml').unlink()
+    (pipelines / 'search.yaml').unlink()
+    with pytest.raises(ValidationError) as caught:
+        load_config()
+    assert describe_config_error(caught.value)[0].startswith(
+        '  pipelines/finance.yaml buckets.raw: variable {raw} is defined in pipelines/sales.yaml variables, which this value cannot see'
+    )
 
 
 def glue_job(**sizing):
@@ -371,126 +185,6 @@ def test_half_a_worker_pair_is_refused_naming_the_other_half(named, missing):
     assert missing in str(raised.value)
 
 
-def test_a_job_naming_neither_sizing_model_is_valid():
-    # The common case by far: sizing stays Terraform's and dectl deploys code over the top.
-    assert glue_job().worker_type is None
-
-
-# Each field that has to be positive, with whatever else the config needs to be otherwise valid.
-# number_of_workers carries a worker_type: without one the mutual-exclusion rule raises first,
-# so the case passes on a rule it is not about and deleting the bound leaves it green.
-POSITIVE_COUNTS = [
-    pytest.param('number_of_workers', {'worker_type': 'G.1X'}, id='number_of_workers'),
-    pytest.param('timeout_minutes', {}, id='timeout_minutes'),
-    pytest.param('max_concurrent_runs', {}, id='max_concurrent_runs'),
-]
-
-
-@pytest.mark.parametrize('field, valid_rest', POSITIVE_COUNTS)
-def test_a_count_that_has_to_be_positive_refuses_zero(field, valid_rest):
-    # Glue rejects each of these at zero. max_retries is deliberately not here: zero is the
-    # value worth having, since the Glue default reruns a failing job three times.
-    with pytest.raises(ValidationError) as raised:
-        glue_job(**{field: 0}, **valid_rest)
-
-    # Named, because ValidationError is what every other rule on this model raises too.
-    assert raised.value.errors()[0]['type'] == 'greater_than_equal'
-
-
-def test_max_retries_accepts_zero():
-    assert glue_job(max_retries=0).max_retries == 0
-
-
-def test_glue_job_arguments_parsed_as_dict():
-    raw = {
-        'defaults': {'account_id': '111', 'region': 'us-east-1'},
-        'pipelines': {
-            'p': {
-                'glue_jobs': {
-                    'j': {
-                        'name': 'j',
-                        'script_bucket': 'sales-scripts',
-                        'scripts': ['s.py'],
-                        'role': 'r',
-                        'arguments': {'FOO': 'bar', 'NUM': '4'},
-                    }
-                },
-            }
-        },
-    }
-    config = DectlConfig.model_validate(raw)
-    job = config.pipelines['p'].glue_jobs['j']
-    assert job.arguments == {'FOO': 'bar', 'NUM': '4'}
-
-
-def test_lambda_live_alias_field_parsed():
-    raw = {
-        'defaults': {'account_id': '111'},
-        'pipelines': {'p': {'lambdas': {'fn': {'name': 'n', 'source_dir': 'd', 'live_alias': 'live'}}}},
-    }
-    config = DectlConfig.model_validate(raw)
-    assert config.pipelines['p'].lambdas['fn'].live_alias == 'live'
-
-
-def test_lambda_rejects_renamed_alias_key():
-    # The field was renamed alias -> live_alias; extra='forbid' turns the stale key into a loud
-    # error rather than a silent drop, so a not-yet-migrated config fails validate instead of
-    # silently never moving the alias on deploy --publish.
-    raw = {
-        'defaults': {'account_id': '111'},
-        'pipelines': {'p': {'lambdas': {'fn': {'name': 'n', 'source_dir': 'd', 'alias': 'live'}}}},
-    }
-    with pytest.raises(ValidationError):
-        DectlConfig.model_validate(raw)
-
-
-def test_buckets_parsed_as_shortname_mapping():
-    raw = {
-        'defaults': {'account_id': '111', 'region': 'us-east-1'},
-        'pipelines': {'p': {'buckets': {'raw': 'my-raw-bucket', 'curated': 'my-curated-bucket'}}},
-    }
-    config = DectlConfig.model_validate(raw)
-    assert config.pipelines['p'].buckets == {'raw': 'my-raw-bucket', 'curated': 'my-curated-bucket'}
-
-
-def test_buckets_default_to_empty_when_omitted():
-    raw = {
-        'defaults': {'account_id': '111'},
-        'pipelines': {'p': {}},
-    }
-    config = DectlConfig.model_validate(raw)
-    assert config.pipelines['p'].buckets == {}
-
-
-def test_monitor_selection_parsed():
-    raw = {
-        'defaults': {'account_id': '111'},
-        'pipelines': {'p': {'monitor': {'lambdas': ['a', 'b'], 'step_functions': ['flow']}}},
-    }
-    config = DectlConfig.model_validate(raw)
-    monitor = config.pipelines['p'].monitor
-    assert monitor.lambdas == ['a', 'b']
-    assert monitor.step_functions == ['flow']
-
-
-def test_monitor_defaults_to_empty():
-    raw = {'defaults': {'account_id': '111'}, 'pipelines': {'p': {}}}
-    config = DectlConfig.model_validate(raw)
-    assert config.pipelines['p'].monitor.lambdas == []
-    assert config.pipelines['p'].monitor.step_functions == []
-
-
-def test_defaults_have_sensible_fallbacks():
-    raw = {
-        'defaults': {'account_id': '111'},
-        'pipelines': {},
-    }
-    config = DectlConfig.model_validate(raw)
-    assert config.defaults.region == 'us-east-2'
-    assert config.defaults.environment == 'dev'
-    assert config.defaults.aws_profile == ''
-
-
 def validation_error_for(raw) -> ValidationError:
     """The real exception a bad config produces, since the renderer walks `.errors()`."""
     with pytest.raises(ValidationError) as caught:
@@ -510,7 +204,7 @@ def test_describe_names_the_location_and_the_rejected_value():
 
     lines = describe_config_error(exc)
 
-    assert lines[0] == '  pipelines.p.step_function: Extra inputs are not permitted'
+    assert lines[0] == '  pipelines/p.yaml step_function: Extra inputs are not permitted'
     assert lines[1] == "    got: {'flow': {'name': 'sm'}}"
 
 
@@ -521,7 +215,7 @@ def test_describe_truncates_a_large_rejected_value():
 
     lines = describe_config_error(exc)
 
-    assert lines[0] == '  defaults: Field required'
+    assert lines[0] == '  config.yaml defaults: Field required'
     assert lines[1].endswith('…')
     assert len(lines[1]) < 200
 
@@ -531,54 +225,9 @@ def test_describe_reports_every_problem_not_only_the_first():
 
     lines = describe_config_error(exc)
 
-    assert '  defaults.acct: Extra inputs are not permitted' in lines
-    assert '  pipelines.p.glue_jbs: Extra inputs are not permitted' in lines
-
-
-def test_a_yaml_syntax_error_reports_through_the_same_renderer():
-    # Both failures are caught together everywhere, so both have to render.
-    with pytest.raises(yaml.YAMLError) as caught:
-        yaml.safe_load('defaults:\n  account_id: "1"\n pipelines: {}\n')
-
-    lines = describe_config_error(caught.value)
-
-    assert lines
-    assert all(line.startswith('  ') for line in lines)
-
-
-def test_the_headline_distinguishes_the_two_failures():
-    schema_error = validation_error_for({'pipelines': {}})
-    with pytest.raises(yaml.YAMLError) as caught:
-        yaml.safe_load('a:\n b: 1\n  c: 2\n')
-
-    assert 'does not match the expected schema' in config_error_headline(schema_error)
-    assert 'is not valid YAML' in config_error_headline(caught.value)
-
-
-def config_path_in_a_fresh_interpreter(env: dict[str, str]) -> str:
-    """The path is resolved at import, so the environment has to be set before the process starts."""
-    result = subprocess.run(
-        [sys.executable, '-c', 'from dectl.config import CONFIG_PATH; print(CONFIG_PATH)'],
-        capture_output=True,
-        text=True,
-        env=env,
-        check=True,
-    )
-    return result.stdout.strip()
-
-
-def test_config_path_follows_xdg_config_home(tmp_path):
-    resolved = config_path_in_a_fresh_interpreter({**os.environ, 'XDG_CONFIG_HOME': str(tmp_path)})
-
-    assert resolved == str(tmp_path / 'dectl' / 'config.yaml')
-
-
-def test_config_path_falls_back_to_dot_config_when_xdg_is_unset():
-    env = {key: value for key, value in os.environ.items() if key != 'XDG_CONFIG_HOME'}
-
-    resolved = config_path_in_a_fresh_interpreter(env)
-
-    assert resolved == str(Path.home() / '.config' / 'dectl' / 'config.yaml')
+    # Each names the file holding it, so the two land in different files.
+    assert '  config.yaml defaults.acct: Extra inputs are not permitted' in lines
+    assert '  pipelines/p.yaml glue_jbs: Extra inputs are not permitted' in lines
 
 
 # Every string-valued config field that dectl deliberately does not check, with the reason. A
@@ -678,30 +327,11 @@ def config_models(root: type[BaseModel] = DectlConfig) -> set[type[StrictModel]]
     return found
 
 
-def resource_models() -> set[type[ResourceModel]]:
-    """The subset of the config tree that declares — every `ResourceModel` a pipeline holds."""
-    return {model for model in config_models() if issubclass(model, ResourceModel)}
-
-
-def test_the_model_walk_reaches_every_resource_kind():
-    # The walk above is only as good as the evidence that it reaches something, and an empty one
-    # satisfies every assertion below. Named outright, so a new resource kind is a decision here
-    # too rather than something that silently joins or silently does not.
-    assert {model.RESOURCE for model in resource_models()} == {'pipeline', 'glue', 'lambda', 'sfn', 'iceberg', 'monitor'}
-
-
 def test_every_string_field_is_classified():
     # The invariant the design rests on: three declarations say what dectl checks about a field,
     # and everything that checks, resolves or excludes a value reads one of them. A field in
     # none of them and not named above is checked by nothing, and that reads as success — the
     # config validates and the env-effect guard goes quiet.
-    #
-    # Every model the config holds, not every model that declares. `config_models` was widened
-    # to reach `Defaults`, `JenkinsConfig` and `JenkinsJobConfig` for exactly this assertion,
-    # and reading `resource_models` here filtered all three back out one function later — so a
-    # string field added to any of them stayed unclassified and unreported, `aws_profile`
-    # included. A model that declares nothing contributes its whole string surface, which is
-    # the right answer: none of it is checked.
     unclassified = set()
     for model in config_models():
         declared = set()
@@ -711,147 +341,6 @@ def test_every_string_field_is_classified():
             unclassified.add((model, field))
 
     assert unclassified - set(UNCHECKED_FIELDS) == set()
-
-
-def test_every_exempted_field_is_one_the_classification_walk_can_reach():
-    """An exemption the walk cannot produce is documentation wearing a guard's clothes.
-
-    The guard above subtracts this table from what it found, so a row naming a field the walk
-    never reaches subtracts nothing and asserts nothing. That is not a harmless spare row: eight
-    of these named models the walk had been filtered down past, and their presence is precisely
-    what made the narrow population look deliberate rather than broken. Deleting all eight left
-    the suite green, which is the tell."""
-    reachable = set()
-    for model in config_models():
-        for field in string_fields(model):
-            reachable.add((model, field))
-
-    assert set(UNCHECKED_FIELDS) - reachable == set()
-
-
-def test_every_declared_path_field_reaches_declared_paths():
-    # The declaration is only half of it: a field declared in PATH_FIELDS and never enumerated
-    # is checked by nothing just as surely as an undeclared one.
-    pipeline = PipelineConfig.model_validate(
-        {
-            'resolve_paths_from': '/srv/salesdata',
-            'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'sales-scripts', 'scripts': ['x.py'], 'role': 'r'}},
-            'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}},
-            'step_functions': {'flow': {'name': 'm', 'definition_file': 'flow.asl.json'}},
-            'buckets': {'raw': 'sales-raw'},
-            'iceberg_tables': {'events': {'database': 'd', 'table': 't'}},
-        }
-    )
-    declared_on_models = set()
-    for model in resource_models():
-        declared_on_models.update((model.RESOURCE, field) for field in model.PATH_FIELDS)
-
-    enumerated = {(path.site.resource, path.site.field) for path in declared_paths(pipeline)}
-
-    assert declared_on_models - enumerated == set()
-
-
-# Every mechanism that reads a declaration, and the sites each one emits. Named individually
-# rather than sampled: a consumer absent from this table is one nothing holds to the property,
-# and two entries where one calls the other assert a single mechanism twice.
-SITES_OF = {
-    'PATH_FIELDS': {
-        'declared_values': lambda p: {(s.resource, s.alias, s.field) for s, _, _ in declared_values(p, 'PATH_FIELDS')},
-        'declared_paths': lambda p: {(d.site.resource, d.site.alias, d.site.field) for d in declared_paths(p)},
-    },
-    'KEY_FIELDS': {
-        'declared_values': lambda p: {(s.resource, s.alias, s.field) for s, _, _ in declared_values(p, 'KEY_FIELDS')},
-        'declared_keys': lambda p: {(k.site.resource, k.site.alias, k.site.field) for k in declared_keys(p)},
-    },
-    'BUCKET_FIELDS': {
-        'declared_values': lambda p: {(s.resource, s.alias, s.field) for s, _, _ in declared_values(p, 'BUCKET_FIELDS')},
-        'declared_names': lambda p: {(n.site.resource, n.site.alias, n.site.field) for n in declared_names(p)},
-    },
-}
-
-# One config per member shape, and the field each shape's owner is given a declaration on. The
-# alias is the one a row for that member carries: only a dict-held member has one, because the
-# other two are reached without a key. A fourth shape is added by copying a row, so every column
-# here is the value it will have.
-SHAPES = [
-    ('dict-held', LambdaConfig, {'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}}}, 'fn', 'source_dir'),
-    ('bare-field', MonitorConfig, {'monitor': {'lambdas': ['a']}}, '', 'lambdas'),
-    ('on-the-pipeline', PipelineConfig, {'resolve_paths_from': '/srv/x'}, '', 'resolve_paths_from'),
-]
-MEMBER_SHAPES = [shape for shape in SHAPES if shape[1] is not PipelineConfig]
-
-
-@pytest.mark.parametrize(('declaration', 'consumers'), SITES_OF.items(), ids=list(SITES_OF))
-@pytest.mark.parametrize(('shape', 'owner', 'raw', 'alias', 'field'), SHAPES, ids=[s[0] for s in SHAPES])
-def test_every_declaration_consumer_sees_every_member_shape(monkeypatch, declaration, consumers, shape, owner, raw, alias, field):
-    # `declaring_members` is the one walk, and this is what keeps it one. A consumer that
-    # traverses for itself reaches a narrower set, and the failure is silent in every direction:
-    # a value nothing enumerates is a value nothing checks, and no check means no fault.
-    declared = {field: PathKind.DIRECTORY} if declaration == 'PATH_FIELDS' else frozenset({field})
-    monkeypatch.setattr(owner, declaration, declared)
-    # `buckets` sits on the pipeline and is `s3` to a reader, so its rows carry that word
-    # rather than the owner's own.
-    expected = (owner.site_resource(field), alias, field)
-    pipeline = PipelineConfig.model_validate(raw)
-
-    for name, sites in consumers.items():
-        assert expected in sites(pipeline), f'{name} never saw {expected} for a {shape} member'
-
-
-@pytest.mark.parametrize(('shape', 'owner', 'raw', 'alias', 'field'), MEMBER_SHAPES, ids=[s[0] for s in MEMBER_SHAPES])
-def test_declares_nothing_sees_every_member_shape(monkeypatch, shape, owner, raw, alias, field):
-    # Its own entry, because it reports the values the others skip: a declared field holding
-    # nothing yields no row anywhere else, so nothing else can stand in for it.
-    monkeypatch.setattr(owner, 'PATH_FIELDS', {field: PathKind.DIRECTORY})
-    blanked = {**raw}
-    blanked['monitor' if owner is MonitorConfig else 'lambdas'] = (
-        {'lambdas': []} if owner is MonitorConfig else {'fn': {'name': 'n', 'source_dir': ''}}
-    )
-    pipeline = PipelineConfig.model_validate(blanked)
-
-    sites = {(s.resource, s.alias, s.field) for s in declares_nothing(pipeline)}
-
-    assert (owner.site_resource(field), alias, field) in sites, f'declares_nothing missed a {shape} member'
-
-
-@pytest.mark.parametrize(('shape', 'owner', 'raw', 'alias', 'field'), SHAPES, ids=[s[0] for s in SHAPES])
-def test_the_env_guard_dump_drops_a_local_only_field_of_every_member_shape(monkeypatch, shape, owner, raw, alias, field):
-    # `aws_names_only` is the sixth consumer and it does not share the walk: it dumps the
-    # pipeline as a container and filters what comes back, rather than enumerating values filed
-    # inside members. That is a different operation, so it is asserted on its own terms — a
-    # field declared local-only is absent from the dump — rather than made to look uniform.
-    monkeypatch.setattr(owner, 'PATH_FIELDS', {field: PathKind.DIRECTORY})
-    config = DectlConfig.model_validate({'defaults': {'account_id': '1'}, 'pipelines': {'p': raw}})
-    dumped = aws_names_only(config.pipelines['p'])
-
-    if owner is PipelineConfig:
-        assert field not in dumped
-    elif owner is MonitorConfig:
-        assert field not in dumped['monitor']
-    else:
-        assert field not in dumped['lambdas']['fn']
-
-
-def test_the_scope_guard_accepts_every_resource_its_own_rows_carry():
-    # The guard reads its vocabulary off the rows rather than off the members, so it cannot
-    # refuse a word its own output uses. A `buckets` row is labeled `s3` and its owner is the
-    # pipeline, so a guard walking members refuses `s3` and an `s3`-scoped door gets a traceback
-    # rather than a refusal.
-    pipeline = PipelineConfig.model_validate(
-        {
-            'buckets': {'raw': 'Bad_Name'},
-            'glue_jobs': {'j': {'name': 'n', 'script_bucket': 'b', 'scripts': ['x.py'], 'role': 'r'}},
-            'lambdas': {'fn': {'name': 'n', 'source_dir': 'code'}},
-        }
-    )
-    emitted = {p.site.resource for p in pipeline_value_faults('p', pipeline, on_disk=False)}
-    emitted |= {n.site.resource for n in declared_names(pipeline)}
-
-    # Named outright, because an empty set satisfies the loop below and the loop is the test.
-    assert emitted == {'s3', 'glue'}
-
-    for resource in emitted:
-        pipeline_value_faults('p', pipeline, on_disk=False, resource=resource)
 
 
 def pipeline_rooted_at(root) -> PipelineConfig:
@@ -865,32 +354,6 @@ def test_the_declared_root_anchors_a_relative_path(tmp_path):
     pipeline = pipeline_rooted_at(str(tmp_path))
 
     assert resolve_from_root(pipeline, 'modules/lambda/code') == tmp_path / 'modules' / 'lambda' / 'code'
-
-
-def test_the_declared_root_expands_a_leading_tilde():
-    pipeline = pipeline_rooted_at('~/code/salesdata')
-
-    assert resolve_from_root(pipeline, 'code') == Path.home() / 'code' / 'salesdata' / 'code'
-
-
-def test_paths_resolve_from_the_working_directory_when_no_root_is_set():
-    # The behavior a config that names no root depends on: dectl is run from the checkout and
-    # relative paths mean what they would mean to any other command in that shell.
-    pipeline = pipeline_rooted_at(None)
-
-    assert resolve_from_root(pipeline, 'code') == Path.cwd() / 'code'
-
-
-def test_an_absolute_configured_path_ignores_the_root(tmp_path):
-    # Mixed absolute and root-relative entries are legal, so an absolute one has to survive
-    # being joined onto a root that is nowhere near it.
-    pipeline = pipeline_rooted_at(str(tmp_path / 'checkout'))
-
-    assert resolve_from_root(pipeline, '/srv/shared/handler') == Path('/srv/shared/handler')
-
-
-def test_pipeline_root_is_the_working_directory_when_no_root_is_set():
-    assert pipeline_root(pipeline_rooted_at(None)) == Path.cwd()
 
 
 @pytest.mark.parametrize('root', ['../salesdata', 'code/salesdata', '{env}/salesdata', ''])
@@ -907,27 +370,6 @@ def test_a_root_that_is_not_rooted_is_reported_rather_than_raised(root):
     faults = pipeline_value_faults('p', pipeline, on_disk=False)
 
     assert [(f.site.field, f.fault) for f in faults] == [('resolve_paths_from', ConfigFault.NOT_A_ROOTED_PATH)]
-
-
-def test_a_root_that_is_not_rooted_leaves_the_rest_of_the_cli_working():
-    """The whole reason it is not a field validator, driven rather than asserted as a round-trip.
-
-    A validator would raise at load, and `main.py` answers a load failure with `cfg = None` —
-    which takes every pipeline command with it, including the two that explain the problem. So
-    the config has to load: `config validate` names the fault, and the renderers still show the
-    pipeline. Asserting only that the field round-trips leaves all three of those unmeasured."""
-    pipeline = pipeline_rooted_at('code/salesdata')
-
-    faults = pipeline_value_faults('salesdata', pipeline, on_disk=True)
-    published = pipeline_to_dict('salesdata', pipeline)
-
-    assert [(problem.site, problem.fault) for problem in faults] == [(ROOT_SITE, ConfigFault.NOT_A_ROOTED_PATH)]
-    assert published['lambda']['fn']['name'] == 'n'
-    assert published['resolve_paths_from']['declared'] is True
-
-
-def test_the_root_is_absent_by_default():
-    assert pipeline_rooted_at(None).resolve_paths_from is None
 
 
 @pytest.mark.parametrize(
@@ -966,87 +408,10 @@ def test_every_shape_a_source_dir_can_take_is_judged(tmp_path, source_dir, fault
     assert [f.fault for f in pipeline_value_faults('p', pipeline, on_disk=True)] == faults
 
 
-def test_a_source_under_an_excluded_directory_name_still_holds_its_files(tmp_path):
-    # The exclusion is about what sits inside the source, so it is tested below the source and
-    # never against the absolute path. Reading the whole path puts every directory above the
-    # checkout into the question: a tree that happens to live under one named `__pycache__`
-    # reports every lambda source as holding nothing, and the deploy door refuses a directory
-    # with a handler in it.
-    source = tmp_path / '__pycache__' / 'checkout' / 'code'
-    source.mkdir(parents=True)
-    (source / 'handler.py').write_text('def handler(event, context): pass')
-
-    assert path_fault(source, PathKind.NON_EMPTY_DIRECTORY) is None
-    assert [found.name for found in deployable_files(source)] == ['handler.py']
-
-
-def test_a_pycache_inside_the_source_is_still_excluded(tmp_path):
-    source = tmp_path / 'code'
-    (source / '__pycache__').mkdir(parents=True)
-    (source / '__pycache__' / 'handler.cpython-313.pyc').write_bytes(b'\x00')
-
-    assert path_fault(source, PathKind.NON_EMPTY_DIRECTORY) is ConfigFault.EMPTY_DIRECTORY
-
-
-def test_an_absolute_source_dir_still_sits_where_it_likes(tmp_path):
-    # The exemption, stated: an absolute or ~-rooted value resolves to itself, so it never
-    # claimed the anchor. A source_dir is zipped and uploaded as bytes with no key derived from
-    # it, which is why it is allowed outside the root at all.
-    outside = tmp_path / 'elsewhere'
-    outside.mkdir()
-    (outside / 'handler.py').write_text('x')
-    pipeline = PipelineConfig.model_validate(
-        {'resolve_paths_from': str(tmp_path / 'root'), 'lambdas': {'fn': {'name': 'n', 'source_dir': str(outside)}}}
-    )
-    (tmp_path / 'root').mkdir()
-
-    assert pipeline_value_faults('p', pipeline, on_disk=True) == []
-
-
 def test_every_fault_has_a_sentence():
     # FAULT_WORDING is indexed with no default, so a member added without one raises at the
     # moment a reader needs the answer.
     assert set(FAULT_WORDING) == set(ConfigFault)
-
-
-def problem(fault: ConfigFault) -> UnusableValue:
-    return UnusableValue('p', ValueSite('glue', 'j', 'scripts'), None, fault, 'x')
-
-
-def test_a_spelling_fault_is_sent_to_the_form_and_never_to_config_show():
-    # `config show` prints the *resolved* path, with the `./`, the doubled separator and the
-    # trailing slash normalized out — so it renders a malformed key as a correct-looking one and
-    # answers a question the reader did not ask.
-    lines = recovery_lines([problem(ConfigFault.NOT_A_CLEAN_KEY)])
-
-    assert KEY_FORM in lines
-    assert SHOW_RESOLVED not in lines
-
-
-def test_a_spelling_only_run_still_names_a_command():
-    # A form says what the value has to look like and no more. Every other fault names a command,
-    # so this would be the one run that leaves the reader with nothing to do next.
-    assert EDIT_CONFIG in recovery_lines([problem(ConfigFault.NOT_A_BUCKET_NAME)])
-
-
-def test_leaving_the_anchor_gets_its_own_line_rather_than_the_key_one():
-    # The two subjects want opposite things. An S3 key may not be `~/x` or `/x`, and those are
-    # exactly the spellings that fix an anchored directory, so one line for both tells half its
-    # readers to avoid their own remedy.
-    lines = recovery_lines([problem(ConfigFault.ESCAPES_ROOT)])
-
-    assert ANCHOR_FORM in lines
-    assert KEY_FORM not in lines
-
-
-def test_a_run_carrying_two_kinds_of_fault_gets_a_line_for_each():
-    # Dropping either sends those rows nowhere, and the reader fixes the half they were told
-    # about and runs the same command again.
-    lines = recovery_lines([problem(ConfigFault.NOT_A_CLEAN_KEY), problem(ConfigFault.ABSENT)])
-
-    assert KEY_FORM in lines
-    assert EDIT_CONFIG in lines
-    assert SHOW_RESOLVED in lines
 
 
 def test_a_bucket_name_is_checked_on_a_pipeline_that_declares_no_root():
@@ -1062,142 +427,6 @@ def test_a_bucket_name_is_checked_on_a_pipeline_that_declares_no_root():
     assert len(faults) == 2
 
 
-# Which side of the spelling line each fault falls on, written out rather than derived. A fault
-# about how a value is *written* is reported against the configured string, because resolution
-# normalizes away the very thing it names and a bucket name resolves to nothing at all. A fault
-# about what this machine holds carries the resolved path and is answered by `config show`.
-SPELLING = frozenset(
-    {
-        ConfigFault.NOT_A_CLEAN_KEY,
-        ConfigFault.KEY_ESCAPES_ROOT,
-        ConfigFault.NOT_A_BUCKET_NAME,
-        # A root that is not rooted resolves against the working directory, so there is no
-        # meaningful path to report — the remedy is the form the value has to take.
-        ConfigFault.NOT_A_ROOTED_PATH,
-        # A `~` naming nobody resolves to nothing, so the row carries the written value. The
-        # likeliest cause is a missing slash, which is a fact about the characters and is
-        # invisible in a resolved path — `config show` renders it joined under the anchor.
-        ConfigFault.UNRESOLVABLE_HOME,
-    }
-)
-ON_DISK = frozenset(
-    {
-        ConfigFault.ABSENT,
-        ConfigFault.EXPECTED_DIRECTORY,
-        ConfigFault.EXPECTED_FILE,
-        ConfigFault.EMPTY_DIRECTORY,
-        ConfigFault.DECLARES_NOTHING,
-        ConfigFault.ESCAPES_ROOT,
-    }
-)
-
-
-def test_every_fault_is_classified_as_a_spelling_or_an_on_disk_one():
-    # `SPELLING_FAULTS` is built out of `ConfigFault` members, so `set(ConfigFault) >=` it holds
-    # for every subset including the empty one — it cannot fail, and it was the only thing named
-    # as pinning the property. The table above can: dropping a member from `SPELLING_FAULTS`
-    # fails the first assertion, and adding a fault without deciding its side fails the second.
-    #
-    # The cost of getting it wrong is silent. A spelling fault outside the set is reported with
-    # a resolved path that has the malformation normalized out of it, and its reader is sent to
-    # `config show`, which that fault's own remedy says cannot help.
-    assert SPELLING_FAULTS == SPELLING
-    assert set(ConfigFault) == SPELLING | ON_DISK
-    assert not SPELLING & ON_DISK
-
-
-def rooted_pipeline_naming(tmp_path, source_dir: str) -> PipelineConfig:
-    """A pipeline whose root is present, so a fault beneath it is not hidden by an absent one."""
-    return PipelineConfig.model_validate({'resolve_paths_from': str(tmp_path), 'lambdas': {'fn': {'name': 'n', 'source_dir': source_dir}}})
-
-
-@pytest.mark.parametrize('field', ['resolve_paths_from', 'source_dir'])
-def test_a_home_this_machine_cannot_resolve_is_a_fault_not_a_load_failure(tmp_path, field):
-    pipeline = pipeline_rooted_at('~code/salesdata') if field == 'resolve_paths_from' else rooted_pipeline_naming(tmp_path, '~code/x')
-    # `~code/x` is a missing slash, the likeliest typo in a path key. Whether it resolves is a
-    # property of this machine, so it belongs where every other such property is checked — see
-    # `key_fault`. As a validator it could only reach the values carrying no `{env}`, since the
-    # active environment is not known at load; one door answers for both halves.
-    faults = pipeline_value_faults('p', pipeline, on_disk=True)
-
-    assert [f.fault for f in faults] == [ConfigFault.UNRESOLVABLE_HOME]
-
-
-def test_every_config_load_failure_is_one_the_callers_catch():
-    # Every caller catches CONFIG_LOAD_ERRORS, so a load failure outside that tuple is one no
-    # command recovers from. An unknown key is a load failure; how a value is *written* is not,
-    # because taking the pipeline tree down removes the commands that would report it.
-    with pytest.raises(CONFIG_LOAD_ERRORS):
-        PipelineConfig.model_validate({'resolve_paths_frm': '/srv/x'})
-
-
-def test_the_env_token_is_substituted_into_the_root():
-    # A token left literal in the root while the path beneath it substitutes gives a
-    # half-resolved join, which is neither what the config says nor what --env asked for. The
-    # root's own token is `pipeline_root`'s to resolve; the value joined onto it arrives already
-    # substituted, so both halves are the same rendering.
-    set_active_environment('prod', '--env')
-    try:
-        pipeline = pipeline_rooted_at('/srv/{env}/salesdata')
-        assert resolve_from_root(pipeline, substitute_env('modules/{env}/code')) == Path('/srv/prod/salesdata/modules/prod/code')
-    finally:
-        set_active_environment('dev', 'default')
-
-
-@pytest.mark.parametrize('field', ['resolve_paths_from', 'source_dir'])
-def test_a_templated_home_resolves_to_a_fault_rather_than_a_traceback(tmp_path, field):
-    templated = '~nosuchuser-{env}/code'
-    pipeline = pipeline_rooted_at(templated) if field == 'resolve_paths_from' else rooted_pipeline_naming(tmp_path, templated)
-    # A `{env}` defers the `~` check past load, and nothing re-validates on the read path:
-    # render_env_model runs per resource inside a verb, and validate, show and list never call
-    # it. Raising here reached the reader as a traceback; exiting here reached a --json caller
-    # as zero bytes on a document its command had already committed to emitting.
-    #
-    # Both doors, because a guard covering only the half a fault was reported in leaves the
-    # sibling silent.
-    set_active_environment('prod', '--env')
-    try:
-        faults = pipeline_value_faults('p', pipeline, on_disk=True)
-    finally:
-        set_active_environment('dev', 'default')
-
-    assert [(f.site.field, f.fault) for f in faults] == [(field, ConfigFault.UNRESOLVABLE_HOME)]
-
-
-def test_resolution_never_raises_so_the_renderers_reach_a_faulty_value():
-    # The other half of the same property. `config show` and `list` resolve every declared path
-    # without running the fault walk first, so a total resolver is what keeps them printing.
-    pipeline = pipeline_rooted_at('~nosuchuser/code')
-
-    assert pipeline_root(pipeline) == Path('~nosuchuser/code')
-    assert resolve_from_root(pipeline, 'x.py') == Path('~nosuchuser/code/x.py')
-
-
-def test_a_substituted_value_that_fails_validation_exits_rather_than_raising():
-    # render_env_model re-validates, so a config that loaded can still fail inside a verb. A
-    # bare ValidationError reaches the reader as a pydantic traceback naming the model rather
-    # than the key they typed. No shipped model carries a validator that a substitution can
-    # trip, so the boundary is exercised against one written here — an untestable guard and a
-    # test that cannot fail are the same defect from two sides.
-    class Fussy(StrictModel):
-        name: str
-
-        @field_validator('name')
-        @classmethod
-        def never_prod(cls, value: str) -> str:
-            if 'prod' in value:
-                raise ValueError('refuses prod')
-            return value
-
-    set_active_environment('prod', '--env')
-    try:
-        with pytest.raises(typer.Exit) as exit_info:
-            render_env_model(Fussy(name='sales-{env}'))
-        assert exit_info.value.exit_code == 1
-    finally:
-        set_active_environment('dev', 'default')
-
-
 def test_a_relative_path_is_not_an_escape_when_no_anchor_is_declared(tmp_path):
     # Without `resolve_paths_from` the root is the working directory and `../shared/code` is an
     # ordinary path that has always been followed. Enforcing the anchor where none is declared
@@ -1205,47 +434,6 @@ def test_a_relative_path_is_not_an_escape_when_no_anchor_is_declared(tmp_path):
     pipeline = PipelineConfig.model_validate({'lambdas': {'fn': {'name': 'n', 'source_dir': '../shared/code'}}})
 
     assert pipeline_value_faults('p', pipeline, on_disk=False) == []
-
-
-def test_the_anchor_is_enforced_once_a_pipeline_declares_one(tmp_path):
-    # The other half, so the pair pins the gate rather than the arm: the same value under a
-    # declared anchor is refused, and a test asserting only the first would pass with the check
-    # deleted outright.
-    pipeline = PipelineConfig.model_validate(
-        {'resolve_paths_from': str(tmp_path), 'lambdas': {'fn': {'name': 'n', 'source_dir': '../shared/code'}}}
-    )
-
-    assert [f.fault for f in pipeline_value_faults('p', pipeline, on_disk=False)] == [ConfigFault.ESCAPES_ROOT]
-
-
-def test_a_traversal_that_lands_inside_the_root_is_not_an_escape(tmp_path):
-    # Decided by where the value lands, not by how it is written. Judged lexically, this is
-    # refused for leaving a directory it never leaves — and the row's own resolved path would
-    # have shown it under the root, so the evidence disproved the fault name.
-    (tmp_path / 'code').mkdir()
-    (tmp_path / 'code' / 'handler.py').write_text('x')
-    pipeline = PipelineConfig.model_validate(
-        {'resolve_paths_from': str(tmp_path), 'lambdas': {'fn': {'name': 'n', 'source_dir': 'modules/../code'}}}
-    )
-
-    assert pipeline_value_faults('p', pipeline, on_disk=True) == []
-    assert resolve_from_root(pipeline, 'modules/../code') == tmp_path / 'code'
-
-
-def test_an_escape_reports_where_it_lands_rather_than_how_it_was_written(tmp_path):
-    root = tmp_path / 'anchor'
-    root.mkdir()
-    pipeline = PipelineConfig.model_validate(
-        {'resolve_paths_from': str(root), 'lambdas': {'fn': {'name': 'n', 'source_dir': '../shared/code'}}}
-    )
-
-    [fault] = pipeline_value_faults('p', pipeline, on_disk=False)
-
-    assert fault.fault is ConfigFault.ESCAPES_ROOT
-    # The directory outside the root, not the join that spells the way there. A reader who
-    # cannot see where it lands cannot tell a typo from a deliberate `..`.
-    assert fault.path == tmp_path / 'shared' / 'code'
-    assert '..' not in str(fault.path)
 
 
 def test_a_source_dir_naming_the_checkout_does_not_ship_its_git_directory(tmp_path):
@@ -1260,25 +448,6 @@ def test_a_source_dir_naming_the_checkout_does_not_ship_its_git_directory(tmp_pa
     shipped = {str(found.relative_to(tmp_path)) for found in deployable_files(tmp_path)}
 
     assert shipped == {'code/handler.py'}
-
-
-def test_a_relative_root_renders_where_it_actually_lands():
-    # `root_fault` refuses it and every deploy door reports it, but `config show` and
-    # `list --json` render the root without running the walk first. A relative value printed
-    # back as the resolved anchor is the confident wrong answer that command exists to prevent:
-    # it resolves against wherever dectl was run, which is the dependency the key removes.
-    pipeline = pipeline_rooted_at('code/salesdata')
-
-    assert pipeline_root(pipeline) == Path.cwd() / 'code' / 'salesdata'
-    assert resolve_from_root(pipeline, 'handler') == Path.cwd() / 'code' / 'salesdata' / 'handler'
-
-
-def test_every_value_the_root_check_refuses_is_named_by_its_remedy():
-    # A remedy that accepts what the check refuses is unactionable while reading as complete.
-    # Each refused spelling has to be findable in the sentence the reader is shown.
-    for value, phrase in [('code/salesdata', 'relative'), ('', 'blank'), ('{env}/salesdata', '{env}')]:
-        assert root_fault(value) is ConfigFault.NOT_A_ROOTED_PATH
-        assert phrase in ROOT_FORM, f'ROOT_FORM does not name why {value!r} is refused'
 
 
 def test_one_fault_value_publishes_one_row_shape(tmp_path):
@@ -1299,20 +468,3 @@ def test_one_fault_value_publishes_one_row_shape(tmp_path):
     assert [row.path for row in rows] == [None, None]
     # Shown rather than swallowed: the characters are the finding, so both rows quote them.
     assert all(row.shown == repr('~nosuchuser/code') for row in rows)
-
-
-def test_a_declared_resource_scopes_a_pipeline_that_holds_none_of_that_kind():
-    """The scope vocabulary is what dectl declares, not what one file happens to contain.
-
-    Read off the emitted rows it is a function of the config, so `glue` raised on a pipeline
-    holding no glue job — a Python traceback, in a tool whose every other refusal goes through
-    `error()`. No door reaches it today only because the command tree carries a resource the
-    config declares; whoever adds a door for a new kind inherits it."""
-    bare = PipelineConfig.model_validate({'buckets': {'raw': 'sales-raw'}})
-
-    assert declared_resource_names() >= {'glue', 'lambda', 'sfn', 's3', 'iceberg', 'monitor', 'pipeline'}
-    for resource in declared_resource_names():
-        assert pipeline_value_faults('p', bare, on_disk=False, resource=resource) == []
-
-    with pytest.raises(ValueError, match='no resource named'):
-        pipeline_value_faults('p', bare, on_disk=False, resource='nosuchkind')

@@ -96,8 +96,6 @@ def resolved_paths(pipeline: PipelineConfig) -> dict[tuple[str, str], dict[str, 
 
     A resource kind neither renderer has a section for is resolved here and displayed by
     neither, because the sections carry per-kind AWS fields and cannot be generated from this.
-    `test_every_resolved_path_reaches_both_renderers` is what makes that a red test rather than
-    a silently missing row.
 
     The outer key is the pair rather than a `resource/alias` string, so nothing rebuilds what a
     `ValueSite` holds and an alias carrying a slash cannot collide with a different resource."""

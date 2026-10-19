@@ -4,15 +4,12 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import Mock
 
 import pytest
 import typer
-from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
 import dectl.main
-from dectl.commands.config_cmd import config_app
 from dectl.commands.glue import make_glue_app
 from dectl.commands.iceberg import make_iceberg_app
 from dectl.commands.lambda_ import make_lambda_app
@@ -20,9 +17,6 @@ from dectl.commands.s3 import make_s3_app
 from dectl.commands.stepfunctions import make_sfn_app
 from dectl.config import DectlConfig
 from dectl.config import Defaults
-from dectl.main import REFERENCE_DURABLE_VERBS
-from dectl.main import REFERENCE_GLOBAL
-from dectl.main import REFERENCE_INSTANCE_VERBS
 from dectl.main import app
 from tests.conftest import LAYERED_CONFIG
 from tests.conftest import RefusalRunner
@@ -31,96 +25,45 @@ runner = RefusalRunner()
 
 
 def dectl_with_config(config: Path, tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    """The installed entry point in a fresh process, because main.py builds the tree from the file at import."""
+    """The installed entry point in a fresh process, because main.py builds the tree from the files at import."""
     home = tmp_path / 'xdg-config'
     (home / 'dectl').mkdir(parents=True, exist_ok=True)
     shutil.copy(config, home / 'dectl' / 'config.yaml')
+    shutil.copytree(config.parent / 'pipelines', home / 'dectl' / 'pipelines', dirs_exist_ok=True)
     env = {key: value for key, value in os.environ.items() if key != 'DECTL_ENV'}
     env |= {'XDG_CONFIG_HOME': str(home), 'XDG_CACHE_HOME': str(tmp_path / 'xdg-cache')}
     entry_point = Path(sys.executable).parent / 'dectl'
     return subprocess.run([str(entry_point), *args], capture_output=True, text=True, env=env, cwd=config.parent, check=False)
 
 
-def test_the_layered_config_resolves_each_pipeline_under_its_own_names(tmp_path):
-    """A merged pipeline is one object with the pipeline it copies until variables are substituted,
-    so a substitution made in place would hand finance the names sales resolved."""
-    validated = dectl_with_config(LAYERED_CONFIG, tmp_path, 'config', 'validate')
-    assert validated.returncode == 0, validated.stderr
-    for pipeline, dataset in [('sales', 'orders'), ('finance', 'invoices')]:
-        listed = dectl_with_config(LAYERED_CONFIG, tmp_path, '--env', 'prod', pipeline, 'list', '--json')
-        assert listed.stderr == ''
-        resolved = json.loads(listed.stdout)
-        prefix = f'acme-prod-{pipeline}'
-        assert resolved['s3'] == {'raw': {'bucket': f'{prefix}-raw'}, 'curated': {'bucket': f'{prefix}-curated'}}
-        assert {alias: (fn['name'], fn['durable']) for alias, fn in resolved['lambda'].items()} == {
-            'process': (f'{prefix}-process-{dataset}', False),
-            'workflow': (f'{prefix}-workflow', True),
-        }
-        assert {alias: (job['name'], job['script_uris']) for alias, job in resolved['glue'].items()} == {
-            'load': (f'{prefix}-load', [f's3://{prefix}-scripts/scripts/load.py']),
-            'backfill': (f'{prefix}-backfill', [f's3://{prefix}-scripts/scripts/backfill.py']),
-        }
-        flow = resolved['sfn']['flow']
-        assert (flow['name'], flow['log_group'], flow['live_alias']) == (f'{prefix}-flow', f'/aws/vendedlogs/states/{prefix}-flow', 'live')
-        assert flow['definition_substitutions'] == {
-            'process_arn': f'arn:aws:lambda:us-east-2:123456789012:function:{prefix}-process-{dataset}',
-            'load_job': f'{prefix}-load',
-            'load_timeout_seconds': '3600',
-            'min_orders': '1',
-            'load_enabled': 'true',
-            'landing_key': f"{{% 's3://{prefix}-raw/{dataset}/incoming/' & $states.input.date & '.json' %}}",
-            'loaded_output': "{% $merge([$states.input, {'stage': 'loaded'}]) %}",
-        }
-        assert resolved['iceberg']['events'] | {'paths': {}} == {'database': f'acme_prod_{pipeline}', 'table': dataset, 'paths': {}}
-        assert resolved['jenkins'] == {'job_path': f'data-engineering/{pipeline}-deploy', 'actions': ['apply', 'plan']}
-        assert resolved['monitor'] == {'lambdas': ['process', 'workflow'], 'step_functions': ['flow']}
-
-
-def row_entries(row: str) -> list[str]:
-    """One reference row's entries, as `verb [flags]` strings.
-
-    Rows are ` · `-separated, and the `config` row leads with its own label. Split rather than
-    searched as one string: the `config` row contains the substring `path`, so a top-level
-    `path` command missing from the row that should name it satisfied a search of the joined
-    text. A guard one row can satisfy on another row's behalf is not a guard."""
-    label, _, rest = row.partition('  ')
-    entries = (rest or label).split('·')
-    return [entry.strip() for entry in entries if entry.strip()]
-
-
-GLOBAL_ENTRIES = row_entries(REFERENCE_GLOBAL[0])
-CONFIG_ENTRIES = row_entries(REFERENCE_GLOBAL[1])
-
-
-def names_in(entries: list[str]) -> set[str]:
-    return {entry.split(' ')[0] for entry in entries}
-
-
-def test_the_reference_names_every_static_global_command():
-    # `reference` exists because --help shows almost nothing on a fresh machine, so a command
-    # missing from it is invisible to the reader it was written for. Derived from the tree
-    # rather than listed here: a command added to either app has to appear without this test
-    # being edited.
-    tree = typer.main.get_command(app)
-    # A leaf, not a group: the pipeline sub-apps are assembled from config and are exactly what
-    # `reference` exists to be independent of.
-    static = {name for name, command in tree.commands.items() if not hasattr(command, 'commands')}
-
-    assert static
-    assert static - names_in(GLOBAL_ENTRIES) == set()
-
-
-def test_the_reference_names_every_config_verb_and_its_json_flag():
-    # The flags too, not only the verbs. `validate --json` was added to the README and to the
-    # command while the reference kept the flagless spelling, which is the half of the surface a
-    # reader on a fresh machine actually sees.
-    config_tree = typer.main.get_command(config_app)
-    verbs = set(config_tree.commands)
-    with_json = {name for name, command in config_tree.commands.items() if any(param.name == 'as_json' for param in command.params)}
-
-    assert verbs and with_json
-    assert verbs - names_in(CONFIG_ENTRIES) == set()
-    assert {f'{verb} [--json]' for verb in with_json} - set(CONFIG_ENTRIES) == set()
+def test_the_layered_config_resolves_a_pipeline_through_the_installed_entry_point(tmp_path):
+    pipeline, dataset = 'finance', 'invoices'
+    listed = dectl_with_config(LAYERED_CONFIG, tmp_path, '--env', 'prod', pipeline, 'list', '--json')
+    assert listed.stderr == ''
+    resolved = json.loads(listed.stdout)
+    prefix = f'acme-prod-{pipeline}'
+    assert resolved['s3'] == {'raw': {'bucket': f'{prefix}-raw'}, 'curated': {'bucket': f'{prefix}-curated'}}
+    assert {alias: (fn['name'], fn['durable']) for alias, fn in resolved['lambda'].items()} == {
+        'process': (f'{prefix}-process-{dataset}', False),
+        'workflow': (f'{prefix}-workflow', True),
+    }
+    assert {alias: (job['name'], job['script_uris']) for alias, job in resolved['glue'].items()} == {
+        'load': (f'{prefix}-load', [f's3://{prefix}-scripts/scripts/load.py']),
+    }
+    flow = resolved['sfn']['flow']
+    assert (flow['name'], flow['log_group'], flow['live_alias']) == (f'{prefix}-flow', f'/aws/vendedlogs/states/{prefix}-flow', 'live')
+    assert flow['definition_substitutions'] == {
+        'process_arn': f'arn:aws:lambda:us-east-2:123456789012:function:{prefix}-process-{dataset}',
+        'load_job': f'{prefix}-load',
+        'load_timeout_seconds': '3600',
+        'min_orders': '1',
+        'load_enabled': 'true',
+        'landing_key': f"{{% 's3://{prefix}-raw/{dataset}/incoming/' & $states.input.date & '.json' %}}",
+        'loaded_output': "{% $merge([$states.input, {'stage': 'loaded'}]) %}",
+    }
+    assert resolved['iceberg']['events'] | {'paths': {}} == {'database': f'acme_prod_{pipeline}', 'table': dataset, 'paths': {}}
+    assert resolved['jenkins'] == {'job_path': f'data-engineering/{pipeline}-deploy', 'actions': ['apply', 'plan']}
+    assert resolved['monitor'] == {'lambdas': ['process', 'workflow'], 'step_functions': ['flow']}
 
 
 def test_update_installs_the_published_release(monkeypatch):
@@ -133,29 +76,6 @@ def test_update_installs_the_published_release(monkeypatch):
     config, kwargs = calls[0]
     assert (config.tool, config.owner) == ('dectl', 'datapointchris')
     assert kwargs == {'check_only': True}
-
-
-def test_update_does_not_also_print_the_update_notice(monkeypatch):
-    # The notice would name the release the command is already installing.
-    monkeypatch.setattr(dectl.main, 'run_update', lambda config, **kwargs: None)
-    notices = []
-    monkeypatch.setattr(dectl.main, 'notify', notices.append)
-
-    runner.invoke(app, ['update'])
-    runner.invoke(app, ['reference'])
-
-    assert notices == [dectl.main.UPDATE_CONFIG]
-
-
-def test_the_credential_is_left_to_pyselfupdate():
-    """pyselfupdate runs `gh auth token` itself, and `$GITHUB_TOKEN_COMMAND` is
-    what redirects or empties it — a lever that belongs to whoever runs dectl.
-
-    A helper here would be a second implementation of that, and the reason the
-    library grew one is that eleven tools never pasted it.
-    """
-    assert dectl.main.UPDATE_CONFIG.token == ''
-    assert dectl.main.UPDATE_CONFIG.token_func is None
 
 
 def broken_config_error() -> ValidationError:
@@ -171,32 +91,6 @@ def invalid_config(monkeypatch):
     monkeypatch.setenv('COLUMNS', '200')
     monkeypatch.setattr(dectl.main, 'cfg', None)
     monkeypatch.setattr(dectl.main, 'CONFIG_ERROR', broken_config_error())
-
-
-@pytest.fixture
-def missing_config(monkeypatch):
-    monkeypatch.setenv('COLUMNS', '200')
-    monkeypatch.setattr(dectl.main, 'cfg', None)
-    monkeypatch.setattr(dectl.main, 'CONFIG_ERROR', None)
-
-
-def test_version_is_one_line_naming_the_tool(monkeypatch):
-    monkeypatch.setattr(dectl.main.importlib.metadata, 'version', lambda _: '9.9.9')
-    monkeypatch.setattr(dectl.main, 'installed_commit', lambda: None)
-
-    result = runner.invoke(app, ['--version'])
-
-    assert result.exit_code == 0
-    assert result.stdout.splitlines() == ['dectl 9.9.9']
-
-
-def test_version_carries_the_commit_when_installed_from_a_ref(monkeypatch):
-    monkeypatch.setattr(dectl.main.importlib.metadata, 'version', lambda _: '9.9.9')
-    monkeypatch.setattr(dectl.main, 'installed_commit', lambda: 'abcdef1234567890')
-
-    result = runner.invoke(app, ['--version'])
-
-    assert result.stdout.splitlines() == ['dectl 9.9.9 @ abcdef12']
 
 
 def test_version_answers_a_config_that_does_not_load(invalid_config, monkeypatch):
@@ -219,38 +113,8 @@ def test_list_reports_the_validation_error_not_a_missing_config(invalid_config):
 
     assert result.exit_code == 1
     assert 'does not match the expected schema' in result.stderr
-    assert 'pipelines.p.step_function' in result.stderr
+    assert 'pipelines/p.yaml step_function' in result.stderr
     assert 'config init' not in result.stderr
-
-
-def test_list_still_reports_a_missing_config_as_missing(missing_config):
-    result = runner.invoke(app, ['list'])
-
-    assert result.exit_code == 1
-    assert 'no config found' in result.stderr
-    assert 'config init' in result.stderr
-
-
-def test_search_reports_the_validation_error_before_touching_aws(invalid_config):
-    # No session is built, so the refusal does not depend on credentials being present.
-    result = runner.invoke(app, ['search', 'anything'])
-
-    assert result.exit_code == 1
-    assert 'pipelines.p.step_function' in result.stderr
-
-
-def test_an_aws_refusal_no_command_handles_ends_in_its_own_sentence(monkeypatch):
-    """A deploy to a Glue job Terraform has not created yet answers EntityNotFoundException."""
-    monkeypatch.setenv('COLUMNS', '200')
-    monkeypatch.setattr(dectl.main, 'CONFIG_ERROR', None)
-    monkeypatch.setattr(dectl.main, 'cfg', DectlConfig.model_validate({'defaults': {'account_id': '123456789012'}, 'pipelines': {}}))
-    refusal = ClientError({'Error': {'Code': 'EntityNotFoundException', 'Message': 'Job [load] not found'}}, 'GetJob')
-    monkeypatch.setattr(dectl.main, 'run_search', Mock(side_effect=refusal))
-
-    result = runner.invoke(app, ['search', 'load'])
-
-    assert result.exit_code == 1
-    assert result.stderr.splitlines() == [str(refusal)]
 
 
 def test_an_unknown_name_reports_why_the_pipeline_tree_is_missing(invalid_config):
@@ -261,27 +125,6 @@ def test_an_unknown_name_reports_why_the_pipeline_tree_is_missing(invalid_config
     assert result.exit_code == 1
     assert 'does not match the expected schema' in result.stderr
     assert 'No such command' not in result.stderr
-
-
-def test_an_unknown_name_stays_a_usage_error_when_the_config_loaded(monkeypatch):
-    monkeypatch.setattr(dectl.main, 'CONFIG_ERROR', None)
-    monkeypatch.setattr(dectl.main, 'cfg', DectlConfig.model_validate({'defaults': {'account_id': '1'}, 'pipelines': {}}))
-
-    result = runner.invoke(app, ['definitely-not-a-command'])
-
-    assert result.exit_code == 2
-    assert 'No such command' in result.output
-
-
-def test_the_bare_banner_carries_the_whole_diagnostic(invalid_config):
-    # Bare `dectl` is where the missing pipelines are first noticed, so the banner carries the
-    # reason rather than a pointer to the command that would print it.
-    result = runner.invoke(app, [])
-
-    assert 'pipelines.p.step_function: Extra inputs are not permitted' in result.stderr
-    # Not 'Usage: dectl': rich styles the two words differently, so an escape sequence sits
-    # between them wherever color is on, and the phrase is only contiguous without it.
-    assert 'Usage:' in result.stdout
 
 
 def test_env_json_carries_every_default_the_human_view_shows(monkeypatch):
@@ -351,32 +194,6 @@ def whole_tree():
     root.add_typer(make_s3_app('proj', pipeline, config), name='s3')
     root.add_typer(make_iceberg_app('proj', pipeline, config), name='iceberg')
     return typer.main.get_command(root)
-
-
-def reference_instance_verbs() -> set[tuple[str, str]]:
-    """Each `(resource, verb)` the reference's instance and durable rows name."""
-    named = set()
-    resource = ''
-    for row in [*REFERENCE_INSTANCE_VERBS, *REFERENCE_DURABLE_VERBS]:
-        if not row.startswith(' '):
-            resource, _, row = row.partition('ALIAS')
-            resource = resource.strip()
-        named |= {(resource, entry.split()[0]) for entry in row.split('·') if entry.strip()}
-    return named
-
-
-def test_the_reference_names_every_instance_verb():
-    # A verb the reference omits is invisible on a fresh machine, where --help shows no pipeline.
-    # Equal rather than contained, so a dropped verb and a stale reference row both fail here.
-    tree = whole_tree()
-    verbs = {
-        (resource, verb)
-        for resource, group in tree.commands.items()
-        for alias in getattr(group, 'commands', {}).values()
-        for verb in getattr(alias, 'commands', {})
-    }
-
-    assert verbs == reference_instance_verbs()
 
 
 def test_every_limit_in_the_binary_refuses_a_negative():

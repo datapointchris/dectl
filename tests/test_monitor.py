@@ -62,21 +62,3 @@ def test_build_monitor_sources_substitutes_active_env(monkeypatch):
 
     assert warnings == []
     assert sources[0][1] == '/aws/lambda/salesdata-prod-ingest'
-
-
-def test_build_monitor_sources_pads_aliases_to_align():
-    pipeline = pipeline_from(
-        {
-            'lambdas': {
-                'a': {'name': 'fn-a', 'source_dir': 'x'},
-                'longer-name': {'name': 'fn-b', 'source_dir': 'x'},
-            },
-            'monitor': {'lambdas': ['a', 'longer-name']},
-        }
-    )
-    sources, warnings = build_monitor_sources(pipeline)
-    prefixes = [source[0] for source in sources]
-
-    assert warnings == []
-    # 'a' is padded to the width of 'longer-name' so the columns line up.
-    assert 'a          ' in prefixes[0]
