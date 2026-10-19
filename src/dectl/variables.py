@@ -42,6 +42,12 @@ class Variable(NamedTuple):
     used: tuple[str, ...] = ()
 
 
+class Definition(NamedTuple):
+    origin: str
+    # The value as the file wrote it, before any substitution.
+    written: Any
+
+
 class Expansion(NamedTuple):
     config: Any
     # Pipeline name -> location within that pipeline -> (substituted value, what the file wrote).
@@ -55,7 +61,7 @@ def dotted(location: Location) -> str:
 class Pass:
     """One expansion of one file: the faults it found and the strings it changed."""
 
-    def __init__(self, defined: dict[str, list[str]]) -> None:
+    def __init__(self, defined: dict[str, list[Definition]]) -> None:
         self.faults: list[InitErrorDetails] = []
         self.changed: dict[Location, tuple[str, Written]] = {}
         # Every variable name in the file -> where each is defined, so a reference out of a
@@ -74,6 +80,7 @@ class Pass:
             if unquoted_token(value):
                 self.unquoted(value, scope, location)
                 return value
+            # Built new rather than edited: YAML hands an aliased block to every pipeline as one object.
             return {key: self.substitute(item, scope, (*location, key)) for key, item in value.items()}
         if isinstance(value, list):
             return [self.substitute(item, scope, (*location, index)) for index, item in enumerate(value)]
@@ -91,7 +98,7 @@ class Pass:
                 used.append(f'{match[0]} from {scope[name].origin}')
                 used.extend(scope[name].used)
                 return scope[name].value
-            self.fault('undefined_variable', self.unreachable(match[0], name, scope, below), location, value)
+            self.fault('undefined_variable', self.unreachable(match[0], name, scope, below, location), location, value)
             return match[0]
 
         substituted = VARIABLE_TOKEN.sub(replace, value)
@@ -99,29 +106,49 @@ class Pass:
             self.changed[location] = (substituted, Written(value, tuple(used)))
         return substituted
 
-    def unreachable(self, token: str, name: str, scope: dict[str, Variable], below: frozenset[str]) -> str:
+    def unreachable(self, token: str, name: str, scope: dict[str, Variable], below: frozenset[str], location: Location) -> str:
         """Why `token` resolves to nothing here, most likely cause first.
 
         The escape is offered last, because escaping a variable that exists elsewhere ships the
-        braces to AWS as text."""
+        braces to AWS as text. Moving a variable to the top level is offered only where it would
+        work: one built from another pipeline's variables cannot be read outside that pipeline."""
         if name in below:
             return f'{token} is defined below this variable, and a variable sees only those above it'
         if name in self.defined:
-            where = ' and '.join(self.defined[name])
+            where = ' and '.join(definition.origin for definition in self.defined[name])
+            unseen = f'{token} is defined in {where}, which this value cannot see'
+            if location[0] != 'pipelines' or len(location) < 2:
+                return f"{unseen}. A pipeline's variables reach that pipeline alone; move it to the top-level variables block"
+            here = f'pipelines.{location[1]}.variables'
+            built_from = self.pipeline_variables_in(name)
+            if built_from:
+                return f'{unseen}. It is built from the pipeline variables {built_from}, so define {token} in {here} too'
             return (
-                f"{token} is defined in {where}, which this value cannot see. A pipeline's variables reach "
-                'that pipeline alone; move it to the top-level variables block to share it'
+                f"{unseen}. A pipeline's variables reach that pipeline alone: define it in {here} too, or move it "
+                'to the top-level variables block if every pipeline shares its value'
             )
         close = difflib.get_close_matches(name, list(scope), n=1)
         if close:
             return f'{token} names no variable; did you mean {{{close[0]}}}?'
         return f'{token} names no variable. If a job or Jenkinsfile fills {token} itself, write {{{token}}}'
 
+    def pipeline_variables_in(self, name: str) -> str:
+        """The `{name}`s a definition of `name` uses that no top-level variable supplies, joined for a message."""
+        top_level = {other for other, definitions in self.defined.items() if any(d.origin == 'variables' for d in definitions)}
+        found: list[str] = []
+        for definition in self.defined[name]:
+            if isinstance(definition.written, str):
+                for match in VARIABLE_TOKEN.finditer(definition.written):
+                    used = match['name']
+                    if used and used != RESERVED_NAME and used not in top_level and f'{{{used}}}' not in found:
+                        found.append(f'{{{used}}}')
+        return ' and '.join(found)
+
     def unquoted(self, value: dict[str, None], scope: dict[str, Variable], location: Location) -> None:
         (name,) = value
         message = f'{{{name}}} was read as a YAML mapping, because the value starts with {{; quote it'
         if name not in scope and name != RESERVED_NAME:
-            message += f'. Quoted, {self.unreachable(f"{{{name}}}", name, scope, frozenset())}'
+            message += f'. Quoted, {self.unreachable(f"{{{name}}}", name, scope, frozenset(), location)}'
         self.fault('unquoted_variable', message, location, value)
 
     def resolve_block(self, block: Any, inherited: dict[str, Variable], location: Location) -> tuple[Any, dict[str, Variable]]:
@@ -153,9 +180,7 @@ class Pass:
                 self.unquoted(value, scope, here)
                 scope[name] = placeholder
             elif not isinstance(value, str):
-                self.fault(
-                    'variable_not_a_string', 'a variable is a string; quote it, since YAML reads an unquoted 0123 as octal', here, value
-                )
+                self.fault('variable_not_a_string', not_a_string(value), here, value)
                 scope[name] = placeholder
             else:
                 substituted = self.substitute(value, scope, here, frozenset(names[position + 1 :]))
@@ -163,6 +188,19 @@ class Pass:
                 scope[name] = Variable(substituted, dotted(here), built_from)
             resolved[name] = scope[name].value if name in scope and name not in inherited else value
         return resolved, scope
+
+
+def not_a_string(value: Any) -> str:
+    """Why a variable's value is refused, in terms of what YAML made of it."""
+    if isinstance(value, dict | list):
+        shape = 'mapping' if isinstance(value, dict) else 'list'
+        return (
+            f'a variable is one string, and YAML read this as a {shape}. To reuse a block, anchor it where it '
+            'is first used, as `load: &job`, then repeat it with `*job` or merge it with `<<: *job`'
+        )
+    if value is None:
+        return 'a variable is a string, and this one is empty'
+    return 'a variable is a string; quote it, since YAML reads an unquoted 0123 as octal'
 
 
 def unquoted_token(value: Any) -> bool:
@@ -173,17 +211,17 @@ def unquoted_token(value: Any) -> bool:
     return item is None and isinstance(key, str) and NAME.fullmatch(key) is not None
 
 
-def defined_variables(raw: dict[Any, Any]) -> dict[str, list[str]]:
-    """Every variable name the file defines, at either level, and the block defining each."""
+def defined_variables(raw: dict[Any, Any]) -> dict[str, list[Definition]]:
+    """Every variable name the file defines, at either level, and each block defining it."""
     blocks: list[tuple[str, Any]] = [('variables', raw.get('variables'))]
     pipelines = raw.get('pipelines')
     if isinstance(pipelines, dict):
         blocks += [(f'pipelines.{name}.variables', p.get('variables')) for name, p in pipelines.items() if isinstance(p, dict)]
-    defined: dict[str, list[str]] = {}
+    defined: dict[str, list[Definition]] = {}
     for origin, block in blocks:
         if isinstance(block, dict):
-            for name in block:
-                defined.setdefault(str(name), []).append(origin)
+            for name, written in block.items():
+                defined.setdefault(str(name), []).append(Definition(origin, written))
     return defined
 
 
