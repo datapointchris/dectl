@@ -2,6 +2,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Annotated
+from typing import Any
 from typing import ClassVar
 from typing import get_args
 
@@ -11,6 +12,8 @@ from pydantic import BaseModel
 from pydantic import BeforeValidator
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import ModelWrapValidatorHandler
+from pydantic import PrivateAttr
 from pydantic import ValidationError
 from pydantic import field_validator
 from pydantic import model_validator
@@ -28,6 +31,7 @@ from dectl.values import DeclaresValues
 from dectl.values import PathKind
 from dectl.values import UnusableValue
 from dectl.values import ValueSite
+from dectl.values import Written
 from dectl.values import bucket_fault
 from dectl.values import expand_home
 from dectl.values import home_fault
@@ -36,6 +40,7 @@ from dectl.values import leaves_root
 from dectl.values import normalized
 from dectl.values import path_fault
 from dectl.values import root_fault
+from dectl.variables import expand_variables
 
 # `$XDG_CONFIG_HOME/dectl/config.yaml`, falling back to `~/.config` when the variable is unset.
 # `config_home()` reads the environment at import, so a process that exports the variable after
@@ -44,9 +49,26 @@ CONFIG_DIR = config_home() / 'dectl'
 CONFIG_PATH = CONFIG_DIR / 'config.yaml'
 
 TEMPLATE_CONFIG = """\
-defaults:
-  account_id: ""
+# Substituted as {name} into every string in this file when it loads. A pipeline's own
+# `variables` block adds to these for that pipeline alone, and cannot redefine one of them. A
+# variable sees the ones defined above it, so one can be built from another. `env` is never a
+# variable: {env} is replaced at each command, from --env, DECTL_ENV or `environment` below.
+#
+# Quote a value that starts with `{`. YAML reads a leading brace as an inline mapping, so
+# `x: {company}-raw` does not parse and `x: {env}` parses as a mapping. A brace later in the
+# value, as in the ARNs below, needs no quotes. Quote an account id as well, because YAML reads
+# an unquoted 0123 as an octal number. A {name} naming no variable is refused; a literal one,
+# for a job or a Jenkinsfile to fill, is written doubled, as `{{date}}` in `source-copy` below.
+variables:
+  account: "123456789012"
   region: us-east-2
+  company: my
+  lambda_arn_prefix: arn:aws:lambda:{region}:{account}:function
+  glue_role: arn:aws:iam::{account}:role/{company}-{env}-glue-role
+
+defaults:
+  account_id: "{account}"
+  region: "{region}"
   # Default environment when neither --env nor DECTL_ENV is given. The {env} token in any
   # name below is replaced with the active environment (dev/staging/prod/...).
   environment: dev
@@ -72,10 +94,13 @@ pipelines:
     # from the checkout. Set it and `config validate` checks the directory and every path
     # resolving from it, which is why the example below stays commented.
     # resolve_paths_from: ~/code/example-pipeline
+    # This pipeline's own, beside the top-level ones above.
+    variables:
+      raw_bucket: "{company}-{env}-raw-data-bucket"
     glue_jobs:
       source-copy:
-        name: my-{env}-source-copy-job
-        script_bucket: my-script-bucket
+        name: "{company}-{env}-source-copy-job"
+        script_bucket: "{company}-script-bucket"
         # The two halves of each script's S3 key, joined as written. Neither resolves against
         # resolve_paths_from — a prefix names nothing on disk, and a script's key comes from
         # this string rather than from where the file was found. Both are plain relative
@@ -83,28 +108,30 @@ pipelines:
         script_prefix: scripts
         scripts:
           - my-source-copy.py
-        role: "arn:aws:iam::123456789012:role/my-{env}-glue-role"
+        role: "{glue_role}"
         # Authoritative: a connection dropped from this list is detached on the next deploy.
         # Omit the key entirely to leave the job's connections alone.
         connections:
-          - my-{env}-vpc-connection
+          - "{company}-{env}-vpc-connection"
         # A Glue job sizes one of two ways and dectl refuses a config naming both. A Python
         # shell job takes max_capacity, which is 0.0625 (1 GB) or 1 (16 GB). A Spark job takes
         # the worker pair below instead.
         max_capacity: 1
         arguments:
-          SOURCE_BUCKET: my-{env}-source-bucket
+          SOURCE_BUCKET: "{raw_bucket}"
           SOURCE_PREFIX: incoming
+          # The job fills {date} itself, so it reaches Glue with single braces.
+          OUTPUT_PATTERN: out/{{date}}/
       # A second job, sized the other way, and naming every optional key so each one is here to
       # copy. A real config names only the fields it wants dectl to decide; `dectl PIPELINE list`
       # prints which those are.
       conform:
-        name: my-{env}-conform-job
-        script_bucket: my-script-bucket
+        name: "{company}-{env}-conform-job"
+        script_bucket: "{company}-script-bucket"
         scripts:
           - conform.py
           - lib/shared.py            # every script after the first becomes --extra-py-files
-        role: "arn:aws:iam::123456789012:role/my-{env}-glue-role"
+        role: "{glue_role}"
         # Spark sizing. Glue takes the two together, so dectl refuses one without the other.
         worker_type: G.1X
         number_of_workers: 4
@@ -121,11 +148,11 @@ pipelines:
         execution_class: FLEX
     lambdas:
       my-function:
-        name: my-{env}-lambda-function
+        name: "{company}-{env}-lambda-function"
         source_dir: modules/lambda/my_function/code
         live_alias: live
       my-workflow:
-        name: my-{env}-durable-workflow
+        name: "{company}-{env}-durable-workflow"
         source_dir: modules/lambda/my_workflow/code
         live_alias: live
         # Adds the durable execution verbs (executions, history) and qualifies every invoke,
@@ -133,30 +160,43 @@ pipelines:
         durable: true
     step_functions:
       my-flow:
-        name: my-{env}-state-machine
-        log_group: /aws/vendedlogs/states/my-{env}-state-machine
-        # The definition Terraform renders with templatefile(). Setting it adds `deploy`, which
-        # renders the file the same way and replaces only the definition: the role and logging
-        # stay as Terraform set them.
+        name: "{company}-{env}-state-machine"
+        log_group: /aws/vendedlogs/states/{company}-{env}-state-machine
+        # The definition Terraform renders with templatefile(). Setting it adds `plan` and
+        # `deploy`, which render the file the same way and replace only the definition: the role
+        # and logging stay as Terraform set them.
+        #
+        # The file is read the way templatefile() reads it, and only ${ and %{ mean anything.
+        # A JSONata {% ... %} expression needs nothing, and a ${name} inside one is substituted
+        # like any other. A ${ or %{ the definition itself has to hold, such as JSONata's
+        # `$orders.${ customer: $sum(total) }`, is written $${ or %%{ in the file. Any other
+        # ${...}, and every %{...} directive, is refused rather than rendered.
         definition_file: modules/step_functions/my_flow.asl.json
-        # One entry per ${name} in that file, with {env} where the environment goes. The {env}
-        # token is substituted here and never in the file itself. A number or boolean is written
-        # into the definition the way Terraform writes it.
+        # One entry per ${name} in that file. {env} and the variables above are substituted
+        # here, never in the file. A number or boolean is written into the definition the way
+        # Terraform writes it, 2.0 as 2 and true as true, so either can stand outside a JSON
+        # string or inside a JSONata expression.
         definition_substitutions:
-          process_function_arn: arn:aws:lambda:us-east-2:123456789012:function:my-{env}-lambda-function
-          copy_job_name: my-{env}-source-copy-job
+          process_function_arn: "{lambda_arn_prefix}:{company}-{env}-lambda-function"
+          raw_bucket: "{raw_bucket}"
+          copy_job_name: "{company}-{env}-source-copy-job"
           copy_timeout_seconds: 3600
+          min_orders: 1
+          load_enabled: true
         # The alias `deploy --publish` moves to the version it publishes. Leave it out and
         # --publish still publishes a version, moving nothing.
         live_alias: live
+      # With no definition_file there is no plan or deploy: run, runs and logs only.
+      reporting-history-only:
+        name: "{company}-{env}-reporting-machine"
     buckets:
-      raw: my-{env}-raw-data-bucket
-      curated: my-{env}-curated-data-bucket
+      raw: "{raw_bucket}"
+      curated: "{company}-{env}-curated-data-bucket"
     iceberg_tables:
       # Glue Data Catalog database + table. dectl reads the table's own metadata file, so the
       # only requirement is that the table is registered in Glue with table_type ICEBERG.
       events:
-        database: my-{env}-catalog
+        database: "{company}-{env}-catalog"
         table: events
     monitor:
       lambdas:
@@ -175,6 +215,16 @@ pipelines:
           ACTION: deploy
         plan:
           ACTION: dry_run
+
+  # A pipeline holding only buckets gets an `s3` command and nothing else, because each
+  # pipeline's commands are built from what it declares. Its variables are its own, and
+  # example-pipeline's `raw_bucket` is out of reach here.
+  buckets-only:
+    variables:
+      landing: "{company}-{env}-landing"
+    buckets:
+      landing: "{landing}"
+      archive: "{landing}-archive"
 """
 
 
@@ -396,6 +446,11 @@ class PipelineConfig(ResourceModel):
     # against the process's working directory, so a config that names none has to be run from
     # the pipeline's checkout.
     resolve_paths_from: str | None = None
+    # Substituted as {name} into this pipeline's strings at load, by `variables.expand_variables`.
+    variables: dict[str, str] = {}
+    # Location within this pipeline -> (value after variables, what the file wrote), for each
+    # string a variable changed. Set by `DectlConfig`, read by `written_for`.
+    _writings: dict[tuple[str | int, ...], tuple[str, Written]] = PrivateAttr(default_factory=dict)
     glue_jobs: dict[str, GlueJobConfig] = {}
     lambdas: dict[str, LambdaConfig] = {}
     step_functions: dict[str, StepFunctionConfig] = {}
@@ -408,9 +463,45 @@ class PipelineConfig(ResourceModel):
 
 
 class DectlConfig(StrictModel):
+    # Substituted as {name} into every string in the file at load, by `variables.expand_variables`.
+    variables: dict[str, str] = {}
     defaults: Defaults
     jenkins: JenkinsConfig | None = None
     pipelines: dict[str, PipelineConfig]
+
+    @model_validator(mode='wrap')
+    @classmethod
+    def substitute_variables(cls, raw: Any, handler: ModelWrapValidatorHandler['DectlConfig']) -> 'DectlConfig':
+        expansion = expand_variables(raw)
+        config = handler(expansion.config)
+        for name, pipeline in config.pipelines.items():
+            pipeline._writings = expansion.writings.get(name, {})
+        return config
+
+
+def site_of(pipeline: PipelineConfig, location: tuple[str | int, ...]) -> tuple[str, str, str] | None:
+    """The (resource, alias, field) a location within the pipeline is reported under, as `ValueSite` spells it."""
+    head = str(location[0])
+    if head in PipelineConfig.FIELD_RESOURCE:
+        alias = str(location[1]) if len(location) > 1 else ''
+        return PipelineConfig.site_resource(head), alias, head
+    held = getattr(pipeline, head, None)
+    if not isinstance(held, (ResourceModel, dict)):
+        return PipelineConfig.RESOURCE, '', head
+    if isinstance(held, ResourceModel) and len(location) > 1:
+        return type(held).site_resource(str(location[1])), '', str(location[1])
+    member = held.get(location[1]) if isinstance(held, dict) and len(location) > 2 else None
+    if isinstance(member, ResourceModel):
+        return type(member).site_resource(str(location[2])), str(location[1]), str(location[2])
+    return None
+
+
+def written_for(pipeline: PipelineConfig, site: ValueSite, configured: str) -> Written | None:
+    """What the file wrote for this resolved value at this site, where a config variable changed it."""
+    for location, (value, written) in pipeline._writings.items():
+        if site_of(pipeline, location) == tuple(site) and substitute_env(value) == configured:
+            return written
+    return None
 
 
 # The resource is `pipeline` because the key belongs to the pipeline block rather than to any
@@ -709,7 +800,7 @@ def pipeline_value_faults(
         return (not resource or site.resource == resource) and (not alias or site.alias == alias)
 
     def row(site: ValueSite, path: Path | None, fault: ConfigFault, configured: str) -> UnusableValue:
-        return UnusableValue(pipeline_name, site, path, fault, configured)
+        return UnusableValue(pipeline_name, site, path, fault, configured, written_for(pipeline, site, configured))
 
     def refused_values(found: list[UnusableValue]) -> set[tuple[ValueSite, str]]:
         """Which (site, value) pairs already carry a fault, so nothing reports one twice.

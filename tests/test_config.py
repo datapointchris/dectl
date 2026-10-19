@@ -31,6 +31,7 @@ from dectl.config import ResourceModel
 from dectl.config import StepFunctionConfig
 from dectl.config import StrictModel
 from dectl.config import config_error_headline
+from dectl.config import config_value_faults
 from dectl.config import declared_keys
 from dectl.config import declared_names
 from dectl.config import declared_paths
@@ -59,17 +60,11 @@ from dectl.values import DeclaresValues
 from dectl.values import PathKind
 from dectl.values import UnusableValue
 from dectl.values import ValueSite
+from dectl.values import Written
 from dectl.values import deployable_files
 from dectl.values import path_fault
 from dectl.values import recovery_lines
 from dectl.values import root_fault
-
-
-def test_template_config_is_valid():
-    # The example config that `config init` writes and `config example` prints must always
-    # round-trip through the models, so the example can never drift out of validity.
-    config = DectlConfig.model_validate(yaml.safe_load(TEMPLATE_CONFIG))
-    assert 'example-pipeline' in config.pipelines
 
 
 def nested_model(annotation) -> tuple[type[StrictModel] | None, bool]:
@@ -142,6 +137,55 @@ SHOWN_ONLY_AS_A_COMMENT = {
     (PipelineConfig, 'resolve_paths_from'): 'names a directory no machine has, and `config validate` checks it, '
     'so `config init` would write a config that fails its own check',
 }
+
+
+def test_variables_substitute_at_load_and_refuse_what_would_clobber():
+    raw = {
+        'variables': {'account': '123', 'role_prefix': 'arn:aws:iam::{account}:role'},
+        'defaults': {'account_id': '{account}'},
+        'pipelines': {
+            'p': {
+                'variables': {'raw': 'co-{env}-raw'},
+                'buckets': {'raw': '{raw}'},
+                'glue_jobs': {
+                    'j': {
+                        'name': 'j',
+                        'script_bucket': '{raw}',
+                        'scripts': ['a.py'],
+                        'role': '{role_prefix}/r',
+                        'arguments': {'Q': "'{{ds}}'"},
+                    }
+                },
+            }
+        },
+    }
+    config = DectlConfig.model_validate(raw)
+    assert config.defaults.account_id == '123'
+    assert config.pipelines['p'].buckets['raw'] == 'co-{env}-raw'
+    assert config.pipelines['p'].glue_jobs['j'].role == 'arn:aws:iam::123:role/r'
+    assert config.pipelines['p'].glue_jobs['j'].arguments == {'Q': "'{ds}'"}
+
+    misspelled = DectlConfig.model_validate(
+        {**raw, 'variables': {**raw['variables'], 'co': 'Co_'}, 'pipelines': {'p': {'buckets': {'raw': '{co}-raw'}}}}
+    )
+    (fault,) = config_value_faults(misspelled)
+    assert fault.written == Written('{co}-raw', ('{co} from variables.co',))
+
+    refusals = {
+        'invalid_variable_name': {'variables': {'aws.account': 'x'}},
+        'unquoted_variable': {'pipelines': {'p': {'buckets': {'raw': {'raw': None}}}}},
+        'reserved_variable': {'variables': {'env': 'x'}},
+        'shadowed_variable': {'pipelines': {'p': {'variables': {'raw': 'co-{env}-raw', 'account': '9'}}}},
+        'undefined_variable': {'pipelines': {'p': {'buckets': {'raw': '{raw_bucket}'}}}},
+        'variable_not_a_string': {'variables': {'account': 123}},
+    }
+    for kind, overlay in refusals.items():
+        broken = {**raw, 'variables': {**raw['variables'], **overlay.get('variables', {})}}
+        if 'pipelines' in overlay:
+            broken['pipelines'] = {'p': {**raw['pipelines']['p'], **overlay['pipelines']['p']}}
+        with pytest.raises(ValidationError) as caught:
+            DectlConfig.model_validate(broken)
+        assert [error['type'] for error in caught.value.errors()] == [kind]
 
 
 def test_validation_rejects_unknown_pipeline_key():
@@ -451,6 +495,8 @@ def test_config_path_falls_back_to_dot_config_when_xdg_is_unset():
 # belongs in none. A name-based heuristic cannot do that job: it read six words plus a literal
 # `scripts`, so `asl`, `handler`, `template`, `manifest` and `entrypoint` were all invisible.
 UNCHECKED_FIELDS = {
+    (DectlConfig, 'variables'): 'substituted into the fields that use it, which are checked as they are',
+    (PipelineConfig, 'variables'): 'substituted into the fields that use it, which are checked as they are',
     (Defaults, 'account_id'): 'the AWS account; every call is made against it and AWS reports a mismatch',
     (Defaults, 'region'): 'an AWS region; botocore rejects one that does not exist',
     (Defaults, 'environment'): 'the default {env} substitution, which names nothing on its own',

@@ -203,6 +203,8 @@ def config_validate(
                         'alias': p.site.alias,
                         'field': p.site.field,
                         'configured': p.configured,
+                        'written': p.written.text if p.written else None,
+                        'variables': list(p.written.variables) if p.written else [],
                         'path': str(p.path) if p.path is not None else None,
                         'fault': str(p.fault),
                     }

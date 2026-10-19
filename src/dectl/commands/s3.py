@@ -9,6 +9,7 @@ import typer
 
 from dectl.config import DectlConfig
 from dectl.config import PipelineConfig
+from dectl.config import written_for
 from dectl.env import substitute_env
 from dectl.env import warn_if_environment_had_no_effect
 from dectl.output import error
@@ -34,7 +35,7 @@ def shell_variable_name(prefix: str, alias: str) -> str:
     return re.sub(r'[^a-z0-9_]', '_', f'{prefix}_{alias}'.lower())
 
 
-def usable_bucket(pipeline_name: str, alias: str, template: str) -> str:
+def usable_bucket(pipeline_name: str, pipeline: PipelineConfig, alias: str, template: str) -> str:
     """This bucket's name for the active environment, or exit naming what is wrong with it.
 
     Run at every verb that hands the name to something outside dectl, not only at `config
@@ -55,8 +56,9 @@ def usable_bucket(pipeline_name: str, alias: str, template: str) -> str:
     fault = bucket_fault(resolved)
     if fault:
         site = ValueSite(PipelineConfig.site_resource('buckets'), alias, 'buckets')
+        written = written_for(pipeline, site, resolved)
         refuse_unusable_values(
-            [UnusableValue(pipeline=pipeline_name, site=site, path=None, fault=fault, configured=resolved)],
+            [UnusableValue(pipeline=pipeline_name, site=site, path=None, fault=fault, configured=resolved, written=written)],
             exit_code=1,
         )
     return resolved
@@ -80,7 +82,7 @@ def make_s3_bucket_app(pipeline_name: str, alias: str, bucket_template: str, con
 
     def resolved_bucket() -> str:
         warn_if_environment_had_no_effect(bucket_template)
-        return usable_bucket(pipeline_name, alias, bucket_template)
+        return usable_bucket(pipeline_name, config.pipelines[pipeline_name], alias, bucket_template)
 
     @bucket_app.command(epilog=f'Example:\n\naws s3 cp "$(dectl {pipeline_name} s3 {alias} uri)/file.txt" .')
     def uri() -> None:
@@ -181,7 +183,7 @@ def make_s3_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Type
         warn_if_environment_had_no_effect(list(buckets.values()))
         # Every bucket is checked before the first line is printed, so a refusal cannot leave
         # the caller's shell holding half the assignments.
-        usable = {alias: usable_bucket(pipeline_name, alias, bucket) for alias, bucket in buckets.items()}
+        usable = {alias: usable_bucket(pipeline_name, pipeline, alias, bucket) for alias, bucket in buckets.items()}
         for alias, bucket in usable.items():
             print(f"export {shell_variable_name(var_prefix, alias)}='{bucket_uri(bucket)}'")
 

@@ -273,6 +273,14 @@ class DeclaredName(NamedTuple):
     value: str
 
 
+class Written(NamedTuple):
+    """A value as the file spells it, before its config variables were substituted."""
+
+    text: str
+    # Each variable it used, as `{name} from variables.name`, so the reader finds the key to edit.
+    variables: tuple[str, ...]
+
+
 class UnusableValue(NamedTuple):
     """One declared value that this config or this machine cannot supply, and why."""
 
@@ -283,10 +291,14 @@ class UnusableValue(NamedTuple):
     # all. `Path('')` is `.`, so a non-optional field publishes a path the config never named.
     path: Path | None
     fault: ConfigFault
-    # The string as written. A key fault is about the spelling, and `path` has already had the
-    # `.`, the doubled separator and the trailing slash collapsed out of it by resolution — so
-    # three differently-malformed entries render as one identical row without this.
+    # The string as resolved, `{env}` and config variables substituted. A key fault is about the
+    # spelling, and `path` has already had the `.`, the doubled separator and the trailing slash
+    # collapsed out of it by resolution — so three differently-malformed entries render as one
+    # identical row without this.
     configured: str
+    # What the file wrote, where a config variable made it differ from `configured`. The
+    # character a fault names may sit in a variable, and the value alone is on no line of the file.
+    written: Written | None = None
 
     @property
     def shown(self) -> str | None:
@@ -304,7 +316,13 @@ class UnusableValue(NamedTuple):
     def __str__(self) -> str:
         shown = self.shown
         line = f'{self.pipeline}: {self.site.label} {FAULT_WORDING[self.fault]}'
-        return f'{line}: {shown}' if shown is not None else line
+        if shown is not None:
+            line = f'{line}: {shown}'
+        if self.written is not None:
+            line = f'{line}, written as {self.written.text!r}'
+            if self.written.variables:
+                line = f'{line} ({", ".join(self.written.variables)})'
+        return line
 
 
 def home_fault(configured: str) -> ConfigFault | None:
