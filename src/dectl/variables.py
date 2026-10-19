@@ -8,8 +8,7 @@ a pipeline's block reaches that pipeline alone.
 Nothing a variable could replace is overwritten. `env` cannot be a variable's name, a pipeline
 cannot redefine a top-level variable, and a `{name}` with no variable defined for it is refused
 rather than left in place to reach AWS as a literal name. `{{name}}` is the escape, and renders
-as `{name}`. A YAML anchor is not a variable: `&raw` is repeated as `*raw`, never as `{raw}`.
-Mapping keys are aliases and are never substituted.
+as `{name}`. Mapping keys are aliases and are never substituted.
 
 Every string a substitution changed is recorded with what the file wrote, so a fault found later
 in the substituted value can quote the line the reader has to edit.
@@ -62,14 +61,12 @@ def dotted(location: Location) -> str:
 class Pass:
     """One expansion of one file: the faults it found and the strings it changed."""
 
-    def __init__(self, defined: dict[str, list[Definition]], anchor_lines: dict[str, int]) -> None:
+    def __init__(self, defined: dict[str, list[Definition]]) -> None:
         self.faults: list[InitErrorDetails] = []
         self.changed: dict[Location, tuple[str, Written]] = {}
         # Every variable name in the file -> where each is defined, so a reference out of a
         # variable's reach is told where it is rather than that it does not exist.
         self.defined = defined
-        # Every YAML anchor in the file -> its line, so `{raw}` written for `&raw` is told `*raw`.
-        self.anchor_lines = anchor_lines
 
     def fault(self, kind: str, message: str, location: Location, value: Any) -> None:
         self.faults.append(InitErrorDetails(type=PydanticCustomError(kind, message), loc=location, input=value))
@@ -89,11 +86,6 @@ class Pass:
             return [self.substitute(item, scope, (*location, index)) for index, item in enumerate(value)]
         if not isinstance(value, str):
             return value
-        if value.startswith('*') and value[1:] in self.anchor_lines:
-            anchor = f'&{value[1:]} on line {self.anchor_lines[value[1:]]}'
-            message = f'{value} is quoted, so YAML reads it as text. Write {value} unquoted, to repeat the value anchored as {anchor}'
-            self.fault('quoted_alias', message, location, value)
-            return value
         used: list[str] = []
 
         def replace(match: re.Match[str]) -> str:
@@ -106,7 +98,7 @@ class Pass:
                 used.append(f'{match[0]} from {scope[name].origin}')
                 used.extend(scope[name].used)
                 return scope[name].value
-            reason = self.unreachable(match[0], name, scope, below, location, whole=match[0] == value)
+            reason = self.unreachable(match[0], name, scope, below, location)
             self.fault('undefined_variable', reason, location, value)
             return match[0]
 
@@ -115,14 +107,12 @@ class Pass:
             self.changed[location] = (substituted, Written(value, tuple(used)))
         return substituted
 
-    def unreachable(self, token: str, name: str, scope: dict[str, Variable], below: frozenset[str], location: Location, whole: bool) -> str:
+    def unreachable(self, token: str, name: str, scope: dict[str, Variable], below: frozenset[str], location: Location) -> str:
         """Why `token` resolves to nothing here, most likely cause first.
 
         The escape is offered last, because escaping a variable that exists elsewhere ships the
         braces to AWS as text. Moving a variable to the top level is offered only where it would
-        work: one built from another pipeline's variables cannot be read outside that pipeline.
-        An anchor of the same name is offered only as `*name`, and only where `whole` says the
-        token is the entire value, because an alias cannot sit inside a longer string."""
+        work: one built from another pipeline's variables cannot be read outside that pipeline."""
         if name in below:
             return f'variable {token} is defined below this one, and a variable sees only those above it'
         if name in self.defined:
@@ -139,15 +129,6 @@ class Pass:
                 'to the top-level variables block if every pipeline shares its value'
             )
         missing = f'variable {token} cannot be found'
-        if name in self.anchor_lines:
-            anchor = f'&{name} on line {self.anchor_lines[name]}'
-            if not whole:
-                return (
-                    f'{missing}. {anchor} is a YAML anchor, which repeats a whole value and cannot go inside one. '
-                    f'Define {name} under variables to use it here'
-                )
-            key = f'{location[-1]}: ' if isinstance(location[-1], str) else ''
-            return f'{missing}. {anchor} is a YAML anchor, not a variable. Repeat it as the whole value, unquoted: {key}*{name}'
         escape = f'If a job or Jenkinsfile fills {token} itself, write {{{token}}}'
         # A placeholder the job fills can sit close to a variable's name, as {date} does to {dataset}.
         close = difflib.get_close_matches(name, list(scope), n=1)
@@ -171,7 +152,7 @@ class Pass:
         (name,) = value
         message = f'{{{name}}} was read as a YAML mapping, because the value starts with {{; quote it'
         if name not in scope and name != RESERVED_NAME:
-            message += f'. Quoted, {self.unreachable(f"{{{name}}}", name, scope, frozenset(), location, whole=True)}'
+            message += f'. Quoted, {self.unreachable(f"{{{name}}}", name, scope, frozenset(), location)}'
         self.fault('unquoted_variable', message, location, value)
 
     def resolve_block(self, block: Any, inherited: dict[str, Variable], location: Location) -> tuple[Any, dict[str, Variable]]:
@@ -217,10 +198,7 @@ def not_a_string(value: Any) -> str:
     """Why a variable's value is refused, in terms of what YAML made of it."""
     if isinstance(value, dict | list):
         shape = 'mapping' if isinstance(value, dict) else 'list'
-        return (
-            f'a variable is one string, and YAML read this as a {shape}. To reuse a block, anchor it where it '
-            'is first used, as `load: &job`, then repeat it with `*job` or merge it with `<<: *job`'
-        )
+        return f'a variable is one string, and YAML read this as a {shape}'
     if value is None:
         return 'a variable is a string, and this one is empty'
     return 'a variable is a string; quote it, since YAML reads an unquoted 0123 as octal'
@@ -248,11 +226,11 @@ def defined_variables(raw: dict[Any, Any]) -> dict[str, list[Definition]]:
     return defined
 
 
-def expand_variables(raw: Any, anchor_lines: dict[str, int]) -> Expansion:
+def expand_variables(raw: Any) -> Expansion:
     """The parsed config with every variable substituted, or a `ValidationError` naming each fault."""
     if not isinstance(raw, dict):
         return Expansion(raw, {})
-    run = Pass(defined_variables(raw), anchor_lines)
+    run = Pass(defined_variables(raw))
     top_block, top_scope = run.resolve_block(raw.get('variables'), {}, ('variables',))
     expanded: dict[Any, Any] = {}
     for key, value in raw.items():

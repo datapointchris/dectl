@@ -42,8 +42,7 @@ def dectl_with_config(config: Path, tmp_path: Path, *args: str) -> subprocess.Co
 
 
 def test_the_layered_config_resolves_each_pipeline_under_its_own_names(tmp_path):
-    """A merged pipeline is one object with the pipeline it copies until variables are substituted,
-    so a substitution made in place would hand finance the names sales resolved."""
+    """Two pipelines written alike resolve to their own names through the installed entry point."""
     validated = dectl_with_config(LAYERED_CONFIG, tmp_path, 'config', 'validate')
     assert validated.returncode == 0, validated.stderr
     for pipeline, dataset in [('sales', 'orders'), ('finance', 'invoices')]:
@@ -58,7 +57,6 @@ def test_the_layered_config_resolves_each_pipeline_under_its_own_names(tmp_path)
         }
         assert {alias: (job['name'], job['script_uris']) for alias, job in resolved['glue'].items()} == {
             'load': (f'{prefix}-load', [f's3://{prefix}-scripts/scripts/load.py']),
-            'backfill': (f'{prefix}-backfill', [f's3://{prefix}-scripts/scripts/backfill.py']),
         }
         flow = resolved['sfn']['flow']
         assert (flow['name'], flow['log_group'], flow['live_alias']) == (f'{prefix}-flow', f'/aws/vendedlogs/states/{prefix}-flow', 'live')

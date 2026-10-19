@@ -105,12 +105,9 @@ every string of the raw mapping: the top-level block reaches the whole file, a p
 that pipeline alone. So every field downstream, the path checks included, sees a substituted value
 and needs no change for a new field to take variables. `{env}` passes through to the `resolve_*`
 chokepoints. A pipeline variable redefining a top-level one, a variable named `env` or a name
-`{name}` cannot reach, an undefined `{name}`, an unquoted `{name}` YAML read as a mapping, a quoted
-`"*name"` naming an anchor, and a non-string value are each a `ValidationError` carrying the key's
-own location. `load_config` parses with `AnchorRecordingLoader` and hands each anchor's name and
-line in through the validation context, so `{raw}` written for an anchor `&raw` is told the `*raw`
-that works. A config validated without that context sees no anchors. `{{name}}` is the
-escape for a literal `{name}` another program fills. `${NAME}` is skipped by the token's
+`{name}` cannot reach, an undefined `{name}`, an unquoted `{name}` YAML read as a mapping, and a
+non-string value are each a `ValidationError` carrying the key's own location. dectl gives YAML
+anchors and merges no handling of its own. `{{name}}` is the escape for a literal `{name}` another program fills. `${NAME}` is skipped by the token's
 lookbehind, which keeps the Jenkins credentials and Terraform placeholders out of reach.
 `aws_names_only` drops `variables`, because a `{env}` held there names nothing and would silence
 the env-effect guard.
@@ -119,13 +116,6 @@ The pass records what the file wrote for every string it changed, and hands each
 share as `_writings`. `written_for` reads it, so a fault row names the line to edit and the
 variables in it, not only a value no line of the file holds. A new door building an
 `UnusableValue` passes `written_for(...)` as `written`.
-
-**The pass builds a new mapping at every level and never writes into the one it was handed.** YAML
-gives an anchored block to each alias and `<<:` merge as the same Python object, so a pipeline
-merged from another shares its `buckets`, `glue_jobs` and `arguments` until the pass runs.
-Substituted in place, the second pipeline inherits the first's names, and an escaped `{{date}}`
-shared by two jobs is unescaped twice and refused. `test_the_layered_config_resolves_each_pipeline_under_its_own_names`
-catches both.
 
 This is interpolation and references between keys, which the general advice is to answer with a
 generated config instead. It is here because an account id, a company prefix and a bucket recur
@@ -391,12 +381,11 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
 
 **`tests/layered_pipelines_config/` is a config in the shape a real multi-pipeline one takes, and
 the README's full example is that file verbatim.** It configures every resource type. Top-level
-variables fan out to two pipelines through each one's prefix, `finance` is a YAML merge of
-`sales`, and values repeat by variable, by anchor and by `<<:` block. The scripts and Lambda
-sources it names sit beside it, so its relative paths resolve. `test_config.py` loads it through
-`load_config` for the load-time faults and refusals. Its README test holds the README's config and
-template blocks equal to these files, checks each resolution row against `finance` under `prod`,
-and loads each mistake row for its exact message. `test_main.py` starts the installed `dectl`
+variables fan out to two pipelines through each one's prefix, and `finance` is written out like
+`sales` under its own pipeline and dataset. The scripts and Lambda sources it names sit beside it,
+so its relative paths resolve. `test_config.py` loads it through `load_config` for the load-time
+faults and refusals. Its README test holds the README's config and template blocks equal to these
+files. `test_main.py` starts the installed `dectl`
 against it in a fresh process, because `main.py` builds the tree from the file at import.
 `test_stepfunctions_integration.py` deploys its `flow.asl.json.tftpl` with `finance`'s
 substitutions, so live Step Functions validates the JSONata. A config shape that has to work goes

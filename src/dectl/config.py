@@ -15,7 +15,6 @@ from pydantic import Field
 from pydantic import ModelWrapValidatorHandler
 from pydantic import PrivateAttr
 from pydantic import ValidationError
-from pydantic import ValidationInfo
 from pydantic import field_validator
 from pydantic import model_validator
 
@@ -98,9 +97,9 @@ pipelines:
     # This pipeline's own, beside the top-level ones above.
     variables:
       raw_bucket: "{company}-{env}-raw-data-bucket"
+      curated_bucket: "{company}-{env}-curated-data-bucket"
     glue_jobs:
-      # `&source-copy` is a YAML anchor naming this block, so `backfill` below can copy it.
-      source-copy: &source-copy
+      source-copy:
         name: "{company}-{env}-source-copy-job"
         script_bucket: "{company}-script-bucket"
         # The two halves of each script's S3 key, joined as written. Neither resolves against
@@ -122,11 +121,7 @@ pipelines:
         arguments:
           SOURCE_BUCKET: "{raw_bucket}"
           SOURCE_PREFIX: incoming
-          # `&curated` anchors this one value, and `curated: *curated` under buckets repeats it
-          # whole. Written {curated}, it would look for a variable and find none. An anchor
-          # cannot go inside a longer value either, so a name used inside others is a variable,
-          # as raw_bucket is.
-          TARGET_BUCKET: &curated "{company}-{env}-curated-data-bucket"
+          TARGET_BUCKET: "{curated_bucket}"
           # The job fills {date} itself, so it reaches Glue with single braces.
           OUTPUT_PATTERN: out/{{date}}/
       # A second job, sized the other way, and naming every optional key so each one is here to
@@ -153,13 +148,6 @@ pipelines:
         # STANDARD or FLEX. FLEX runs on spare capacity for less money and starts when it
         # starts, which is the trade an iteration loop usually wants and a schedule does not.
         execution_class: FLEX
-      # `<<: *source-copy` copies every key of that block, and a key written here replaces the
-      # copied one. YAML copies the block as the file wrote it, before any variable is filled.
-      backfill:
-        <<: *source-copy
-        name: "{company}-{env}-backfill-job"
-        scripts:
-          - my-backfill.py
     lambdas:
       my-function:
         name: "{company}-{env}-lambda-function"
@@ -211,7 +199,7 @@ pipelines:
         name: "{company}-{env}-reporting-machine"
     buckets:
       raw: "{raw_bucket}"
-      curated: *curated
+      curated: "{curated_bucket}"
     iceberg_tables:
       # Glue Data Catalog database + table. dectl reads the table's own metadata file, so the
       # only requirement is that the table is registered in Glue with table_type ICEBERG.
@@ -239,24 +227,12 @@ pipelines:
   # A pipeline holding only buckets gets an `s3` command and nothing else, because each
   # pipeline's commands are built from what it declares. Its variables are its own, and
   # example-pipeline's `raw_bucket` is out of reach here.
-  buckets-only: &buckets-only
+  buckets-only:
     variables:
       landing: "{company}-{env}-landing"
-      archive: &archive "{landing}-archive"
     buckets:
       landing: "{landing}"
-      archive: "{archive}"
-
-  # A whole pipeline copied from the one above with a YAML merge. The copy is made before any
-  # variable is filled, so its buckets resolve against the variables written here. A merge is
-  # one level deep: this `variables` block replaces the copied one whole rather than adding to
-  # it, so `*archive` repeats the one value it shares. The anchor goes after the colon and
-  # before the quotes, as `&archive` does above.
-  merged-from-buckets-only:
-    <<: *buckets-only
-    variables:
-      landing: "{company}-{env}-landing-eu"
-      archive: *archive
+      archive: "{landing}-archive"
 """
 
 
@@ -503,8 +479,8 @@ class DectlConfig(StrictModel):
 
     @model_validator(mode='wrap')
     @classmethod
-    def substitute_variables(cls, raw: Any, handler: ModelWrapValidatorHandler['DectlConfig'], info: ValidationInfo) -> 'DectlConfig':
-        expansion = expand_variables(raw, (info.context or {}).get('anchor_lines', {}))
+    def substitute_variables(cls, raw: Any, handler: ModelWrapValidatorHandler['DectlConfig']) -> 'DectlConfig':
+        expansion = expand_variables(raw)
         config = handler(expansion.config)
         for name, pipeline in config.pipelines.items():
             pipeline._writings = expansion.writings.get(name, {})
@@ -955,34 +931,13 @@ def config_value_faults(config: DectlConfig) -> list[UnusableValue]:
     return problems
 
 
-class AnchorRecordingLoader(yaml.SafeLoader):
-    """`safe_load`'s loader, keeping each anchor's name and line, which composing the nodes discards.
-
-    The variables pass reads them, because `{raw}` written for an anchor `&raw` is the mistake
-    anchors invite, and a refusal that knows the anchor can name the `*raw` that works."""
-
-    def __init__(self, stream: Any) -> None:
-        super().__init__(stream)
-        self.anchor_lines: dict[str, int] = {}
-
-    def compose_node(self, parent: Any, index: Any) -> Any:
-        event = self.peek_event()
-        if not isinstance(event, yaml.AliasEvent) and getattr(event, 'anchor', None):
-            self.anchor_lines[event.anchor] = event.start_mark.line + 1
-        return super().compose_node(parent, index)
-
-
 def load_config() -> DectlConfig | None:
     if not CONFIG_PATH.exists():
         return None
     # The open file rather than its text, so a YAML error's position names the file.
     with CONFIG_PATH.open('rb') as handle:
-        loader = AnchorRecordingLoader(handle)
-        try:
-            raw = loader.get_single_data()
-        finally:
-            loader.dispose()
-    return DectlConfig.model_validate(raw, context={'anchor_lines': loader.anchor_lines})
+        raw = yaml.safe_load(handle)
+    return DectlConfig.model_validate(raw)
 
 
 # The two ways a config that exists still fails to load: YAML that will not parse, and YAML that

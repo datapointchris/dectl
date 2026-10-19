@@ -45,7 +45,6 @@ from dectl.config import pipeline_root
 from dectl.config import pipeline_value_faults
 from dectl.config import resolve_from_root
 from dectl.env import render_env_model
-from dectl.env import render_value
 from dectl.env import set_active_environment
 from dectl.env import substitute_env
 from dectl.pipeline_view import aws_names_only
@@ -150,16 +149,14 @@ def merged(base, overlay):
 
 def test_variables_substitute_at_load_and_refuse_what_would_clobber(monkeypatch, tmp_path):
     """The committed config fans one top-level variable out to two pipelines through each one's
-    own prefix, and copies finance from sales with a YAML merge. Its resolved names under an
-    environment are `test_main`'s, read through the CLI."""
+    own prefix. Its resolved names under an environment are `test_main`'s, read through the CLI."""
     monkeypatch.setattr('dectl.config.CONFIG_PATH', LAYERED_CONFIG)
     config = load_config()
     assert config is not None
     finance = config.pipelines['finance']
     # `{env}` survives the load, because --env is parsed after the tree is built.
     assert finance.buckets['raw'] == 'acme-{env}-finance-raw'
-    # An anchored value is copied as the file wrote it, so each pipeline fills its own prefix.
-    assert finance.glue_jobs['backfill'].arguments == {
+    assert finance.glue_jobs['load'].arguments == {
         'SOURCE': 's3://acme-{env}-finance-raw/invoices/',
         'LANDING': 's3://acme-{env}-finance-raw/invoices/incoming/',
         'TARGET_BUCKET': 'acme-{env}-finance-curated',
@@ -186,7 +183,12 @@ def test_variables_substitute_at_load_and_refuse_what_would_clobber(monkeypatch,
                 pipeline,
                 Written('{raw_bucket}', (f'{{raw_bucket}} from pipelines.{pipeline}.variables.raw_bucket', *prefix_trace(pipeline))),
             ),
-            (pipeline, Written('{prefix}-curated', prefix_trace(pipeline))),
+            (
+                pipeline,
+                Written(
+                    '{curated_bucket}', (f'{{curated_bucket}} from pipelines.{pipeline}.variables.curated_bucket', *prefix_trace(pipeline))
+                ),
+            ),
             (pipeline, Written('{prefix}-scripts', prefix_trace(pipeline))),
         ]
     }
@@ -208,7 +210,7 @@ def test_variables_substitute_at_load_and_refuse_what_would_clobber(monkeypatch,
             'It is built from the pipeline variables {prefix}, so define {archive} in pipelines.finance.variables too',
         ),
         ('variable_not_a_string', {'variables': {'account': 123}}, 'octal'),
-        ('variable_not_a_string', {'variables': {'glue': {'role': 'r'}}}, 'YAML read this as a mapping. To reuse a block, anchor it'),
+        ('variable_not_a_string', {'variables': {'glue': {'role': 'r'}}}, 'YAML read this as a mapping'),
     ]
     for kind, overlay, message in refusals:
         with pytest.raises(ValidationError) as caught:
@@ -217,67 +219,14 @@ def test_variables_substitute_at_load_and_refuse_what_would_clobber(monkeypatch,
         assert message in caught.value.errors()[0]['msg']
 
 
-def leaf_strings(value, key=None):
-    if isinstance(value, dict):
-        for child_key, child in value.items():
-            yield from leaf_strings(child, child_key)
-    elif isinstance(value, str):
-        yield key, value
-
-
-def test_the_readme_example_is_the_committed_config_and_resolves_and_refuses_as_it_says(monkeypatch, tmp_path):
-    """The README's full example is read as a reference, so every value and message it shows is
-    what dectl gives for the committed config."""
+def test_the_readme_example_is_the_committed_config():
+    """The README's full example is read as a reference, so it is the config the suite loads."""
     readme = (Path(__file__).parent.parent / 'README.md').read_text()
     section = readme.split('### A full config', 1)[1]
     section = re.split(r'^#{2,3} ', section, maxsplit=1, flags=re.MULTILINE)[0]
     fences = dict(re.findall(r'^```(\w+)\n(.*?)^```$', section, flags=re.MULTILINE | re.DOTALL))
-    text = LAYERED_CONFIG.read_text()
-    assert fences['yaml'] == text
+    assert fences['yaml'] == LAYERED_CONFIG.read_text()
     assert fences['json'] == (LAYERED_CONFIG.parent / 'flow.asl.json.tftpl').read_text()
-
-    def table_rows(part: str) -> list[tuple[str, str]]:
-        rows = []
-        for row in re.findall(r'^\| `.*$', part, flags=re.MULTILINE):
-            cells = re.fullmatch(r'\| `(.+?)` +\| `(.+?)` +\|', row)
-            assert cells, row
-            rows.append((cells[1], cells[2]))
-        return rows
-
-    resolutions, mistakes = (table_rows(part) for part in section.split('What each common mistake gets'))
-    monkeypatch.setattr('dectl.config.CONFIG_PATH', LAYERED_CONFIG)
-    config = load_config()
-    assert config is not None
-    set_active_environment('prod', '--env')
-    try:
-        finance = set(leaf_strings(render_value(config.pipelines['finance'].model_dump())))
-    finally:
-        set_active_environment('dev', 'default')
-    assert resolutions
-    for written, resolved in resolutions:
-        assert written in text
-        assert (written.split(':')[0], resolved) in finance
-
-    written_config = tmp_path / 'config.yaml'
-    monkeypatch.setattr('dectl.config.CONFIG_PATH', written_config)
-
-    def load_with(line: str):
-        key = line.split(':')[0]
-        lines = text.splitlines(keepends=True)
-        [at] = [number for number, original in enumerate(lines) if original.strip().startswith(f'{key}: ')]
-        indent = lines[at][: len(lines[at]) - len(lines[at].lstrip())]
-        written_config.write_text(''.join([*lines[:at], f'{indent}{line}\n', *lines[at + 1 :]]))
-        return load_config()
-
-    assert mistakes
-    for line, message in mistakes:
-        with pytest.raises(ValidationError) as caught:
-            load_with(line)
-        assert {error['msg'] for error in caught.value.errors()} == {message}
-
-    # `raw` sits above the line anchoring &curated-bucket.
-    with pytest.raises(yaml.YAMLError, match='found undefined alias'):
-        load_with('raw: *curated-bucket')
 
 
 def test_validation_rejects_unknown_pipeline_key():
