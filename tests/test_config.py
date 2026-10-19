@@ -139,53 +139,72 @@ SHOWN_ONLY_AS_A_COMMENT = {
 }
 
 
+def merged(base, overlay):
+    if not (isinstance(base, dict) and isinstance(overlay, dict)):
+        return overlay
+    return {**base, **{key: merged(base.get(key), value) for key, value in overlay.items()}}
+
+
 def test_variables_substitute_at_load_and_refuse_what_would_clobber():
+    """A top-level variable fans out to two pipelines through each one's own prefix, and the
+    pipeline variables combine with text and each other into a definition substitution."""
     raw = {
-        'variables': {'account': '123', 'role_prefix': 'arn:aws:iam::{account}:role'},
+        'variables': {'company': 'acme', 'account': '123'},
         'defaults': {'account_id': '{account}'},
         'pipelines': {
-            'p': {
-                'variables': {'raw': 'co-{env}-raw'},
-                'buckets': {'raw': '{raw}'},
-                'glue_jobs': {
-                    'j': {
-                        'name': 'j',
-                        'script_bucket': '{raw}',
-                        'scripts': ['a.py'],
-                        'role': '{role_prefix}/r',
-                        'arguments': {'Q': "'{{ds}}'"},
+            pipeline: {
+                'variables': {
+                    'prefix': f'{{company}}-{{env}}-{pipeline}',
+                    'dataset': dataset,
+                    'landing': 's3://{prefix}-raw/{dataset}/incoming/',
+                },
+                'buckets': {'raw': '{prefix}-raw'},
+                'step_functions': {
+                    'flow': {
+                        'name': '{prefix}-flow',
+                        'definition_substitutions': {
+                            'landing_path': '{landing}',
+                            'process_arn': 'arn:aws:lambda:us-east-2:{account}:function:{prefix}-process-{dataset}',
+                            'run_date': '{{date}}',
+                        },
                     }
                 },
             }
+            for pipeline, dataset in [('sales', 'orders'), ('finance', 'invoices')]
         },
     }
     config = DectlConfig.model_validate(raw)
     assert config.defaults.account_id == '123'
-    assert config.pipelines['p'].buckets['raw'] == 'co-{env}-raw'
-    assert config.pipelines['p'].glue_jobs['j'].role == 'arn:aws:iam::123:role/r'
-    assert config.pipelines['p'].glue_jobs['j'].arguments == {'Q': "'{ds}'"}
+    for pipeline, dataset in [('sales', 'orders'), ('finance', 'invoices')]:
+        assert config.pipelines[pipeline].buckets['raw'] == f'acme-{{env}}-{pipeline}-raw'
+        assert config.pipelines[pipeline].step_functions['flow'].definition_substitutions == {
+            'landing_path': f's3://acme-{{env}}-{pipeline}-raw/{dataset}/incoming/',
+            'process_arn': f'arn:aws:lambda:us-east-2:123:function:acme-{{env}}-{pipeline}-process-{dataset}',
+            'run_date': '{date}',
+        }
 
-    misspelled = DectlConfig.model_validate(
-        {**raw, 'variables': {**raw['variables'], 'co': 'Co_'}, 'pipelines': {'p': {'buckets': {'raw': '{co}-raw'}}}}
-    )
-    (fault,) = config_value_faults(misspelled)
-    assert fault.written == Written('{co}-raw', ('{co} from variables.co',))
+    misnamed = DectlConfig.model_validate(merged(raw, {'variables': {'company': 'Acme_Co'}}))
+    assert [fault.written for fault in config_value_faults(misnamed)] == [
+        Written('{prefix}-raw', (f'{{prefix}} from pipelines.{pipeline}.variables.prefix', '{company} from variables.company'))
+        for pipeline in ['sales', 'finance']
+    ]
 
     refusals = {
-        'invalid_variable_name': {'variables': {'aws.account': 'x'}},
-        'unquoted_variable': {'pipelines': {'p': {'buckets': {'raw': {'raw': None}}}}},
-        'reserved_variable': {'variables': {'env': 'x'}},
-        'shadowed_variable': {'pipelines': {'p': {'variables': {'raw': 'co-{env}-raw', 'account': '9'}}}},
-        'undefined_variable': {'pipelines': {'p': {'buckets': {'raw': '{raw_bucket}'}}}},
-        'variable_not_a_string': {'variables': {'account': 123}},
+        'invalid_variable_name': ({'variables': {'aws.account': 'x'}}, ''),
+        'unquoted_variable': ({'pipelines': {'sales': {'buckets': {'raw': {'prefix': None}}}}}, ''),
+        'reserved_variable': ({'variables': {'env': 'x'}}, ''),
+        'shadowed_variable': ({'pipelines': {'sales': {'variables': {'account': '9'}}}}, ''),
+        'undefined_variable': (
+            {'pipelines': {'sales': {'variables': {'shared': 'x'}}, 'finance': {'buckets': {'shared': '{shared}'}}}},
+            'defined in pipelines.sales.variables',
+        ),
+        'variable_not_a_string': ({'variables': {'account': 123}}, ''),
     }
-    for kind, overlay in refusals.items():
-        broken = {**raw, 'variables': {**raw['variables'], **overlay.get('variables', {})}}
-        if 'pipelines' in overlay:
-            broken['pipelines'] = {'p': {**raw['pipelines']['p'], **overlay['pipelines']['p']}}
+    for kind, (overlay, message) in refusals.items():
         with pytest.raises(ValidationError) as caught:
-            DectlConfig.model_validate(broken)
+            DectlConfig.model_validate(merged(raw, overlay))
         assert [error['type'] for error in caught.value.errors()] == [kind]
+        assert message in caught.value.errors()[0]['msg']
 
 
 def test_validation_rejects_unknown_pipeline_key():
