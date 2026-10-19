@@ -14,6 +14,7 @@ Every string a substitution changed is recorded with what the file wrote, so a f
 in the substituted value can quote the line the reader has to edit.
 """
 
+import difflib
 import re
 from typing import Any
 from typing import NamedTuple
@@ -54,9 +55,12 @@ def dotted(location: Location) -> str:
 class Pass:
     """One expansion of one file: the faults it found and the strings it changed."""
 
-    def __init__(self) -> None:
+    def __init__(self, defined: dict[str, list[str]]) -> None:
         self.faults: list[InitErrorDetails] = []
         self.changed: dict[Location, tuple[str, Written]] = {}
+        # Every variable name in the file -> where each is defined, so a reference out of a
+        # variable's reach is told where it is rather than that it does not exist.
+        self.defined = defined
 
     def fault(self, kind: str, message: str, location: Location, value: Any) -> None:
         self.faults.append(InitErrorDetails(type=PydanticCustomError(kind, message), loc=location, input=value))
@@ -87,11 +91,7 @@ class Pass:
                 used.append(f'{match[0]} from {scope[name].origin}')
                 used.extend(scope[name].used)
                 return scope[name].value
-            if name in below:
-                message = f'{match[0]} is defined below this variable, and a variable sees only those above it'
-            else:
-                message = f'{match[0]} names no variable; write {{{match[0]}}} for a literal {match[0]}'
-            self.fault('undefined_variable', message, location, value)
+            self.fault('undefined_variable', self.unreachable(match[0], name, scope, below), location, value)
             return match[0]
 
         substituted = VARIABLE_TOKEN.sub(replace, value)
@@ -99,11 +99,29 @@ class Pass:
             self.changed[location] = (substituted, Written(value, tuple(used)))
         return substituted
 
+    def unreachable(self, token: str, name: str, scope: dict[str, Variable], below: frozenset[str]) -> str:
+        """Why `token` resolves to nothing here, most likely cause first.
+
+        The escape is offered last, because escaping a variable that exists elsewhere ships the
+        braces to AWS as text."""
+        if name in below:
+            return f'{token} is defined below this variable, and a variable sees only those above it'
+        if name in self.defined:
+            where = ' and '.join(self.defined[name])
+            return (
+                f"{token} is defined in {where}, which this value cannot see. A pipeline's variables reach "
+                'that pipeline alone; move it to the top-level variables block to share it'
+            )
+        close = difflib.get_close_matches(name, list(scope), n=1)
+        if close:
+            return f'{token} names no variable; did you mean {{{close[0]}}}?'
+        return f'{token} names no variable. If a job or Jenkinsfile fills {token} itself, write {{{token}}}'
+
     def unquoted(self, value: dict[str, None], scope: dict[str, Variable], location: Location) -> None:
         (name,) = value
         message = f'{{{name}}} was read as a YAML mapping, because the value starts with {{; quote it'
         if name not in scope and name != RESERVED_NAME:
-            message += f'; {{{name}}} also names no variable'
+            message += f'. Quoted, {self.unreachable(f"{{{name}}}", name, scope, frozenset())}'
         self.fault('unquoted_variable', message, location, value)
 
     def resolve_block(self, block: Any, inherited: dict[str, Variable], location: Location) -> tuple[Any, dict[str, Variable]]:
@@ -155,11 +173,25 @@ def unquoted_token(value: Any) -> bool:
     return item is None and isinstance(key, str) and NAME.fullmatch(key) is not None
 
 
+def defined_variables(raw: dict[Any, Any]) -> dict[str, list[str]]:
+    """Every variable name the file defines, at either level, and the block defining each."""
+    blocks: list[tuple[str, Any]] = [('variables', raw.get('variables'))]
+    pipelines = raw.get('pipelines')
+    if isinstance(pipelines, dict):
+        blocks += [(f'pipelines.{name}.variables', p.get('variables')) for name, p in pipelines.items() if isinstance(p, dict)]
+    defined: dict[str, list[str]] = {}
+    for origin, block in blocks:
+        if isinstance(block, dict):
+            for name in block:
+                defined.setdefault(str(name), []).append(origin)
+    return defined
+
+
 def expand_variables(raw: Any) -> Expansion:
     """The parsed config with every variable substituted, or a `ValidationError` naming each fault."""
     if not isinstance(raw, dict):
         return Expansion(raw, {})
-    run = Pass()
+    run = Pass(defined_variables(raw))
     top_block, top_scope = run.resolve_block(raw.get('variables'), {}, ('variables',))
     expanded: dict[Any, Any] = {}
     for key, value in raw.items():
