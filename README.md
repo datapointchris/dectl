@@ -76,7 +76,7 @@ the short key the config gives a resource, never its AWS name. `dectl PIPELINE l
 mapping. `dectl reference` prints the whole grammar whatever the config holds.
 
 One rule decides scope. Acting on one thing takes an alias: `glue JOB run`, `s3 BUCKET mount`.
-Acting on the whole set takes none: `s3 export`, `jenkins status`, `list`, `monitor`. The argument's
+Acting on the whole set takes none: `s3 export`, `jenkins status`, `list`, `monitor`, `commands`. The argument's
 presence selects the scope, never a flag.
 
 Whether a command writes is structural too. A write's rehearsal is a `plan` verb beside it, never a
@@ -105,6 +105,7 @@ makes a command that would prompt refuse instead, naming the flag that answers t
 | What is the whole pipeline doing | `PIPELINE monitor` | the log groups the `monitor` block selects |
 | Ship through the canonical path | `jenkins ACTION`, `jenkins status` | the pipeline's Jenkins job |
 | Give the aws CLI a bucket | `s3 export`, `s3 ALIAS uri` | the config |
+| Run a verb where dectl is not installed | `PIPELINE commands` | the config, for the active environment |
 | When did this table's numbers move | `iceberg ALIAS diff`, `iceberg ALIAS snapshots` | the Glue catalog entry and the table's metadata file |
 | Can this config be used | `config validate` | the config, and the files it names |
 
@@ -391,6 +392,52 @@ about each one missing.
 Every tailer follows whole log groups by time, never stream by stream. Lambda writes each execution
 environment to its own stream, and Glue creates its error stream only on the first write to stderr.
 Waiting for streams to appear costs minutes of silence and misses a stream created later.
+
+## `commands` — every verb as the aws, curl and mount-s3 lines it runs
+
+```bash
+dectl --env prod sales commands > sales-prod.sh      # one block per verb, resolved for prod
+dectl --env prod sales commands --json | jq -r '.commands[] | select(.command == "dectl sales lambda process run") | .shell'
+```
+
+Run from `/home/me/pipelines` against the full config below, three of its blocks read:
+
+```bash
+# The calls behind every dectl sales verb, for environment prod (from --env).
+# Each block runs alone in bash or zsh, with aws (v2), jq, python3, curl or mount-s3 where it uses them.
+# Pasted into an interactive zsh, a # line runs as a command unless `setopt interactivecomments` is on.
+
+# dectl sales glue load deploy
+aws s3 cp /home/me/pipelines/load.py s3://acme-prod-sales-scripts/scripts/load.py --no-guess-mime-type --region us-east-2
+# Where the definition differs from the config, dectl then confirms and sends UpdateJob.
+# UpdateJob replaces the whole definition, so plan is where that difference shows.
+
+# dectl sales lambda process run
+# One attempt and no read timeout: a retried invoke runs the function again.
+AWS_MAX_ATTEMPTS=1 aws lambda invoke --function-name acme-prod-sales-process-orders --payload '{}' --cli-binary-format raw-in-base64-out --cli-read-timeout 0 --region us-east-2 /dev/stdout
+
+# dectl sales jenkins apply
+curl --silent --show-error --fail-with-body --insecure --user "$JENKINS_USER:$JENKINS_API_TOKEN" --data-urlencode ENVIRONMENT=prod --data-urlencode ACTION=deploy https://jenkins.example.com/job/data-engineering/job/sales-deploy/buildWithParameters
+```
+
+Each block makes the calls its verb makes. So a verb runs where dectl is not installed, and a
+runbook can carry the exact call. Names are resolved for the active environment, as the verb
+resolves them. File paths are absolute, so a block runs from any directory. Nothing is colored,
+even on a terminal, so a copied line is the line.
+
+A block stops where dectl decides. Glue `plan` prints the `get-job` and a comment, because comparing
+a definition with the config is dectl's work. Glue `deploy` uploads the scripts and says when dectl
+would send `UpdateJob`. The `sfn` deploy blocks write only when the rendered definition's bytes
+differ from the live one, as the verb does. Its `plan` diffs the two as sorted JSON and exits 1
+when they differ.
+
+A Jenkins credential written as `${NAME}` prints as `$NAME`, the variable dectl reads. A token
+written into the config is never printed. The block reads `$JENKINS_TOKEN` instead and says so.
+
+An interactive zsh runs a pasted `#` line as a command unless `setopt interactivecomments` is on. A
+block run as a script, or pasted into bash, needs nothing.
+
+`--json` prints `{"pipeline", "environment", "commands": [{"command", "shell"}]}`.
 
 ## `s3` — bucket names for the aws CLI, not another copy of it
 

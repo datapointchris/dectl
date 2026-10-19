@@ -196,6 +196,10 @@ def log_event(event_id: str, timestamp: int, message: str, stream: str = 'stream
 # What every live AWS module needs before it can do anything: a session, and a role its service
 # will assume. Here once, so each role variable reaches every live module that needs that role.
 GLUE_MANAGED_POLICY = 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
+# The two calls a durable function checkpoints through, and no logs permission. Lambda delivers an
+# invocation's logs seconds after it returns, so a function allowed to log recreates its log group
+# after the test has deleted it.
+DURABLE_CHECKPOINT_ACTIONS = ('lambda:CheckpointDurableExecution', 'lambda:GetDurableExecutionState')
 
 
 def trust_policy(service: str) -> dict:
@@ -206,7 +210,9 @@ def trust_policy(service: str) -> dict:
 
 
 @contextlib.contextmanager
-def service_role(session, supplied_variable: str, service: str, managed_policies: tuple[str, ...] = ()):
+def service_role(
+    session, supplied_variable: str, service: str, managed_policies: tuple[str, ...] = (), allowed_actions: tuple[str, ...] = ()
+):
     """The role `supplied_variable` names, or one created for `service` and deleted afterwards."""
     supplied = os.environ.get(supplied_variable)
     if supplied:
@@ -218,12 +224,17 @@ def service_role(session, supplied_variable: str, service: str, managed_policies
     created = iam.create_role(RoleName=role_name, AssumeRolePolicyDocument=json.dumps(trust_policy(service)))
     for policy in managed_policies:
         iam.attach_role_policy(RoleName=role_name, PolicyArn=policy)
+    if allowed_actions:
+        document = {'Version': '2012-10-17', 'Statement': [{'Effect': 'Allow', 'Action': list(allowed_actions), 'Resource': '*'}]}
+        iam.put_role_policy(RoleName=role_name, PolicyName='allowed-actions', PolicyDocument=json.dumps(document))
     time.sleep(10)
     try:
         yield created['Role']['Arn']
     finally:
         for policy in managed_policies:
             iam.detach_role_policy(RoleName=role_name, PolicyArn=policy)
+        if allowed_actions:
+            iam.delete_role_policy(RoleName=role_name, PolicyName='allowed-actions')
         iam.delete_role(RoleName=role_name)
 
 
@@ -281,6 +292,16 @@ def states_role_arn(session):
     Its own role rather than the Glue one with a second trusted service, so each stays the least
     a supplied role has to be. A machine of Pass states calls nothing, so it needs no policy."""
     with service_role(session, 'DECTL_IT_STATES_ROLE_ARN', 'states.amazonaws.com') as arn:
+        yield arn
+
+
+@pytest.fixture(scope='module')
+def lambda_role_arn(session):
+    """A role Lambda can assume: the one `DECTL_IT_LAMBDA_ROLE_ARN` names, or one created.
+
+    A supplied role needs the durable checkpoint actions, because a durable function checkpoints
+    through its own role. One that may also write logs leaves a function's log group behind."""
+    with service_role(session, 'DECTL_IT_LAMBDA_ROLE_ARN', 'lambda.amazonaws.com', allowed_actions=DURABLE_CHECKPOINT_ACTIONS) as arn:
         yield arn
 
 

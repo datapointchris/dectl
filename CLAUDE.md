@@ -16,8 +16,8 @@ than raising.
 
 This means the command you see depends entirely on the user's config. When adding a resource
 type, you touch two places: the resource's own `make_*_app` module, and the pipeline loop in
-`main.py` that conditionally wires it in (plus the `resources` summary line and
-`pipeline_view.render_pipeline`).
+`main.py` that conditionally wires it in (plus the `resources` summary line,
+`pipeline_view.render_pipeline`, and its blocks in `commands/shell_equivalents.py`).
 
 ## Grammar: `PIPELINE RESOURCE ALIAS VERB` (verb last)
 
@@ -25,7 +25,7 @@ The command shape is `dectl PIPELINE RESOURCE ALIAS VERB [OPTIONS]` — the **ve
 deploy → run → logs loop on one resource changes only the trailing word. One rule governs the
 whole surface: **aliased = one thing, unaliased = the set/pipeline.** Instance verbs take an
 alias (`glue JOB run`, `s3 BUCKET mount`); set verbs take none (`s3 export`, `jenkins status`,
-`list`, `monitor`). Scope is structural: the argument's presence selects it, never a flag.
+`list`, `monitor`, `commands`). Scope is structural: the argument's presence selects it, never a flag.
 Whether a command writes is structural too: a write's rehearsal is a `plan` verb beside it,
 never a flag on the write, and no namespace acts bare. `glue` and `sfn` `plan` write nothing.
 A resource is named for the system it drives, so the Jenkins job is `jenkins`, never a word
@@ -82,6 +82,12 @@ names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
 - `monitor` is a **pipeline-level** command registered on `pipeline_app`, because it spans
   several resources. It tails every resource its `monitor` config block selects as one
   time-ordered stream via `logs.tail_log_groups`.
+- `commands` is the other pipeline-level command, a read printing each verb's aws, curl and
+  mount-s3 lines for the active env. `commands/shell_equivalents.py` builds every block from the
+  constants and renderers its verb uses (`script_uri`, `LOG_START_SLACK_MS`, `invoke_qualifier`,
+  `render_definition`), so a change to a verb reaches its block. A new verb needs a block, and
+  `test_every_verb_of_the_pipeline_has_a_block` fails until it has one. A block stops where dectl
+  decides: Glue's `plan` and `deploy` print a comment where dectl would diff and send `UpdateJob`.
 
 ## Config
 
@@ -389,7 +395,8 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
 the README's full example is that file verbatim.** It configures every resource type. Top-level
 variables fan out to two pipelines through each one's prefix, `finance` is a YAML merge of
 `sales`, and values repeat by variable, by anchor and by `<<:` block. The scripts and Lambda
-sources it names sit beside it, so its relative paths resolve. `test_config.py` loads it through
+sources it names sit beside it, so its relative paths resolve. The live block test deploys those
+sources, so `workflow_handler.py` is a real durable handler. `test_config.py` loads it through
 `load_config` for the load-time faults and refusals. Its README test holds the README's config and
 template blocks equal to these files, checks each resolution row against `finance` under `prod`,
 and loads each mistake row for its exact message. `test_main.py` starts the installed `dectl`
@@ -399,18 +406,28 @@ substitutions, so live Step Functions validates the JSONata. A config shape that
 in this file rather than in a test's inline dict. The template is named `.tftpl`, Terraform's
 extension for a `templatefile()` template, so the JSON hook does not read it before it is rendered.
 
+**A printed block is held to its verb by sending both to one endpoint.** `tests/recording_endpoint.py`
+is an HTTP server that decodes each request with botocore's own models into an operation and its
+parameters, whichever of body, query string or header carried them. `test_shell_equivalents.py`
+runs each of `sales`' verbs through dectl and its block through bash and zsh, with the real aws
+CLI, jq, python3 and curl, each under its own access key. A write must match exactly, and a block's
+reads must be ones the verb makes. The zsh half runs where zsh is installed, which CI's runner is
+not. `AWS_DISABLE_HOST_PREFIX_INJECTION` keeps StartLiveTail on the endpoint rather than a
+`streaming-` host. `test_shell_equivalents_integration.py` then runs the writing blocks against
+resources it creates, because a block's next step reads the service's answer.
+
 **Anything that writes to AWS gets a live test.** A failure here is read once, from output, with
 no debugger and no second attempt, and a fake holds only the service rules somebody already knew.
 The exemptions are real cost and setup too extensive to maintain, never "the fake covers it".
 
 **Every resource under test is created and deleted by the test**, never a real pipeline's job. A
-role is the exception, as a precondition like credentials. `DECTL_IT_ROLE_ARN` names the Glue one
-and `DECTL_IT_STATES_ROLE_ARN` the Step Functions one, and the fixtures in `conftest.py` create
-their own when either is unset:
+role is the exception, as a precondition like credentials. `DECTL_IT_ROLE_ARN` names the Glue one,
+`DECTL_IT_STATES_ROLE_ARN` the Step Functions one and `DECTL_IT_LAMBDA_ROLE_ARN` the Lambda one.
+The fixtures in `conftest.py` create their own when any is unset:
 
 ```bash
-# Least privilege: glue:*, logs:*, s3:*, states:*, and iam:PassRole on those two roles
-DECTL_IT_ROLE_ARN=<arn> DECTL_IT_STATES_ROLE_ARN=<arn> DECTL_IT_REGION=<region> uv run pytest --run-integration
+# Least privilege: glue:*, lambda:*, logs:*, s3:*, states:*, and iam:PassRole on those three roles
+DECTL_IT_ROLE_ARN=<arn> DECTL_IT_STATES_ROLE_ARN=<arn> DECTL_IT_LAMBDA_ROLE_ARN=<arn> DECTL_IT_REGION=<region> uv run pytest --run-integration
 
 # No setup, broader credentials: the fixture creates and deletes a role, needing iam:CreateRole
 DECTL_IT_AWS_PROFILE=<profile> DECTL_IT_REGION=<region> uv run pytest --run-integration
@@ -428,6 +445,14 @@ omitting `GlueVersion` entirely, which is the only way to build a DPU-to-worker 
 carries no `revisionId` at all. `DescribeStateMachine` returns the definition byte for byte as it
 was sent. `DescribeStateMachineAlias` lags `UpdateStateMachineAlias` by seconds, returning the
 old routing when read at once, so a test reading an alias back polls for it.
+`PublishStateMachineVersion` on a machine never updated since version 1 returns version 1 rather
+than publishing another.
+
+**What live Lambda does that no fake would have told you.** Lambda delivers an invocation's logs
+seconds after `Invoke` returns, creating the log group if it is gone. A function whose role may
+write logs therefore recreates its group after the test deleted it, so the created role carries
+only the two durable checkpoint actions. A durable execution's `FunctionArn` names the version it
+ran.
 
 **A fake enforces the service's constraints rather than replaying responses.** `FakeCloudWatchLogs`
 applies `startTime`, `endTime`, `logStreamNamePrefix` and `filterPattern`, and raises on a
@@ -442,5 +467,6 @@ counts the requests arriving at a socket that accepts connections and never answ
 only place `total_max_attempts: 1` is shown to mean one request, and it needs no AWS.
 
 **Latency is invisible to any fake.** `test_glue_run_integration.py` runs a real Python Shell job
-against a wall-clock budget, and it is the only module that costs money. The deploy integration
-test never starts a run.
+against a wall-clock budget. It costs money, as does `test_shell_equivalents_integration.py`, which
+starts a Glue run and stops it, invokes two functions and starts one execution. The deploy
+integration test never starts a run.
