@@ -78,10 +78,9 @@ def live_definition_for_suggestions(config: DectlConfig, arn: str) -> str | None
 
 
 def refuse_template_problems(
-    source: Path, template: str, sfn: StepFunctionConfig, config: DectlConfig, arn: str, problems: list[TemplateProblem]
+    source: Path, template: str, sfn: StepFunctionConfig, problems: list[TemplateProblem], live: str | None
 ) -> NoReturn:
-    missing = any(problem.fault is TemplateFault.MISSING_SUBSTITUTION for problem in problems)
-    live = live_definition_for_suggestions(config, arn) if missing else None
+    """Name every problem and exit, with a substitution for each the live definition can suggest."""
     suggestions = suggest_substitutions(template, sfn.definition_substitutions, live) if live else {}
     error(escape(f'{source} cannot be rendered:'))
     for problem in problems:
@@ -236,7 +235,9 @@ def add_definition_verbs(
         rendering = render_definition(template, sfn.definition_substitutions)
         machine_arn = state_machine_arn(config, sfn)
         if rendering.problems:
-            refuse_template_problems(source, template, sfn, config, machine_arn, rendering.problems)
+            missing = any(problem.fault is TemplateFault.MISSING_SUBSTITUTION for problem in rendering.problems)
+            suggestion_source = live_definition_for_suggestions(config, machine_arn) if missing else None
+            refuse_template_problems(source, template, sfn, rendering.problems, suggestion_source)
         rendered = parse_rendered(source, rendering.text)
 
         # Everything that can refuse runs before the first write, so a refusal never lands

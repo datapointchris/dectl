@@ -24,6 +24,9 @@ from dectl.commands.lambda_ import make_lambda_app
 from dectl.commands.monitor import run_monitor
 from dectl.commands.s3 import make_s3_app
 from dectl.commands.search import run_search
+from dectl.commands.shell_equivalents import pipeline_shell_blocks
+from dectl.commands.shell_equivalents import render_shell_blocks
+from dectl.commands.shell_equivalents import shell_blocks_to_dict
 from dectl.commands.stepfunctions import make_sfn_app
 from dectl.config import CONFIG_LOAD_ERRORS
 from dectl.config import CONFIG_PATH
@@ -197,6 +200,24 @@ if cfg:
 
             _make_list_cmd(pipeline_app, name, pipeline)
 
+            def register_commands_command(papp: typer.Typer, pname: str, pconfig: PipelineConfig, gconfig: DectlConfig) -> None:
+                @papp.command('commands', rich_help_panel='Pipeline')
+                def print_shell_equivalents(
+                    as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
+                ) -> None:
+                    """Print the aws, curl and mount-s3 lines behind every verb of this pipeline, resolved for the active environment.
+
+                    Each block runs alone in bash or zsh, so one can be pasted into a terminal, a
+                    README or a script on a machine without dectl. Printed plain on a terminal too,
+                    so a copied line is the line."""
+                    blocks = pipeline_shell_blocks(pname, pconfig, gconfig)
+                    if as_json:
+                        emit_json(shell_blocks_to_dict(pname, blocks))
+                    else:
+                        print(render_shell_blocks(pname, blocks), end='')
+
+            register_commands_command(pipeline_app, name, pipeline, cfg)
+
             if has_monitor:
 
                 def register_monitor_command(papp: typer.Typer, pconfig: PipelineConfig, gconfig) -> None:
@@ -259,7 +280,7 @@ REFERENCE_SET_VERBS = [
     's3 export [--prefix STR]',
     'jenkins ACTION [--follow] · jenkins status [--json] · jenkins logs [--follow]',
     "        (ACTION: a key of the job's actions in config)",
-    'list [--json] · monitor',
+    'list [--json] · monitor · commands [--json]',
 ]
 REFERENCE_GLOBAL = [
     'reference · env · list [--json] · search KEYWORD [--json] · update [--check]',
