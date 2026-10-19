@@ -98,7 +98,8 @@ pipelines:
     variables:
       raw_bucket: "{company}-{env}-raw-data-bucket"
     glue_jobs:
-      source-copy:
+      # `&source-copy` is a YAML anchor naming this block, so `backfill` below can copy it.
+      source-copy: &source-copy
         name: "{company}-{env}-source-copy-job"
         script_bucket: "{company}-script-bucket"
         # The two halves of each script's S3 key, joined as written. Neither resolves against
@@ -146,6 +147,13 @@ pipelines:
         # STANDARD or FLEX. FLEX runs on spare capacity for less money and starts when it
         # starts, which is the trade an iteration loop usually wants and a schedule does not.
         execution_class: FLEX
+      # `<<: *source-copy` copies every key of that block, and a key written here replaces the
+      # copied one. YAML copies the block as the file wrote it, before any variable is filled.
+      backfill:
+        <<: *source-copy
+        name: "{company}-{env}-backfill-job"
+        scripts:
+          - my-backfill.py
     lambdas:
       my-function:
         name: "{company}-{env}-lambda-function"
@@ -183,6 +191,12 @@ pipelines:
           copy_timeout_seconds: 3600
           min_orders: 1
           load_enabled: true
+          # A whole JSONata expression as the value. It lands inside a JSON string in the
+          # definition, so its string literals take single quotes and the YAML value takes
+          # double. {raw_bucket} inside it is a variable like any other. JSONata's own braces
+          # always hold more than a name, as {'stage': ...} does, so no variable matches them.
+          landing_key: "{% 's3://{raw_bucket}/incoming/' & $states.input.date & '.json' %}"
+          loaded_output: "{% $merge([$states.input, {'stage': 'loaded'}]) %}"
         # The alias `deploy --publish` moves to the version it publishes. Leave it out and
         # --publish still publishes a version, moving nothing.
         live_alias: live
@@ -219,12 +233,24 @@ pipelines:
   # A pipeline holding only buckets gets an `s3` command and nothing else, because each
   # pipeline's commands are built from what it declares. Its variables are its own, and
   # example-pipeline's `raw_bucket` is out of reach here.
-  buckets-only:
+  buckets-only: &buckets-only
     variables:
       landing: "{company}-{env}-landing"
+      archive: &archive "{landing}-archive"
     buckets:
       landing: "{landing}"
-      archive: "{landing}-archive"
+      archive: "{archive}"
+
+  # A whole pipeline copied from the one above with a YAML merge. The copy is made before any
+  # variable is filled, so its buckets resolve against the variables written here. A merge is
+  # one level deep: this `variables` block replaces the copied one whole rather than adding to
+  # it, so `*archive` repeats the one value it shares. The anchor goes after the colon and
+  # before the quotes, as `&archive` does above.
+  merged-from-buckets-only:
+    <<: *buckets-only
+    variables:
+      landing: "{company}-{env}-landing-eu"
+      archive: *archive
 """
 
 
@@ -926,7 +952,9 @@ def config_value_faults(config: DectlConfig) -> list[UnusableValue]:
 def load_config() -> DectlConfig | None:
     if not CONFIG_PATH.exists():
         return None
-    raw = yaml.safe_load(CONFIG_PATH.read_text())
+    # The open file rather than its text, so a YAML error's position names the file.
+    with CONFIG_PATH.open('rb') as handle:
+        raw = yaml.safe_load(handle)
     return DectlConfig.model_validate(raw)
 
 

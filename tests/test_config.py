@@ -65,6 +65,7 @@ from dectl.values import deployable_files
 from dectl.values import path_fault
 from dectl.values import recovery_lines
 from dectl.values import root_fault
+from tests.conftest import LAYERED_CONFIG
 
 
 def nested_model(annotation) -> tuple[type[StrictModel] | None, bool]:
@@ -145,62 +146,45 @@ def merged(base, overlay):
     return {**base, **{key: merged(base.get(key), value) for key, value in overlay.items()}}
 
 
-def test_variables_substitute_at_load_and_refuse_what_would_clobber():
-    """A top-level variable fans out to two pipelines through each one's own prefix, and the
-    pipeline variables combine with text and each other into a definition substitution."""
-    raw = {
-        'variables': {'company': 'acme', 'account': '123'},
-        'defaults': {'account_id': '{account}'},
-        'pipelines': {
-            pipeline: {
-                'variables': {
-                    'prefix': f'{{company}}-{{env}}-{pipeline}',
-                    'dataset': dataset,
-                    'landing': 's3://{prefix}-raw/{dataset}/incoming/',
-                },
-                'buckets': {'raw': '{prefix}-raw'},
-                'step_functions': {
-                    'flow': {
-                        'name': '{prefix}-flow',
-                        'definition_substitutions': {
-                            'landing_path': '{landing}',
-                            'process_arn': 'arn:aws:lambda:us-east-2:{account}:function:{prefix}-process-{dataset}',
-                            'run_date': '{{date}}',
-                        },
-                    }
-                },
-            }
-            for pipeline, dataset in [('sales', 'orders'), ('finance', 'invoices')]
-        },
-    }
-    config = DectlConfig.model_validate(raw)
-    assert config.defaults.account_id == '123'
-    for pipeline, dataset in [('sales', 'orders'), ('finance', 'invoices')]:
-        assert config.pipelines[pipeline].buckets['raw'] == f'acme-{{env}}-{pipeline}-raw'
-        assert config.pipelines[pipeline].step_functions['flow'].definition_substitutions == {
-            'landing_path': f's3://acme-{{env}}-{pipeline}-raw/{dataset}/incoming/',
-            'process_arn': f'arn:aws:lambda:us-east-2:123:function:acme-{{env}}-{pipeline}-process-{dataset}',
-            'run_date': '{date}',
-        }
+def test_variables_substitute_at_load_and_refuse_what_would_clobber(monkeypatch):
+    """The committed config fans one top-level variable out to two pipelines through each one's
+    own prefix, and copies finance from sales with a YAML merge. Its resolved names under an
+    environment are `test_main`'s, read through the CLI."""
+    monkeypatch.setattr('dectl.config.CONFIG_PATH', LAYERED_CONFIG)
+    config = load_config()
+    assert config is not None
+    # `{env}` survives the load, because --env is parsed after the tree is built.
+    assert config.pipelines['finance'].buckets['raw'] == 'acme-{env}-finance-raw'
 
+    raw = yaml.safe_load(LAYERED_CONFIG.read_text())
     misnamed = DectlConfig.model_validate(merged(raw, {'variables': {'company': 'Acme_Co'}}))
-    assert [fault.written for fault in config_value_faults(misnamed)] == [
-        Written('{prefix}-raw', (f'{{prefix}} from pipelines.{pipeline}.variables.prefix', '{company} from variables.company'))
+    traced = {(fault.pipeline, fault.written) for fault in config_value_faults(misnamed)}
+    assert traced == {
+        (pipeline, Written(text, (f'{{prefix}} from pipelines.{pipeline}.variables.prefix', '{company} from variables.company')))
         for pipeline in ['sales', 'finance']
-    ]
-
-    refusals = {
-        'invalid_variable_name': ({'variables': {'aws.account': 'x'}}, ''),
-        'unquoted_variable': ({'pipelines': {'sales': {'buckets': {'raw': {'prefix': None}}}}}, ''),
-        'reserved_variable': ({'variables': {'env': 'x'}}, ''),
-        'shadowed_variable': ({'pipelines': {'sales': {'variables': {'account': '9'}}}}, ''),
-        'undefined_variable': (
-            {'pipelines': {'sales': {'variables': {'shared': 'x'}}, 'finance': {'buckets': {'shared': '{shared}'}}}},
-            'defined in pipelines.sales.variables',
-        ),
-        'variable_not_a_string': ({'variables': {'account': 123}}, ''),
+        for text in ['{prefix}-raw', '{prefix}-scripts']
     }
-    for kind, (overlay, message) in refusals.items():
+
+    refusals = [
+        ('invalid_variable_name', {'variables': {'aws.account': 'x'}}, ''),
+        ('unquoted_variable', {'pipelines': {'sales': {'buckets': {'raw': {'prefix': None}}}}}, ''),
+        ('reserved_variable', {'variables': {'env': 'x'}}, ''),
+        ('shadowed_variable', {'pipelines': {'sales': {'variables': {'account': '9'}}}}, ''),
+        (
+            'undefined_variable',
+            {'pipelines': {'sales': {'variables': {'shared': 'x'}}, 'finance': {'buckets': {'shared': '{shared}'}}}},
+            'define it in pipelines.finance.variables too, or move it to the top-level variables block',
+        ),
+        # Moving it to the top level would leave {prefix} out of its reach, so that is not offered.
+        (
+            'undefined_variable',
+            {'pipelines': {'sales': {'variables': {'archive': '{prefix}-archive'}}, 'finance': {'buckets': {'archive': '{archive}'}}}},
+            'It is built from the pipeline variables {prefix}, so define {archive} in pipelines.finance.variables too',
+        ),
+        ('variable_not_a_string', {'variables': {'account': 123}}, 'octal'),
+        ('variable_not_a_string', {'variables': {'glue': {'role': 'r'}}}, 'YAML read this as a mapping. To reuse a block, anchor it'),
+    ]
+    for kind, overlay, message in refusals:
         with pytest.raises(ValidationError) as caught:
             DectlConfig.model_validate(merged(raw, overlay))
         assert [error['type'] for error in caught.value.errors()] == [kind]

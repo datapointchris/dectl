@@ -337,6 +337,11 @@ environment's name.
   `"{% ${load_enabled} and $count($orders) >= ${min_orders} %}"`. The one JSONata form that does
   collide is a `$` followed by `{`, as in `$orders.${ customer: $sum(total) }`, which the file
   writes as `$orders.$${ customer: $sum(total) }`.
+- **A substitution's value can be a whole JSONata expression.** It lands inside a JSON string in
+  the definition, so its string literals take single quotes, and the YAML value is double-quoted
+  because it starts with `{`. A config variable inside it is substituted like any other:
+  `landing_key: "{% '{landing}' & $states.input.date & '.json' %}"`. JSONata's own braces always
+  hold more than a name, as `{'stage': 'loaded'}` does, so no variable matches them.
 - **A number or boolean renders as Terraform renders it.** `copy_timeout_seconds: 3600` fills an
   unquoted `"TimeoutSeconds": ${copy_timeout_seconds}`, and `2.0` renders as `2`.
 - **`{env}` belongs to the values, never the file.** A template's own `${env}` is a Terraform
@@ -487,8 +492,10 @@ Each of these is refused when the config loads, naming the key:
 - a variable named `env`, or named with anything but letters, digits, `_` and `-`;
 - a pipeline variable redefining a top-level one;
 - a `{name}` that names no variable, so a typo never reaches AWS as a literal name;
+- a `{name}` defined only in another pipeline's block. The message names that block, and offers
+  moving the variable to the top level only when its value uses no pipeline variable;
 - an unquoted `{name}`, which YAML reads as a mapping;
-- a value that is not a string.
+- a value that is not a string, including a block meant for reuse, which is an anchor's job.
 
 A value another program fills, such as a Glue argument `s3://b/out/{date}/`, writes the braces
 doubled: `s3://b/out/{{date}}/` reaches the job as `s3://b/out/{date}/`. `${NAME}` is never a
@@ -501,6 +508,41 @@ file wrote it beside the variables it used, since the character to fix may sit i
 Quote a value that starts with `{`. YAML reads a leading brace as an inline mapping, so
 `raw: {raw_bucket}` parses as a mapping and `raw: {company}-raw` does not parse. A brace later in
 the value needs no quotes. Quote an account id too, because YAML reads an unquoted `0123` as octal.
+
+YAML anchors repeat a whole block, and variables fill what differs in each copy. YAML copies the
+block as the file wrote it, before any variable is filled, so a copy resolves against the pipeline
+it lands in:
+
+```yaml
+variables:
+  company: acme
+  account: "123456789012"
+pipelines:
+  sales: &pipeline
+    variables:
+      prefix: "{company}-{env}-sales"
+      landing: &landing s3://{prefix}-raw/incoming/
+    buckets:
+      raw: "{prefix}-raw"
+    glue_jobs:
+      load: &load
+        name: "{prefix}-load"
+        role: arn:aws:iam::{account}:role/{prefix}-glue
+      backfill:
+        <<: *load
+        name: "{prefix}-backfill"
+  finance:
+    <<: *pipeline
+    variables:
+      prefix: "{company}-{env}-finance"
+      landing: *landing
+```
+
+`finance` resolves to `acme-dev-finance-raw` and `acme-dev-finance-backfill`. A `<<:` merge is one
+level deep, so `finance`'s `variables` block replaces the copied one whole. It restates every
+variable, and `*landing` repeats a shared value. An anchor is written where its block is first
+used, since the config has no key for holding anchors alone. Write it after the colon and before
+the quotes, as `&landing` is above.
 
 ### `resolve_paths_from` — deploys that reach the same files from any directory
 

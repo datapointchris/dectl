@@ -250,22 +250,23 @@ def test_validate_json_keeps_stdout_parseable_on_a_schema_failure(monkeypatch, t
 
 
 @pytest.mark.parametrize(
-    ('raw', 'outcome'),
+    ('raw', 'outcome', 'where'),
     [
-        ('pipelines: [oh: dear\n', 'invalid_yaml'),
-        (BAD_CONFIG, 'invalid_schema'),
+        ('pipelines: [oh: dear\n', 'invalid_yaml', 'in "{path}", line'),
+        (BAD_CONFIG, 'invalid_schema', 'pipelines.p.step_function'),
     ],
 )
-def test_validate_json_tells_the_two_load_failures_apart(monkeypatch, tmp_path, raw, outcome):
+def test_validate_json_tells_the_two_load_failures_apart(monkeypatch, tmp_path, raw, outcome, where):
     # The human path prints "is not valid YAML" or "does not match the expected schema", and the
     # two have different fixes. The `--json` reader is the one who cannot see that sentence, so
     # folding both into one outcome left them with the stderr they are not reading.
-    point_at(monkeypatch, tmp_path, raw)
+    config_path = point_at(monkeypatch, tmp_path, raw)
 
     result = runner.invoke(config_app, ['validate', '--json'])
 
     assert result.exit_code == 3
     assert json.loads(result.stdout)['outcome'] == outcome
+    assert where.format(path=config_path) in result.stderr
 
 
 def test_validate_exits_the_same_way_for_every_fault_a_person_has_to_fix(monkeypatch, tmp_path):

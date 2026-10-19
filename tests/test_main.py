@@ -1,4 +1,9 @@
 import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 import typer
@@ -17,9 +22,50 @@ from dectl.main import REFERENCE_DURABLE_VERBS
 from dectl.main import REFERENCE_GLOBAL
 from dectl.main import REFERENCE_INSTANCE_VERBS
 from dectl.main import app
+from tests.conftest import LAYERED_CONFIG
 from tests.conftest import RefusalRunner
 
 runner = RefusalRunner()
+
+
+def dectl_with_config(config: Path, tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """The installed entry point in a fresh process, because main.py builds the tree from the file at import."""
+    home = tmp_path / 'xdg-config'
+    (home / 'dectl').mkdir(parents=True, exist_ok=True)
+    shutil.copy(config, home / 'dectl' / 'config.yaml')
+    env = {key: value for key, value in os.environ.items() if key != 'DECTL_ENV'}
+    env |= {'XDG_CONFIG_HOME': str(home), 'XDG_CACHE_HOME': str(tmp_path / 'xdg-cache')}
+    entry_point = Path(sys.executable).parent / 'dectl'
+    return subprocess.run([str(entry_point), *args], capture_output=True, text=True, env=env, cwd=config.parent, check=False)
+
+
+def test_the_layered_config_resolves_each_pipeline_under_its_own_names(tmp_path):
+    """A merged pipeline is one object with the pipeline it copies until variables are substituted,
+    so a substitution made in place would hand finance the names sales resolved."""
+    validated = dectl_with_config(LAYERED_CONFIG, tmp_path, 'config', 'validate')
+    assert validated.returncode == 0, validated.stderr
+    for pipeline, dataset in [('sales', 'orders'), ('finance', 'invoices')]:
+        listed = dectl_with_config(LAYERED_CONFIG, tmp_path, '--env', 'prod', pipeline, 'list', '--json')
+        assert listed.stderr == ''
+        resolved = json.loads(listed.stdout)
+        prefix = f'acme-prod-{pipeline}'
+        assert resolved['s3'] == {'raw': {'bucket': f'{prefix}-raw'}}
+        assert resolved['lambda']['process']['name'] == f'{prefix}-process-{dataset}'
+        assert {alias: job['name'] for alias, job in resolved['glue'].items()} == {
+            'load': f'{prefix}-load',
+            'backfill': f'{prefix}-backfill',
+        }
+        assert resolved['glue']['backfill']['script_bucket'] == f'{prefix}-scripts'
+        assert resolved['sfn']['flow']['name'] == f'{prefix}-flow'
+        assert resolved['sfn']['flow']['definition_substitutions'] == {
+            'process_arn': f'arn:aws:lambda:us-east-2:123456789012:function:{prefix}-process-{dataset}',
+            'load_job': f'{prefix}-load',
+            'load_timeout_seconds': '3600',
+            'min_orders': '1',
+            'load_enabled': 'true',
+            'landing_key': f"{{% 's3://{prefix}-raw/{dataset}/incoming/' & $states.input.date & '.json' %}}",
+            'loaded_output': "{% $merge([$states.input, {'stage': 'loaded'}]) %}",
+        }
 
 
 def row_entries(row: str) -> list[str]:

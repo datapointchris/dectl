@@ -117,6 +117,13 @@ share as `_writings`. `written_for` reads it, so a fault row names the line to e
 variables in it, not only a value no line of the file holds. A new door building an
 `UnusableValue` passes `written_for(...)` as `written`.
 
+**The pass builds a new mapping at every level and never writes into the one it was handed.** YAML
+gives an anchored block to each alias and `<<:` merge as the same Python object, so a pipeline
+merged from another shares its `buckets`, `glue_jobs` and `arguments` until the pass runs.
+Substituted in place, the second pipeline inherits the first's names, and an escaped `{{date}}`
+shared by two jobs is unescaped twice and refused. `test_the_layered_config_resolves_each_pipeline_under_its_own_names`
+catches both.
+
 This is interpolation and references between keys, which the general advice is to answer with a
 generated config instead. It is here because an account id, a company prefix and a bucket recur
 inside many names of one hand-written file, and nothing generates this one.
@@ -373,6 +380,17 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
 `uv run pytest`. Unit tests mock boto3, and command tests drive the real Typer apps through
 `typer.testing.CliRunner`. Live AWS tests are marked `integration` and run only with
 `--run-integration`, because they create and delete real resources.
+
+**`tests/layered_pipelines_config/` is a config in the shape a real multi-pipeline one takes, and
+three tests run it through the real code.** One top-level variable fans out to two pipelines through each
+one's prefix, `finance` is a YAML merge of `sales`, and the definition substitutions include whole
+JSONata expressions. `test_config.py` loads it through `load_config` for the load-time faults and
+refusals. `test_main.py` starts the installed `dectl` against it in a fresh process, because
+`main.py` builds the tree from the file at import. `test_stepfunctions_integration.py` deploys its
+`flow.asl.json.tftpl` with `finance`'s substitutions, so live Step Functions validates the
+JSONata. A config shape that has to work goes in this file rather than in a test's inline dict.
+The template is named `.tftpl`, Terraform's extension for a `templatefile()` template, so the
+JSON hook does not read it before it is rendered.
 
 **Anything that writes to AWS gets a live test.** A failure here is read once, from output, with
 no debugger and no second attempt, and a fake holds only the service rules somebody already knew.

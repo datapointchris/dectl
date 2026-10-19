@@ -1,0 +1,55 @@
+# Two pipelines built from one top-level variable through each one's own prefix, with finance
+# copied from sales by a YAML merge. flow.asl.json.tftpl beside it is the definition both deploy.
+variables:
+  company: acme
+  account: "123456789012"
+  region: us-east-2
+
+defaults:
+  account_id: "{account}"
+  region: "{region}"
+
+pipelines:
+  sales: &pipeline
+    variables:
+      prefix: "{company}-{env}-sales"
+      dataset: orders
+      landing: &landing s3://{prefix}-raw/{dataset}/incoming/
+    buckets:
+      raw: "{prefix}-raw"
+    lambdas:
+      process:
+        name: "{prefix}-process-{dataset}"
+        source_dir: lambdas/process
+    glue_jobs:
+      load: &load
+        name: "{prefix}-load"
+        script_bucket: "{prefix}-scripts"
+        scripts: [load.py]
+        role: arn:aws:iam::{account}:role/{prefix}-glue
+        arguments:
+          LANDING: "{landing}"
+          OUTPUT_PATTERN: out/{{date}}/
+      backfill:
+        <<: *load
+        name: "{prefix}-backfill"
+        scripts: [backfill.py]
+    step_functions:
+      flow:
+        name: "{prefix}-flow"
+        definition_file: flow.asl.json.tftpl
+        definition_substitutions:
+          process_arn: arn:aws:lambda:{region}:{account}:function:{prefix}-process-{dataset}
+          load_job: "{prefix}-load"
+          load_timeout_seconds: 3600
+          min_orders: 1
+          load_enabled: true
+          landing_key: "{% '{landing}' & $states.input.date & '.json' %}"
+          loaded_output: "{% $merge([$states.input, {'stage': 'loaded'}]) %}"
+
+  finance:
+    <<: *pipeline
+    variables:
+      prefix: "{company}-{env}-finance"
+      dataset: invoices
+      landing: *landing

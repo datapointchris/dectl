@@ -1,0 +1,42 @@
+{
+  "Comment": "Loads a day's orders when there are enough, then totals them by customer",
+  "QueryLanguage": "JSONata",
+  "StartAt": "Process",
+  "States": {
+    "Process": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${process_arn}",
+        "Payload": { "key": "${landing_key}" }
+      },
+      "Assign": { "orders": "{% $states.result.Payload.orders %}" },
+      "Output": "{% $states.result.Payload %}",
+      "Next": "HasOrders"
+    },
+    "HasOrders": {
+      "Type": "Choice",
+      "Choices": [
+        { "Condition": "{% ${load_enabled} and $count($orders) >= ${min_orders} %}", "Next": "Load" }
+      ],
+      "Default": "NothingToLoad"
+    },
+    "Load": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Arguments": {
+        "JobName": "${load_job}",
+        "Arguments": { "--source_key": "{% $states.input.key %}" }
+      },
+      "TimeoutSeconds": ${load_timeout_seconds},
+      "Output": "${loaded_output}",
+      "Next": "TotalByCustomer"
+    },
+    "TotalByCustomer": {
+      "Type": "Pass",
+      "Output": "{% $orders.$${ customer: $sum(total) } %}",
+      "End": true
+    },
+    "NothingToLoad": { "Type": "Succeed" }
+  }
+}

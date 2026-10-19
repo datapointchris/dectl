@@ -20,6 +20,7 @@ os.environ.pop('FORCE_COLOR', None)
 import json
 import time
 import uuid
+from pathlib import Path
 
 import boto3
 import pytest
@@ -46,6 +47,11 @@ from dectl.output import stderr_console
 # width sets its own through `at_width`: pinned wide, a fold and an ellipsis render alike.
 console.width = 160
 stderr_console.width = 160
+
+# A config in the shape a real multi-pipeline one takes, and the definition it deploys: one
+# top-level variable fanned out to two pipelines through each one's prefix, a YAML merge, and
+# JSONata substitutions.
+LAYERED_CONFIG = Path(__file__).parent / 'layered_pipelines_config' / 'config.yaml'
 
 
 class RefusalRunner(CliRunner):
