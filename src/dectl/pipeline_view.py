@@ -76,6 +76,8 @@ def aws_names_only(pipeline: PipelineConfig) -> dict[str, Any]:
     leaves the unfiltered original beside the filtered copy, and the guard reads the original,
     so a `{env}` in a local path goes on silencing the warning it exists to raise."""
     dumped = aws_names_of(pipeline)
+    # Already substituted into the names below, and a {env} in one names nothing on its own.
+    dumped.pop('variables', None)
     for collection, alias, member in resource_members(pipeline):
         if alias:
             dumped[collection][alias] = aws_names_of(member)

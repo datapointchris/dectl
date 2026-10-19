@@ -99,9 +99,23 @@ pipeline's `jenkins` names a `job_path` (`folder/job`, which `job_url_path` expa
 `parameters` every build posts, and `actions`. An action cannot be named `status` or `logs`,
 because it would share that command's name and only one of the two would survive.
 
+**`variables` is substituted before the models see the file, and `{env}` is not.**
+`variables.expand_variables` is `DectlConfig`'s `before` validator. It replaces `{name}` in every
+string of the raw mapping: the top-level block reaches the whole file, a pipeline's block that
+pipeline alone. So every field downstream, the path checks included, sees a substituted value and
+needs no change for a new field to take variables. `{env}` passes through to the `resolve_*`
+chokepoints as before. A pipeline variable redefining a top-level one, a variable named `env`, an
+undefined `{name}` and a non-string value are each a `ValidationError` carrying the key's own
+location. `${NAME}` is skipped by the token's lookbehind, which keeps the Jenkins credentials and
+Terraform placeholders out of reach. `aws_names_only` drops `variables`, because a `{env}` held
+there names nothing and would silence the env-effect guard.
+
 **`TEMPLATE_CONFIG` is the single source for the example config.** `config init` writes it and
-`config example` prints it (highlighted on a TTY, plain when piped). It exercises every option, and
-a test asserts it round-trips through the models, so update it with any model change. Its
+`config example` prints it (highlighted on a TTY, plain when piped). It holds one of every option
+and every form a value takes, with aliases named for what they show, such as
+`reporting-history-only` and the `buckets-only` pipeline. Its `my-flow` substitutions fill a
+JSONata definition. A test asserts it round-trips through the models, so update it with any
+model change. Its
 `resolve_paths_from` line stays commented: uncommented, it names a directory no machine has, and
 `config init` would write a config that fails `config validate`.
 

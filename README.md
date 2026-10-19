@@ -332,6 +332,11 @@ environment's name.
 
 - **Only `${name}` is substituted.** `$${` and `%%{` escape as Terraform escapes them. A `%{ if }`
   directive or an expression such as `${jsonencode(x)}` is refused rather than guessed at.
+- **JSONata needs no escaping.** `{% ... %}` opens with a brace, and neither Terraform nor dectl
+  reads that as a placeholder. A `${name}` inside an expression is substituted like any other:
+  `"{% ${load_enabled} and $count($orders) >= ${min_orders} %}"`. The one JSONata form that does
+  collide is a `$` followed by `{`, as in `$orders.${ customer: $sum(total) }`, which the file
+  writes as `$orders.$${ customer: $sum(total) }`.
 - **A number or boolean renders as Terraform renders it.** `copy_timeout_seconds: 3600` fills an
   unquoted `"TimeoutSeconds": ${copy_timeout_seconds}`, and `2.0` renders as `2`.
 - **`{env}` belongs to the values, never the file.** A template's own `${env}` is a Terraform
@@ -453,6 +458,43 @@ present needs a directory to look in, which `resolve_paths_from` supplies.
 
 `validate --json` emits `outcome` and `unusable_values`. The outcome separates a clean config from
 one that could not be read at all.
+
+### `variables` — a value written once and used as `{name}` everywhere
+
+```yaml
+variables:
+  account: "123456789012"
+  lambda_arn_prefix: arn:aws:lambda:us-east-2:{account}:function
+pipelines:
+  sales:
+    variables:
+      raw_bucket: "acme-{env}-raw"
+    buckets:
+      raw: "{raw_bucket}"
+    step_functions:
+      flow:
+        definition_substitutions:
+          process_arn: "{lambda_arn_prefix}:acme-{env}-process"
+```
+
+The top-level block reaches every string in the file. A pipeline's block reaches that pipeline
+alone. Variables are substituted when the config loads. `{env}` passes through untouched and is
+substituted when a command runs. A variable sees the ones defined above it, so one can be built from
+another. `config show` and `list` print the substituted values.
+
+Each of these is refused when the config loads, naming the key:
+
+- a variable named `env`;
+- a pipeline variable redefining a top-level one;
+- a `{name}` that names no variable, so a typo never reaches AWS as a literal name;
+- a value that is not a string.
+
+`${NAME}` is never a variable, so a Terraform placeholder or an environment-variable reference
+passes through. Neither is a brace holding anything but a name, such as a JSON payload.
+
+Quote a value that starts with `{`. YAML reads a leading brace as an inline mapping, so
+`raw: {raw_bucket}` parses as a mapping and `raw: {company}-raw` does not parse. A brace later in
+the value needs no quotes. Quote an account id too, because YAML reads an unquoted `0123` as octal.
 
 ### `resolve_paths_from` — deploys that reach the same files from any directory
 
