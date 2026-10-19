@@ -148,10 +148,12 @@ class Pass:
                 )
             key = f'{location[-1]}: ' if isinstance(location[-1], str) else ''
             return f'{missing}. {anchor} is a YAML anchor, not a variable. Repeat it as the whole value, unquoted: {key}*{name}'
+        escape = f'If a job or Jenkinsfile fills {token} itself, write {{{token}}}'
+        # A placeholder the job fills can sit close to a variable's name, as {date} does to {dataset}.
         close = difflib.get_close_matches(name, list(scope), n=1)
         if close:
-            return f'{missing}. Did you mean {{{close[0]}}}?'
-        return f'{missing}. If a job or Jenkinsfile fills {token} itself, write {{{token}}}'
+            return f'{missing}. Did you mean {{{close[0]}}}? {escape}'
+        return f'{missing}. {escape}'
 
     def pipeline_variables_in(self, name: str) -> str:
         """The `{name}`s a definition of `name` uses that no top-level variable supplies, joined for a message."""
