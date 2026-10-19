@@ -52,6 +52,10 @@ from dectl.variables import file_and_key
 CONFIG_DIR = config_home() / 'dectl'
 CONFIG_PATH = CONFIG_DIR / 'config.yaml'
 PIPELINE_SUFFIX = '.yaml'
+# A file in pipelines/ with one of these, in any case, is meant as a pipeline. Anything else is skipped.
+MISNAMED_PIPELINE_SUFFIXES = frozenset({'.yaml', '.yml'})
+# The root's own commands, which hide a pipeline of the same name. A test holds this equal to the tree.
+GLOBAL_COMMAND_NAMES = frozenset({'config', 'env', 'list', 'reference', 'search', 'update'})
 
 TEMPLATE_CONFIG = """\
 # Each pipeline is its own file beside this one, pipelines/<name>.yaml, and the file's name is
@@ -251,7 +255,7 @@ buckets:
 # What `config edit NAME` writes for a pipeline that has no file yet.
 PIPELINE_STUB = """\
 # Each block names one resource type, as `dectl config example` shows. The file's name is the
-# pipeline's, so this one is `dectl {name}`.
+# pipeline's, and `dectl {name}` appears once a block below names a resource.
 buckets: {{}}
 """
 
@@ -966,12 +970,22 @@ def pipelines_fault(kind: str, message: str, value: Any) -> InitErrorDetails:
     return InitErrorDetails(type=PydanticCustomError(kind, message), loc=('pipelines',), input=value)
 
 
+def pipeline_name_fault(name: str) -> str | None:
+    """Why `name` cannot be a pipeline, which would otherwise be dropped or hidden with nothing said."""
+    if PurePosixPath(name).suffix.lower() in MISNAMED_PIPELINE_SUFFIXES:
+        return f'{name!r} names a file; a pipeline is named by its file pipelines/<name>{PIPELINE_SUFFIX}, without the suffix'
+    if name in GLOBAL_COMMAND_NAMES:
+        return f"{name!r} is dectl's own {name} command, which a pipeline of that name would hide; rename it"
+    return None
+
+
 def read_config_files() -> Any:
     """config.yaml, with each `pipelines/<name>.yaml` beside it held under `pipelines` as `<name>`.
 
-    A file in `pipelines/` that would not be read is refused rather than skipped, because a
-    pipeline saved as `sales.yml` would leave the command tree with nothing said. A dotfile is
-    skipped, since an editor's swap file is no pipeline."""
+    What looks like a misnamed pipeline is refused, because a pipeline saved as `sales.yml`, or
+    one named `search` that dectl's own `search` hides, would leave the tree with nothing said.
+    Everything else is skipped: an editor's backup or swap file is no pipeline, and refusing
+    one would take every pipeline down with it."""
     raw = read_yaml(CONFIG_PATH)
     if not isinstance(raw, dict):
         return raw
@@ -983,13 +997,15 @@ def read_config_files() -> Any:
     directory = pipelines_dir()
     pipelines = {}
     for path in sorted(directory.iterdir()) if directory.is_dir() else []:
-        if path.name.startswith('.'):
+        if path.name.startswith('.') or path.suffix.lower() not in MISNAMED_PIPELINE_SUFFIXES:
             continue
         if path.suffix != PIPELINE_SUFFIX or not path.is_file():
             message = f'{path.name} is not a pipeline file; a pipeline is pipelines/<name>{PIPELINE_SUFFIX}'
             faults.append(pipelines_fault('not_a_pipeline_file', message, path.name))
-            continue
-        pipelines[path.stem] = read_yaml(path)
+        elif fault := pipeline_name_fault(path.stem):
+            faults.append(pipelines_fault('reserved_pipeline_name', f'{path.name}: {fault}', path.name))
+        else:
+            pipelines[path.stem] = read_yaml(path)
     if faults:
         raise ValidationError.from_exception_data('DectlConfig', faults)
     return {**raw, 'pipelines': pipelines}
@@ -1063,7 +1079,7 @@ def report_config_error(exc: yaml.YAMLError | ValidationError) -> None:
     error(config_error_headline(exc))
     for line in describe_config_error(exc):
         stderr_console.print(line, markup=False)
-    # The headline already named the file, and repeating a long path here wraps across two
+    # The headline already named the config directory, and repeating a long path here wraps across two
     # lines on a narrow terminal, which breaks it mid-token for anyone copying it.
     stderr_console.print(EDIT_CONFIG)
 

@@ -1,7 +1,7 @@
 # dectl
 
-A command line for the loop between editing a data pipeline's code and watching it run on AWS. One
-config file names each pipeline's Glue jobs, Lambda functions, Step Functions state machines, S3
+A command line for the loop between editing a data pipeline's code and watching it run on AWS. A
+config directory, one file per pipeline, names each pipeline's Glue jobs, Lambda functions, Step Functions state machines, S3
 buckets, Iceberg tables and Jenkins job under short aliases. dectl deploys code to them, runs them,
 and reads their logs and history.
 
@@ -461,9 +461,11 @@ dectl config validate    # exit 0 when clean, 3 otherwise; --json for outcome an
 
 Every model rejects unknown keys. `config validate` checks that the files parse, match the schema,
 and name values that can be used. Each fault names its file and the key within it, as in
-`pipelines/sales.yaml glue_jobs.load.role`. A `pipelines` block in `config.yaml` is refused, and so
-is any file in `pipelines/` not named `<name>.yaml`, so a pipeline is never silently left out. A
-file there whose name starts with `.`, such as an editor's swap file, is skipped.
+`pipelines/sales.yaml glue_jobs.load.role`. A `pipelines` block in `config.yaml` is refused. So is a
+file in `pipelines/` that looks like a misnamed pipeline, such as `sales.yml`, or one named after a
+global command such as `search`, which that command would hide. Any other file there, such as an
+editor's backup, is skipped. A pipeline file declaring no resource yet gets no command until it
+does, and `dectl list` shows it as `none configured`.
 
 Bucket names are checked on any machine. `script_bucket` and every entry under `buckets` must be a
 name S3 accepts, as the active environment resolves it. A

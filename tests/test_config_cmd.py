@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -7,7 +8,6 @@ from dectl.commands.config_cmd import config_app
 from dectl.config import TEMPLATE_CONFIG
 from dectl.config import init_config
 from dectl.config import load_config
-from dectl.config import template_files
 from dectl.env import set_active_environment
 from tests.conftest import RefusalRunner
 from tests.conftest import unwrapped
@@ -39,13 +39,19 @@ def test_path_prints_config_path(monkeypatch, tmp_path):
     assert str(config_path) in result.stdout
 
 
-def test_piped_example_is_each_template_file_under_its_path():
+def test_each_file_the_example_prints_loads_when_copied_to_its_path(monkeypatch, tmp_path):
     # CliRunner output is not a TTY, which selects the piped branch.
     result = runner.invoke(config_app, ['example'])
+    parts = re.split(r'^# ((?:pipelines/)?[\w-]+\.yaml)\n', result.stdout, flags=re.MULTILINE)
+    (tmp_path / 'pipelines').mkdir()
+    for path, text in zip(parts[1::2], parts[2::2], strict=True):
+        (tmp_path / path).write_text(text)
+    monkeypatch.setattr('dectl.config.CONFIG_PATH', tmp_path / 'config.yaml')
 
-    assert result.exit_code == 0
-    for path, text in template_files().items():
-        assert f'# {path}\n{text}' in result.stdout
+    config = load_config()
+
+    assert config is not None
+    assert set(config.pipelines) == {'example-pipeline', 'buckets-only'}
 
 
 def test_validate_accepts_the_template(monkeypatch, tmp_path):
@@ -95,8 +101,10 @@ def test_edit_opens_config_yaml_bare_and_a_pipeline_file_by_name(monkeypatch, tm
 
     bare = runner.invoke(config_app, ['edit'])
     named = runner.invoke(config_app, ['edit', 'orders'])
+    # The file's name rather than the pipeline's would write orders.yaml.yaml, a second pipeline.
+    by_file_name = runner.invoke(config_app, ['edit', 'orders.yaml'])
 
-    assert (bare.exit_code, named.exit_code) == (0, 0)
+    assert (bare.exit_code, named.exit_code, by_file_name.exit_code) == (0, 0, 1)
     pipeline_path = tmp_path / 'pipelines' / 'orders.yaml'
     assert invoked == [str(config_path), str(pipeline_path)]
     # Both were created, and what was created loads: the template, and the stub under its name.

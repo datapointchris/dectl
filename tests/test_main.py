@@ -18,6 +18,7 @@ from dectl.commands.iceberg import make_iceberg_app
 from dectl.commands.lambda_ import make_lambda_app
 from dectl.commands.s3 import make_s3_app
 from dectl.commands.stepfunctions import make_sfn_app
+from dectl.config import GLOBAL_COMMAND_NAMES
 from dectl.config import DectlConfig
 from dectl.config import Defaults
 from dectl.main import REFERENCE_DURABLE_VERBS
@@ -107,6 +108,8 @@ def test_the_reference_names_every_static_global_command():
 
     assert static
     assert static - names_in(GLOBAL_ENTRIES) == set()
+    # A pipeline named after one of these would be hidden, so the loader refuses every one.
+    assert static | {'config'} == GLOBAL_COMMAND_NAMES
 
 
 def test_the_reference_names_every_config_verb_and_its_json_flag():

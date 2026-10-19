@@ -19,6 +19,7 @@ from dectl.config import config_error_outcome
 from dectl.config import config_value_faults
 from dectl.config import init_config
 from dectl.config import load_config
+from dectl.config import pipeline_name_fault
 from dectl.config import pipelines_dir
 from dectl.config import report_config_error
 from dectl.config import template_files
@@ -51,12 +52,12 @@ NEEDS_A_PERSON_EXIT = 3
 
 @config_app.command('init')
 def config_init() -> None:
-    """Create a starter config file (fails if one already exists)."""
+    """Write the starter config.yaml and its example pipeline files. Refuses when config.yaml exists."""
     if CONFIG_PATH.exists():
         error(f'config already exists at {CONFIG_PATH}')
         raise typer.Exit(1)
-    path = init_config()
-    success(f'created config at {path}')
+    init_config()
+    success(f'created the starter config in {CONFIG_PATH.parent}: {", ".join(template_files())}')
 
 
 @config_app.command('show')
@@ -130,9 +131,12 @@ def config_edit(
     foreground, so a terminal editor (nvim, vim) blocks until you close it; a GUI editor
     returns immediately unless you configured it to wait (e.g. EDITOR="code --wait").
     """
-    # A name is a file in pipelines/, and the loader skips a dotfile, so neither a path nor one is a pipeline.
+    # The loader skips a name starting with `.`, and a path would write outside pipelines/.
     if pipeline is not None and (Path(pipeline).name != pipeline or pipeline.startswith('.')):
         error(f'{pipeline!r} cannot name a pipeline: it is the file pipelines/<name>{PIPELINE_SUFFIX}')
+        raise typer.Exit(1)
+    if pipeline is not None and (fault := pipeline_name_fault(pipeline)):
+        error(fault)
         raise typer.Exit(1)
 
     editor = os.environ.get('VISUAL') or os.environ.get('EDITOR')
@@ -152,7 +156,7 @@ def config_edit(
     path = CONFIG_PATH
     if pipeline is None and not CONFIG_PATH.exists():
         init_config()
-        info(f'no config found — created a starter config at {CONFIG_PATH}')
+        info(f'no config found — created the starter config in {CONFIG_PATH.parent}')
     elif pipeline is not None:
         path = pipelines_dir() / f'{pipeline}{PIPELINE_SUFFIX}'
         if not path.exists():

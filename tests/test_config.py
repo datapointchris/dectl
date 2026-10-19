@@ -268,7 +268,9 @@ def test_each_pipeline_is_read_from_its_own_file(monkeypatch, tmp_path):
     pipelines.mkdir()
     (pipelines / 'sales.yaml').write_text('variables:\n  raw: "{company}-sales-raw"\nbuckets:\n  raw: "{raw}"\n')
     (pipelines / 'finance.yaml').write_text('buckets:\n  raw: "{company}-finance-raw"\n')
+    # An editor's swap and backup files are skipped, never refused with every pipeline.
     (pipelines / '.finance.yaml.swp').write_text('[ not yaml')
+    (pipelines / 'finance.yaml~').write_text('[ not yaml')
 
     config = load_config()
     assert config is not None
@@ -279,10 +281,16 @@ def test_each_pipeline_is_read_from_its_own_file(monkeypatch, tmp_path):
 
     (pipelines / 'finance.yaml').write_text('buckets:\n  raw: "{raw}"\n')
     (pipelines / 'orders.yml').write_text('buckets: {}\n')
+    (pipelines / 'search.yaml').write_text('buckets: {}\n')
     with pytest.raises(ValidationError) as caught:
         load_config()
-    assert describe_config_error(caught.value)[0] == '  pipelines/: orders.yml is not a pipeline file; a pipeline is pipelines/<name>.yaml'
+    # A pipeline saved as .yml, and one dectl's own `search` would hide, are each refused by name.
+    assert [(error['type'], error['input']) for error in caught.value.errors()] == [
+        ('not_a_pipeline_file', 'orders.yml'),
+        ('reserved_pipeline_name', 'search.yaml'),
+    ]
     (pipelines / 'orders.yml').unlink()
+    (pipelines / 'search.yaml').unlink()
     with pytest.raises(ValidationError) as caught:
         load_config()
     assert describe_config_error(caught.value)[0].startswith(
