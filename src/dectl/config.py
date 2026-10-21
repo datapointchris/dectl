@@ -17,6 +17,7 @@ from pydantic import PrivateAttr
 from pydantic import ValidationError
 from pydantic import field_validator
 from pydantic import model_validator
+from pydantic_core import ErrorDetails
 from pydantic_core import InitErrorDetails
 from pydantic_core import PydanticCustomError
 
@@ -504,7 +505,20 @@ class DectlConfig(StrictModel):
     @model_validator(mode='wrap')
     @classmethod
     def substitute_variables(cls, raw: Any, handler: ModelWrapValidatorHandler['DectlConfig']) -> 'DectlConfig':
+        """The config with its variables substituted.
+
+        A key the schema refuses is reported alone when variables also failed. A `variables`
+        block under the wrong key, or a pipeline file still wrapped in its name, defines
+        nothing, so every reference to it reads as undefined and hides the one line to fix."""
         expansion = expand_variables(raw)
+        if expansion.faults:
+            try:
+                handler(expansion.config)
+            except ValidationError as schema:
+                refused = [unknown_key(err) for err in schema.errors() if err['type'] == 'extra_forbidden']
+                if refused:
+                    raise ValidationError.from_exception_data(cls.__name__, refused) from None
+            raise ValidationError.from_exception_data(cls.__name__, expansion.faults)
         config = handler(expansion.config)
         for name, pipeline in config.pipelines.items():
             pipeline._writings = expansion.writings.get(name, {})
@@ -965,6 +979,22 @@ def read_yaml(path: Path) -> Any:
         return yaml.safe_load(handle)
 
 
+def unknown_key(err: ErrorDetails) -> InitErrorDetails:
+    return InitErrorDetails(type='extra_forbidden', loc=err['loc'], input=err['input'])
+
+
+def keys_taken_at(parent: tuple[str | int, ...]) -> tuple[str, ...]:
+    """The keys the top of config.yaml or of a pipeline file takes, and none for any deeper level.
+
+    Those two levels decide what a `variables` block reaches, so a block misplaced there is the
+    mistake a reader needs the whole list to see."""
+    if parent == ():
+        return tuple(key for key in DectlConfig.model_fields if key != 'pipelines')
+    if len(parent) == 2 and parent[0] == 'pipelines':
+        return tuple(PipelineConfig.model_fields)
+    return ()
+
+
 def pipelines_fault(kind: str, message: str, value: Any) -> InitErrorDetails:
     return InitErrorDetails(type=PydanticCustomError(kind, message), loc=('pipelines',), input=value)
 
@@ -1057,7 +1087,10 @@ def describe_config_error(exc: yaml.YAMLError | ValidationError) -> list[str]:
             rejected = repr(err['input'])
             if len(rejected) > MAX_INPUT_CHARS:
                 rejected = f'{rejected[:MAX_INPUT_CHARS]}…'
-            lines.append(f'  {location}: {err["msg"]}')
+            message = err['msg']
+            if err['type'] == 'extra_forbidden' and (taken := keys_taken_at(tuple(err['loc'][:-1]))):
+                message = f'not a key this file takes at its top level, which are {", ".join(taken)}'
+            lines.append(f'  {location}: {message}')
             lines.append(f'    got: {rejected}')
         return lines
     return [f'  {line}' for line in str(exc).splitlines()]

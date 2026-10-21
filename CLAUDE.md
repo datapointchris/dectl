@@ -123,7 +123,10 @@ that pipeline alone. So every field downstream, the path checks included, sees a
 and needs no change for a new field to take variables. `{env}` passes through to the `resolve_*`
 chokepoints. A pipeline variable redefining one from `config.yaml`, a variable named `env` or a name
 `{name}` cannot reach, an undefined `{name}`, an unquoted `{name}` YAML read as a mapping, and a
-non-string value are each a `ValidationError` carrying the key's own location. An anchor or merge
+non-string value are each a `ValidationError` carrying the key's own location. When any of those
+fire, the validator runs the schema anyway, and a key it refuses is reported alone. A `variables`
+block under the wrong key, or a pipeline file still wrapped in its name, defines nothing, so every
+reference reads as undefined and the `{{name}}` hint sends the reader the wrong way. An anchor or merge
 is YAML's, resolved before the pass sees the mapping, and reaches only within one file. The pass
 builds new mappings rather than editing the one it was handed, because YAML gives an anchored block
 to each alias and merge of it as one object. `{{name}}` is the escape for a literal `{name}` another

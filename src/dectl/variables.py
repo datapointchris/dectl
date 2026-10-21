@@ -19,7 +19,6 @@ import re
 from typing import Any
 from typing import NamedTuple
 
-from pydantic import ValidationError
 from pydantic_core import InitErrorDetails
 from pydantic_core import PydanticCustomError
 
@@ -52,6 +51,8 @@ class Expansion(NamedTuple):
     config: Any
     # Pipeline name -> location within that pipeline -> (substituted value, what the file wrote).
     writings: dict[str, dict[Location, tuple[str, Written]]]
+    # `DectlConfig` decides whether to raise these, since a key the schema refuses can be what hid a variable.
+    faults: list[InitErrorDetails]
 
 
 def dotted(location: Location) -> str:
@@ -247,9 +248,9 @@ def defined_variables(raw: dict[Any, Any]) -> dict[str, list[Definition]]:
 
 
 def expand_variables(raw: Any) -> Expansion:
-    """The parsed config with every variable substituted, or a `ValidationError` naming each fault."""
+    """The parsed config with every variable substituted, and the faults found doing it."""
     if not isinstance(raw, dict):
-        return Expansion(raw, {})
+        return Expansion(raw, {}, [])
     run = Pass(defined_variables(raw))
     top_block, top_scope = run.resolve_block(raw.get('variables'), {}, ('variables',))
     expanded: dict[Any, Any] = {}
@@ -260,13 +261,11 @@ def expand_variables(raw: Any) -> Expansion:
             expanded[key] = {name: expand_pipeline(run, name, pipeline, top_scope) for name, pipeline in value.items()}
         else:
             expanded[key] = run.substitute(value, top_scope, (key,))
-    if run.faults:
-        raise ValidationError.from_exception_data('DectlConfig', run.faults)
     writings: dict[str, dict[Location, tuple[str, Written]]] = {}
     for location, change in run.changed.items():
         if location[0] == 'pipelines' and len(location) > 2:
             writings.setdefault(str(location[1]), {})[location[2:]] = change
-    return Expansion(expanded, writings)
+    return Expansion(expanded, writings, run.faults)
 
 
 def expand_pipeline(run: Pass, name: str, pipeline: Any, top_scope: dict[str, Variable]) -> Any:

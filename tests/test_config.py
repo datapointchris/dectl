@@ -155,6 +155,13 @@ def test_each_pipeline_is_read_from_its_own_file(monkeypatch, tmp_path):
         '  pipelines/finance.yaml buckets.raw: variable {raw} is defined in pipelines/sales.yaml variables, which this value cannot see'
     )
 
+    # A file still wrapped in its pipeline's name defines no variables, and that key is the one line to fix.
+    (pipelines / 'sales.yaml').write_text('sales:\n  variables:\n    raw: "{company}-sales-raw"\n  buckets:\n    raw: "{raw}"\n')
+    with pytest.raises(ValidationError) as caught:
+        load_config()
+    assert describe_config_error(caught.value)[0].startswith('  pipelines/sales.yaml sales: not a key this file takes')
+    assert len(caught.value.errors()) == 1
+
 
 def glue_job(**sizing):
     return GlueJobConfig(name='j', script_bucket='sales-scripts', scripts=['s.py'], role='r', **sizing)
@@ -204,7 +211,10 @@ def test_describe_names_the_location_and_the_rejected_value():
 
     lines = describe_config_error(exc)
 
-    assert lines[0] == '  pipelines/p.yaml step_function: Extra inputs are not permitted'
+    assert lines[0] == (
+        '  pipelines/p.yaml step_function: not a key this file takes at its top level, which are resolve_paths_from, '
+        'variables, glue_jobs, lambdas, step_functions, buckets, iceberg_tables, monitor, jenkins'
+    )
     assert lines[1] == "    got: {'flow': {'name': 'sm'}}"
 
 
@@ -227,7 +237,7 @@ def test_describe_reports_every_problem_not_only_the_first():
 
     # Each names the file holding it, so the two land in different files.
     assert '  config.yaml defaults.acct: Extra inputs are not permitted' in lines
-    assert '  pipelines/p.yaml glue_jbs: Extra inputs are not permitted' in lines
+    assert any(line.startswith('  pipelines/p.yaml glue_jbs: not a key this file takes') for line in lines)
 
 
 # Every string-valued config field that dectl deliberately does not check, with the reason. A
