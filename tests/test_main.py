@@ -31,7 +31,7 @@ def dectl_with_config(config: Path, tmp_path: Path, *args: str) -> subprocess.Co
     shutil.copy(config, home / 'dectl' / 'config.yaml')
     shutil.copytree(config.parent / 'pipelines', home / 'dectl' / 'pipelines', dirs_exist_ok=True)
     env = {key: value for key, value in os.environ.items() if key != 'DECTL_ENV'}
-    env |= {'XDG_CONFIG_HOME': str(home), 'XDG_CACHE_HOME': str(tmp_path / 'xdg-cache')}
+    env |= {'XDG_CONFIG_HOME': str(home)}
     entry_point = Path(sys.executable).parent / 'dectl'
     return subprocess.run([str(entry_point), *args], capture_output=True, text=True, env=env, cwd=config.parent, check=False)
 

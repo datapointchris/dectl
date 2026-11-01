@@ -18,7 +18,6 @@ dependencies = [
     # said here.
     "httpx2>=2.9.1",
     "pyselfupdate[typer]>=0.5.4",
-    "pyclisteno>=0.8.1",
 ]
 
 [project.scripts]

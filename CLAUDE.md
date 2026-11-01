@@ -32,20 +32,6 @@ A resource is named for the system it drives, so the Jenkins job is `jenkins`, n
 for what its builds do. `dectl reference` is the static-grammar command a config-assembled tree
 needs, and `--json` on reads goes through `output.emit_json` — bare-print, so pipes stay clean.
 
-## Shortcuts: one stroke for a whole path
-
-`main.py` ends with `attach(app, teaching=True, expanding=True)` — the whole of dectl's use of
-[clisteno](https://github.com/datapointchris/pyclisteno). Each level of the tree gets the shortest
-prefix of its own name that its siblings do not share, and they run together into one token, so
-`dectl exgsr` is `dectl example-pipeline glue source-copy run`. Help rows show the sequence beside
-each command, and `~/.cache/clisteno/dectl.tsv` is what the zsh hint reads.
-
-Nothing here is dectl's to maintain: prefixes are computed from the live tree, so a new pipeline or
-alias gets one for free and a removed one has its sequence retired rather than reissued. The two
-things worth knowing are that **the call has to be the last line of the module** — the global
-commands are registered below the pipeline loop and a walk that ran earlier would miss them — and
-that a sequence which is also a real command name is withheld, so `dectl env` reaches `env`.
-
 ## The `make_*_app` factory pattern
 
 Every resource type is a module in `src/dectl/commands/` exposing a factory:
@@ -86,7 +72,7 @@ names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
 ## Config
 
 `src/dectl/config.py` holds the Pydantic models plus `load_config()` / `init_config()`. Config
-lives in `$XDG_CONFIG_HOME/dectl/`, resolved by `pyclisteno.paths.config_home()`, so the variable
+lives in `$XDG_CONFIG_HOME/dectl/`, resolved by `config_home()` in the same module, so the variable
 is honored rather than `~/.config` being hardcoded. `config.yaml` holds `defaults`, `jenkins` and
 `variables`. Each pipeline is `pipelines/<name>.yaml`, and the file stem is the pipeline's name.
 

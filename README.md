@@ -90,10 +90,6 @@ flag on the write. `plan` refuses everything the write would refuse, so a clean 
 that will run. A partial command prints its help, with the aliases the config gives that level, and
 acts on nothing.
 
-Every command also answers to a shortcut. Each level of the tree gets the shortest prefix of its
-name that its siblings do not share, and the prefixes run together into one token. `dectl exgsr` is
-`dectl example-pipeline glue source-copy run`. Help shows each command's sequence in parentheses.
-
 stdout carries the answer and stderr carries everything else. A command that answers with a record
 takes `--json`. A log tail does not, and neither does the eval-ready output of `s3`. `--no-input`
 makes a command that would prompt refuse instead, naming the flag that answers the prompt.
@@ -727,7 +723,5 @@ on each resource that declares one.
 
 - `$XDG_CONFIG_HOME/dectl/config.yaml` and `pipelines/`: the config, written only by `config init`
   and `config edit`.
-- `$XDG_CACHE_HOME/clisteno/` and `$XDG_STATE_HOME/clisteno/`: the shortcut table, computed from the
-  live command tree.
 - `$XDG_STATE_HOME/dectl/`: when the update check last ran, and what it found.
 - `~/buckets/PIPELINE/ALIAS`: the directory `s3 ALIAS mount` creates and mounts on.

@@ -1,3 +1,4 @@
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -7,7 +8,6 @@ from typing import ClassVar
 from typing import get_args
 
 import yaml
-from pyclisteno.paths import config_home
 from pydantic import BaseModel
 from pydantic import BeforeValidator
 from pydantic import ConfigDict
@@ -45,6 +45,12 @@ from dectl.values import path_fault
 from dectl.values import root_fault
 from dectl.variables import expand_variables
 from dectl.variables import file_and_key
+
+
+def config_home() -> Path:
+    override = os.environ.get('XDG_CONFIG_HOME')
+    return Path(override).expanduser() if override else Path.home() / '.config'
+
 
 # `$XDG_CONFIG_HOME/dectl/config.yaml`, falling back to `~/.config` when the variable is unset.
 # `config_home()` reads the environment at import, so a process that exports the variable after
