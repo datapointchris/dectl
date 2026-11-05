@@ -236,6 +236,13 @@ Invoke API, kept out of the boto3 session in `session.py`; `durable.py` is the L
 out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipelines.
 `pipeline_view.py` sits outside `main.py` and `config_cmd.py` to avoid an import cycle.
 
+**Each kind of external effect has one door.** Every AWS client comes from `make_session` in
+`session.py`, except Lambda's `Invoke`, which `invoke.py` owns. Every program dectl starts on this
+machine, `mount-s3`, `umount` and the config editor, goes through `external_command.run`. Call
+sites reach it as `external_command.run` rather than importing the function, so a test patches
+`dectl.external_command.run` once. Jenkins is reached through `jenkins_request` in
+`commands/jenkins.py`.
+
 ## Gotchas
 
 **Glue**

@@ -1,7 +1,6 @@
 import os
 import shlex
 import shutil
-import subprocess
 from itertools import starmap
 from pathlib import Path
 from typing import Annotated
@@ -10,6 +9,7 @@ from typing import NoReturn
 import typer
 from rich.syntax import Syntax
 
+from dectl import external_command
 from dectl.config import CONFIG_LOAD_ERRORS
 from dectl.config import CONFIG_PATH
 from dectl.config import PIPELINE_STUB
@@ -164,7 +164,7 @@ def config_edit(
             path.write_text(PIPELINE_STUB.format(name=pipeline))
             info(f'created {path}')
 
-    subprocess.run([editor_bin, *parts[1:], str(path)])
+    external_command.run([editor_bin, *parts[1:], str(path)], capture=False)
 
 
 @config_app.command('validate')

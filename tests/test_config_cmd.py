@@ -59,7 +59,7 @@ def test_edit_opens_config_yaml_bare_and_a_pipeline_file_by_name(monkeypatch, tm
     monkeypatch.delenv('EDITOR', raising=False)
 
     invoked = []
-    monkeypatch.setattr('dectl.commands.config_cmd.subprocess.run', lambda cmd, *a, **k: invoked.append(cmd[-1]))
+    monkeypatch.setattr('dectl.external_command.run', lambda cmd, *a, **k: invoked.append(cmd[-1]))
 
     bare = runner.invoke(config_app, ['edit'])
     named = runner.invoke(config_app, ['edit', 'orders'])
@@ -83,7 +83,7 @@ def test_edit_prefers_visual_over_editor(monkeypatch, tmp_path):
     monkeypatch.setenv('EDITOR', 'vi')
 
     invoked = []
-    monkeypatch.setattr('dectl.commands.config_cmd.subprocess.run', lambda cmd, *a, **k: invoked.append(cmd))
+    monkeypatch.setattr('dectl.external_command.run', lambda cmd, *a, **k: invoked.append(cmd))
 
     result = runner.invoke(config_app, ['edit'])
 

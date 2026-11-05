@@ -1,12 +1,12 @@
 import platform
 import re
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
+from dectl import external_command
 from dectl.config import DectlConfig
 from dectl.config import PipelineConfig
 from dectl.config import written_for
@@ -114,7 +114,7 @@ def make_s3_bucket_app(pipeline_name: str, alias: str, bucket_template: str, con
         if config.defaults.region:
             command += ['--region', config.defaults.region]
 
-        result = subprocess.run(command, capture_output=True, text=True)
+        result = external_command.run(command)
         if result.returncode != 0:
             error(result.stderr.strip() or 'mount-s3 failed')
             raise typer.Exit(1)
@@ -130,7 +130,7 @@ def make_s3_bucket_app(pipeline_name: str, alias: str, bucket_template: str, con
             raise typer.Exit(1)
 
         mountpoint = MOUNT_BASE / pipeline_name / alias
-        result = subprocess.run([umount_bin, str(mountpoint)], capture_output=True, text=True)
+        result = external_command.run([umount_bin, str(mountpoint)])
         if result.returncode != 0:
             error(result.stderr.strip() or 'umount failed')
             raise typer.Exit(1)
