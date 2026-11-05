@@ -1,0 +1,37 @@
+version: '3'
+
+tasks:
+  default:
+    desc: Show available tasks
+    silent: true
+    cmds:
+      - task --list
+
+  setup:
+    desc: Install the package and its development dependencies into .venv
+    cmds:
+      - uv sync --all-extras --dev
+
+  # Live AWS tests are skipped unless --run-integration is passed through: task test -- --run-integration
+  test:
+    desc: Run the test suite, live AWS tests only when asked
+    cmds:
+      - uv run pytest {{.CLI_ARGS}}
+
+  lint:
+    desc: Check formatting, lint and type-check without writing a file
+    cmds:
+      - uv run ruff format --check .
+      - uv run ruff check .
+      - task: typecheck
+
+  format:
+    desc: Format with ruff and apply its lint autofixes
+    cmds:
+      - uv run ruff format .
+      - uv run ruff check --fix .
+
+  typecheck:
+    desc: Type-check with mypy
+    cmds:
+      - uv run --all-extras mypy .
