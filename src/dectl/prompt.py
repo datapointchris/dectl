@@ -1,8 +1,13 @@
 import sys
+from collections.abc import Callable
 
 import typer
 
 from dectl.output import stderr_console
+
+
+def stdin_is_a_terminal() -> bool:
+    return sys.stdin.isatty()
 
 
 class Interactivity:
@@ -10,10 +15,15 @@ class Interactivity:
 
     Per-invocation state set from the root callback, like ActiveEnvironment in
     env.py, so a command deep in the tree can ask without --no-input being
-    threaded through every signature between here and there."""
+    threaded through every signature between here and there.
+
+    `stdin_is_terminal` is the terminal check, held here so a test sets it
+    rather than patching `sys.stdin.isatty`, which pytest's capture can swap
+    back between fixture setup and the test."""
 
     def __init__(self) -> None:
         self.no_input = False
+        self.stdin_is_terminal: Callable[[], bool] = stdin_is_a_terminal
 
 
 interactivity = Interactivity()
@@ -26,7 +36,7 @@ def set_no_input(no_input: bool) -> None:
 def can_prompt() -> bool:
     """Whether a question may be asked: --no-input never allows one, and otherwise
     stdin has to be a terminal."""
-    return not interactivity.no_input and sys.stdin.isatty()
+    return not interactivity.no_input and interactivity.stdin_is_terminal()
 
 
 def confirm_or_exit(question: str, flag: str = '--yes') -> None:

@@ -223,7 +223,7 @@ def test_a_configured_definition_field_reaches_the_update(existing, configured, 
 
 
 def test_no_input_refuses_the_prompt_even_on_a_terminal(monkeypatch):
-    monkeypatch.setattr('sys.stdin.isatty', lambda: True)
+    monkeypatch.setattr(prompt.interactivity, 'stdin_is_terminal', lambda: True)
     monkeypatch.setattr(prompt.interactivity, 'no_input', True)
     glue = FakeGlueClient(existing_job={'Command': {'Name': 'pythonshell'}})
 
