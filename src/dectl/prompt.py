@@ -45,9 +45,12 @@ def confirm_or_exit(question: str, flag: str = '--yes') -> None:
     A prompt is only ever offered on an interactive stdin. Prompting a
     non-interactive caller — a Jenkins step, a cron job, anything shelling out —
     blocks on a stdin that never closes, leaving it with no output and no exit
-    code, which is the one failure it cannot recover from."""
+    code, which is the one failure it cannot recover from.
+
+    The refusal exits 2, the usage-error code: the same command succeeds once
+    the caller adds the flag."""
     if not can_prompt():
         stderr_console.print(f'[red]Refusing to prompt without an interactive terminal; pass [bold]{flag}[/bold][/red]')
-        raise typer.Exit(1)
+        raise typer.Exit(2)
     if not typer.confirm(question):
         raise typer.Abort()

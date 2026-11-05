@@ -227,9 +227,10 @@ def test_no_input_refuses_the_prompt_even_on_a_terminal(monkeypatch):
     monkeypatch.setattr(prompt.interactivity, 'no_input', True)
     glue = FakeGlueClient(existing_job={'Command': {'Name': 'pythonshell'}})
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(typer.Exit) as exit_info:
         confirm_glue_job_update(FakeSession(glue), make_job())
 
+    assert exit_info.value.exit_code == 2
     assert glue.captured_update is None
 
 
