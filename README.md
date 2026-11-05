@@ -22,6 +22,15 @@ uv records it beside the tool, which is where `dectl update` and `uv tool upgrad
 back. Without it uv asks PyPI, which does not carry dectl. An install from a git branch or a local
 checkout carries no release version, so `dectl update` refuses it.
 
+Without access to that index, install from the source. Every dependency comes from PyPI:
+
+```bash
+uv tool install git+https://github.com/datapointchris/dectl   # the latest commit on main
+uv tool install .                                            # from a checkout of this repository
+```
+
+Upgrade such an install by running the same command again with `--reinstall`.
+
 `dectl update` installs the latest release over the running one. `dectl update --check` only
 reports whether there is one. Once a day, on a terminal, a command that finds a later release prints
 one line to stderr. Setting `NO_AUTO_UPDATE` or `DECTL_NO_AUTO_UPDATE` to anything turns that off.
