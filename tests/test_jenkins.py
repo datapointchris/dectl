@@ -53,3 +53,35 @@ def test_each_configured_action_queues_its_own_parameters_for_the_requested_envi
     assert result.exit_code == (0 if actions else 2)
     path = '/job/de/job/proj-deploy/buildWithParameters'
     assert requests == [('POST', path, {'data': {'ENVIRONMENT': 'prod', 'ACTION': action}}) for action in actions]
+
+
+class LastBuild:
+    status_code = 200
+
+    def __init__(self, building, result):
+        self.body = {'number': 7, 'building': building, 'result': result}
+
+    def json(self):
+        return self.body
+
+
+@pytest.mark.parametrize('as_json', [[], ['--json']], ids=['human', 'json'])
+@pytest.mark.parametrize(
+    ('building', 'build_result', 'exit_code'),
+    [(False, 'SUCCESS', 0), (True, None, 0), (False, 'FAILURE', 3), (False, 'ABORTED', 3)],
+    ids=['succeeded', 'building', 'failed', 'aborted'],
+)
+def test_status_exits_3_when_the_last_build_finished_without_succeeding(monkeypatch, as_json, building, build_result, exit_code):
+    """`jenkins status && next-step` must stop on a failed build without reading its output."""
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '123456789012'},
+            'jenkins': {'url': 'https://jenkins.example.com', 'user': 'user', 'token': 'token'},
+            'pipelines': {'proj': {'jenkins': {'job_path': 'de/proj-deploy'}}},
+        }
+    )
+    monkeypatch.setattr('dectl.commands.jenkins.jenkins_request', lambda *_a, **_k: LastBuild(building, build_result))
+
+    result = runner.invoke(make_jenkins_app('proj', config.pipelines['proj'].jenkins, config), ['status', *as_json])
+
+    assert result.exit_code == exit_code

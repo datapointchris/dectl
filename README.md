@@ -367,7 +367,7 @@ environment's name.
 ```bash
 dectl example-pipeline jenkins plan            # queue a build posting ACTION=dry_run, as the starter has it
 dectl example-pipeline jenkins apply --follow  # queue one posting ACTION=deploy and stream its console
-dectl example-pipeline jenkins status          # the most recent build's result
+dectl example-pipeline jenkins status          # the most recent build's result; exits 3 if it failed
 dectl example-pipeline jenkins logs --follow   # its console output
 ```
 

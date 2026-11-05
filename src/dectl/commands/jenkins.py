@@ -107,7 +107,9 @@ def make_jenkins_app(pipeline_name: str, job_config: JenkinsJobConfig, config: D
     def status(
         as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
     ) -> None:
-        """Show the result of the most recent Jenkins build for this pipeline."""
+        """Show the result of the most recent Jenkins build for this pipeline.
+
+        Exits 0 while the build runs or once it succeeded, and 3 when it finished any other way."""
         resp = jenkins_request(config, 'GET', f'{job_url_path(resolved())}/lastBuild/api/json')
 
         if resp.status_code != 200:
@@ -119,17 +121,19 @@ def make_jenkins_app(pipeline_name: str, job_config: JenkinsJobConfig, config: D
         result = data.get('result', 'IN PROGRESS' if building else 'UNKNOWN')
         number = data.get('number', '?')
         display = data.get('displayName', f'#{number}')
+        exit_code = 0 if building or result == 'SUCCESS' else 3
 
         if as_json:
             emit_json({'build': display, 'number': number, 'building': building, 'result': result})
-            return
-
-        if building:
+        elif building:
             info(f'{display} - [yellow]BUILDING[/yellow]')
         elif result == 'SUCCESS':
             success(f'{display} - {result}')
         else:
             error(f'{display} - {result}')
+
+        if exit_code:
+            raise typer.Exit(exit_code)
 
     @jenkins_app.command()
     def logs(
