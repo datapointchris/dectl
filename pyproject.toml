@@ -47,7 +47,7 @@ style = "semver"
 cache-keys = [{ file = "pyproject.toml" }, { git = { commit = true, tags = true } }]
 
 # The published sdist holds the package and its metadata, and none of the
-# repo's tooling or tests, as uv_build's did.
+# repo's tooling or tests. hatchling would otherwise take the whole tree.
 [tool.hatch.build.targets.sdist]
 only-include = ["src"]
 

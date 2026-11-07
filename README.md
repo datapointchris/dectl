@@ -251,7 +251,7 @@ reported, not retried. `Invoke` is the one Lambda call that cannot be taken back
 with the SDK's retries off. botocore would otherwise re-send a long invoke. The function's own retry
 setting cannot stop that, because Lambda never sees a client's HTTP retries.
 
-### Durable functions — the unit of work is the execution, not the invocation
+### Durable functions: each run is an execution
 
 A durable function checkpoints one execution across many invocations, and can suspend for up to a
 year between them. The invocation-shaped views answer nothing there. `Invocations` counts replays,
@@ -402,7 +402,7 @@ Every tailer follows whole log groups by time, never stream by stream. Lambda wr
 environment to its own stream, and Glue creates its error stream only on the first write to stderr.
 Waiting for streams to appear costs minutes of silence and misses a stream created later.
 
-## `s3` — bucket names for the aws CLI, not another copy of it
+## `s3`: bucket names to hand to the aws CLI
 
 ```bash
 eval "$(dectl example-pipeline s3 export)"          # $example_pipeline_raw and the rest, in this shell

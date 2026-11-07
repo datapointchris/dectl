@@ -30,7 +30,7 @@ Whether a command writes is structural too: a write's rehearsal is a `plan` verb
 never a flag on the write, and no namespace acts bare. `glue` and `sfn` `plan` write nothing.
 A resource is named for the system it drives, so the Jenkins job is `jenkins`, never a word
 for what its builds do. `dectl reference` is the static-grammar command a config-assembled tree
-needs, and `--json` on reads goes through `output.emit_json` — bare-print, so pipes stay clean.
+needs, and `--json` on reads goes through `output.emit_json`, which prints bare so a pipe receives only the JSON.
 
 ## The `make_*_app` factory pattern
 
