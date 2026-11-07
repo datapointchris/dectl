@@ -84,14 +84,22 @@ def make_s3_bucket_app(pipeline_name: str, alias: str, bucket_template: str, con
         warn_if_environment_had_no_effect(bucket_template)
         return usable_bucket(pipeline_name, config.pipelines[pipeline_name], alias, bucket_template)
 
-    @bucket_app.command(epilog=f'Example:\n\naws s3 cp "$(dectl {pipeline_name} s3 {alias} uri)/file.txt" .')
+    @bucket_app.command(
+        epilog=(
+            'Examples:\n\n'
+            f'dectl {pipeline_name} s3 {alias} uri — the bucket URI for the active environment\n\n'
+            f'aws s3 cp "$(dectl {pipeline_name} s3 {alias} uri)/file.txt" . — copy one object down from the bucket'
+        ),
+    )
     def uri() -> None:
         """Print this bucket's bare s3:// URI (no markup), for use in $(...) and scripts."""
         # Bare print(), not the rich console: the output is meant for command substitution,
         # so it must carry no markup or ANSI escapes.
         print(bucket_uri(resolved_bucket()))
 
-    @bucket_app.command(epilog=f'Example:\n\ndectl {pipeline_name} s3 {alias} mount')
+    @bucket_app.command(
+        epilog=f'Example:\n\ndectl {pipeline_name} s3 {alias} mount — browse the bucket under ~/buckets/{pipeline_name}/{alias}',
+    )
     def mount() -> None:
         """Mount this bucket as a local directory using Mountpoint for Amazon S3 (Linux only).
 
@@ -120,7 +128,9 @@ def make_s3_bucket_app(pipeline_name: str, alias: str, bucket_template: str, con
             raise typer.Exit(1)
         success(f'mounted {bucket_uri(bucket)} at {mountpoint}')
 
-    @bucket_app.command(epilog=f'Example:\n\ndectl {pipeline_name} s3 {alias} unmount')
+    @bucket_app.command(
+        epilog=f'Example:\n\ndectl {pipeline_name} s3 {alias} unmount — release the directory that mount attached the bucket to',
+    )
     def unmount() -> None:
         """Unmount this bucket if it was mounted with `mount` (Linux only)."""
         require_linux(pipeline_name)
@@ -157,7 +167,7 @@ def make_s3_app(pipeline_name: str, pipeline, config: DectlConfig) -> typer.Type
         epilog=(
             'Examples:\n\n'
             f'eval "$(dectl {pipeline_name} s3 export)" — load every bucket URI into your shell\n\n'
-            f'aws s3 cp "${shell_variable_name(pipeline_name, example)}/file.txt" .'
+            f'aws s3 cp "${shell_variable_name(pipeline_name, example)}/file.txt" . — use one of them by its variable'
         ),
     )
     def export(
