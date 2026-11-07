@@ -50,7 +50,10 @@ config_app = typer.Typer(
 NEEDS_A_PERSON_EXIT = 3
 
 
-@config_app.command('init')
+@config_app.command(
+    'init',
+    epilog='Example:\n\ndectl config init — write config.yaml and example pipeline files to start from',
+)
 def config_init() -> None:
     """Write the starter config.yaml and its example pipeline files. Refuses when config.yaml exists."""
     if CONFIG_PATH.exists():
@@ -60,7 +63,14 @@ def config_init() -> None:
     success(f'created the starter config in {CONFIG_PATH.parent}: {", ".join(template_files())}')
 
 
-@config_app.command('show')
+@config_app.command(
+    'show',
+    epilog=(
+        'Examples:\n\n'
+        'dectl config show — the defaults in force and every pipeline with its aliases\n\n'
+        'dectl config show --json — the pipelines as JSON, for a script'
+    ),
+)
 def config_show(
     as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
 ) -> None:
@@ -96,7 +106,14 @@ def config_show(
         render_pipeline(name, pipeline)
 
 
-@config_app.command('path')
+@config_app.command(
+    'path',
+    epilog=(
+        'Examples:\n\n'
+        'dectl config path — where dectl reads config.yaml, whether or not it exists\n\n'
+        'cd "$(dirname "$(dectl config path)")" — move into the config directory'
+    ),
+)
 def config_path() -> None:
     """Print the config file path (whether or not it exists)."""
     # Bare print (no rich markup/ANSI) so the output stays clean for shell substitution,
@@ -104,7 +121,10 @@ def config_path() -> None:
     print(CONFIG_PATH)
 
 
-@config_app.command('example')
+@config_app.command(
+    'example',
+    epilog='Example:\n\ndectl config example — every option, to read beside the file you are editing',
+)
 def config_example() -> None:
     """Print a full example config showing every available option.
 
@@ -119,7 +139,14 @@ def config_example() -> None:
         print(text, end='')
 
 
-@config_app.command('edit')
+@config_app.command(
+    'edit',
+    epilog=(
+        'Examples:\n\n'
+        'dectl config edit — open config.yaml, writing the starter config first if none exists\n\n'
+        'dectl config edit sales — open pipelines/sales.yaml, creating it if it is not there'
+    ),
+)
 def config_edit(
     pipeline: Annotated[
         str | None, typer.Argument(help='Open pipelines/PIPELINE.yaml instead of config.yaml, creating it if it is not there.')
@@ -167,7 +194,14 @@ def config_edit(
     external_command.run([editor_bin, *parts[1:], str(path)], capture=False)
 
 
-@config_app.command('validate')
+@config_app.command(
+    'validate',
+    epilog=(
+        'Examples:\n\n'
+        'dectl config validate — check the config loads and every path and bucket it names is usable\n\n'
+        'dectl config validate --json — the outcome and each unusable value, for a script'
+    ),
+)
 def config_validate(
     as_json: Annotated[bool, typer.Option('--json', help='Emit the unusable values as machine-readable JSON to stdout.')] = False,
 ) -> None:

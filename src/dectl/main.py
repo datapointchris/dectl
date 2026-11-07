@@ -266,7 +266,10 @@ REFERENCE_GLOBAL = [
 ]
 
 
-@app.command(rich_help_panel='Global commands')
+@app.command(
+    rich_help_panel='Global commands',
+    epilog='Example:\n\ndectl reference — every resource and verb, readable before any config exists',
+)
 def reference() -> None:
     """Print the full command grammar, independent of the local config.
 
@@ -347,7 +350,14 @@ def version_callback(asked: bool) -> None:
     raise typer.Exit()
 
 
-@app.command(rich_help_panel='Global commands')
+@app.command(
+    rich_help_panel='Global commands',
+    epilog=(
+        'Examples:\n\n'
+        'dectl update — install the latest release\n\n'
+        'dectl update --check — say whether a newer release exists, installing nothing'
+    ),
+)
 def update(
     check_only: Annotated[bool, typer.Option('--check', help='Report whether an update is available without installing it')] = False,
 ) -> None:
@@ -413,7 +423,14 @@ def main(
         print(ctx.get_help())
 
 
-@app.command(rich_help_panel='Global commands')
+@app.command(
+    rich_help_panel='Global commands',
+    epilog=(
+        'Examples:\n\n'
+        'dectl search sales — every AWS name containing "sales", one table per service\n\n'
+        'dectl search sales --json — the same matches as JSON, for a script'
+    ),
+)
 def search(
     keyword: Annotated[str, typer.Argument(help='Case-insensitive substring to match against resource names')],
     as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
@@ -429,7 +446,16 @@ def search(
     run_search(session, keyword, config.defaults.region, as_json=as_json)
 
 
-@app.command('env', rich_help_panel='Global commands')
+@app.command(
+    'env',
+    rich_help_panel='Global commands',
+    epilog=(
+        'Examples:\n\n'
+        'dectl env — the environment substituted for {env}, and where it was set\n\n'
+        'dectl --env prod env — confirm --env prod takes effect before running against it\n\n'
+        'dectl env --json — the environment with account_id, region and aws_profile'
+    ),
+)
 def show_env(
     as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
 ) -> None:
@@ -452,7 +478,15 @@ def show_env(
     emit_json({'environment': active_environment.name, 'source': active_environment.source, **resolved})
 
 
-@app.command('list', rich_help_panel='Global commands')
+@app.command(
+    'list',
+    rich_help_panel='Global commands',
+    epilog=(
+        'Examples:\n\n'
+        'dectl list — every pipeline, with each alias and the AWS name behind it\n\n'
+        'dectl list --json — the same pipelines as JSON, for a script'
+    ),
+)
 def list_all(
     as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
 ) -> None:
