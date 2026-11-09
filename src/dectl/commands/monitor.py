@@ -4,6 +4,7 @@ from dectl.config import DectlConfig
 from dectl.config import PipelineConfig
 from dectl.env import substitute_env
 from dectl.env import warn_if_environment_had_no_effect
+from dectl.logs import lambda_log_group
 from dectl.logs import tail_log_groups
 from dectl.output import console
 from dectl.output import error
@@ -24,7 +25,7 @@ def build_monitor_sources(pipeline: PipelineConfig) -> tuple[list[tuple[str, str
         if fn is None:
             warnings.append(f'monitor lists lambda "{alias}" but it is not configured')
             continue
-        entries.append((alias, 'cyan', f'/aws/lambda/{substitute_env(fn.name)}'))
+        entries.append((alias, 'cyan', lambda_log_group(substitute_env(fn.name))))
 
     for alias in pipeline.monitor.step_functions:
         sfn = pipeline.step_functions.get(alias)

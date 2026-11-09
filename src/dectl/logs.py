@@ -368,6 +368,11 @@ def tail_glue_run(logs_client, run_id: str, started_at: int, follow: bool = True
             info(f'log group {group} does not exist')
 
 
+def lambda_log_group(function_name: str) -> str:
+    """The CloudWatch log group Lambda writes a function's logs to, named by the function."""
+    return f'/aws/lambda/{function_name}'
+
+
 def tail_lambda_logs(
     logs_client,
     function_name: str,
@@ -391,7 +396,7 @@ def tail_lambda_logs(
     glue and the non-durable logs."""
     if filter_pattern and fold_scope_fields:
         hide_keys = hide_keys | {EXECUTION_ARN_KEY}
-    log_group = f'/aws/lambda/{function_name}'
+    log_group = lambda_log_group(function_name)
     info(f'tailing {log_group}')
 
     # Lambda writes each execution environment to its own log stream, and an invocation that
