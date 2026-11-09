@@ -43,6 +43,7 @@ from dectl.pipeline_view import pipeline_to_dict
 from dectl.pipeline_view import render_pipeline
 from dectl.pipeline_view import resource_types
 from dectl.prompt import set_no_input
+from dectl.session import installed_version
 from dectl.session import make_session
 
 # A present-but-invalid config must not brick the CLI: without this guard the ValidationError
@@ -342,10 +343,7 @@ def version_callback(asked: bool) -> None:
     is the case this is most often reached for."""
     if not asked:
         return
-    try:
-        version = importlib.metadata.version('dectl')
-    except importlib.metadata.PackageNotFoundError:
-        version = 'unknown'
+    version = installed_version()
     commit = installed_commit()
     print(f'dectl {version}{f" @ {commit[:8]}" if commit else ""}')
     raise typer.Exit()

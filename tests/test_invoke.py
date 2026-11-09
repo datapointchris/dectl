@@ -139,6 +139,15 @@ def test_the_invoke_client_carries_no_retries_and_the_read_timeout_it_was_given(
     assert client.meta.config.read_timeout == 930
 
 
+def test_every_client_carries_the_shared_settings_under_its_own():
+    plain = empty_session().client('s3')
+    invoke = make_invoke_client(empty_session(), 930)
+
+    assert plain.meta.config.retries['mode'] == 'standard'
+    assert plain.meta.config.user_agent_extra.startswith('dectl/')
+    assert invoke.meta.config.user_agent_extra.startswith('dectl/')
+
+
 def test_aws_retry_environment_variables_do_not_reopen_the_retry(monkeypatch):
     # AWS_MAX_ATTEMPTS and AWS_RETRY_MODE reach a plain client, so a developer machine carrying them
     # would silently restore the duplicate invoke if the Config did not win.

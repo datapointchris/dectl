@@ -237,7 +237,9 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
 `pipeline_view.py` sits outside `main.py` and `config_cmd.py` to avoid an import cycle.
 
 **Each kind of external effect has one door.** Every AWS client comes from `make_session` in
-`session.py`, except Lambda's `Invoke`, which `invoke.py` owns. Every program dectl starts on this
+`session.py`, except Lambda's `Invoke`, which `invoke.py` owns. A client-level setting (retry
+mode, timeout, user agent) goes in `DEFAULT_CLIENT_CONFIG` there, which every client merges under
+its own `Config`, so no call site sets one. Every program dectl starts on this
 machine, `mount-s3`, `umount` and the config editor, goes through `external_command.run`. Call
 sites reach it as `external_command.run` rather than importing the function, so a test patches
 `dectl.external_command.run` once. Jenkins is reached through `jenkins_request` in
