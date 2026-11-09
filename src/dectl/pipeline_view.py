@@ -168,7 +168,7 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
         # Both blocks have behavior behind them — `monitor` decides which log groups are
         # tailed, `jenkins` whether a `jenkins` command exists and which verbs it has — and a
         # reader could see neither resolved anywhere.
-        'monitor': {'lambdas': list(pipeline.monitor.lambdas), 'step_functions': list(pipeline.monitor.step_functions)},
+        'monitor': pipeline.monitor.model_dump(),
         'jenkins': None
         if pipeline.jenkins is None
         else {'job_path': substitute_env(pipeline.jenkins.job_path), 'actions': list(pipeline.jenkins.actions)},
@@ -232,7 +232,7 @@ def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
         info(f'  iceberg/{alias}: {substitute_env(table.database)}.{substitute_env(table.table)}')
         print_paths('iceberg', alias)
     # Aliases into the lists above rather than AWS names, so neither row is substituted.
-    monitored = [*pipeline.monitor.lambdas, *pipeline.monitor.step_functions]
+    monitored = pipeline.monitor.selected_aliases()
     if monitored:
         info(f'  monitor: {", ".join(monitored)}')
     if pipeline.jenkins is not None:

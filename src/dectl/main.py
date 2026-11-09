@@ -180,7 +180,7 @@ if cfg:
         if pipeline.jenkins and cfg.jenkins:
             pipeline_app.add_typer(make_jenkins_app(name, pipeline.jenkins, cfg), name='jenkins', rich_help_panel='Pipeline')
             has_commands = True
-        has_monitor = bool(pipeline.monitor.lambdas or pipeline.monitor.step_functions)
+        has_monitor = bool(pipeline.monitor.selected_aliases())
         if has_monitor:
             has_commands = True
         if has_commands:
@@ -229,7 +229,7 @@ def root_examples(config: DectlConfig | None, attached: list[str]) -> str:
     )
     if function:
         lines.append(f'dectl {function[0]} lambda {function[1]} deploy --publish — deploy, then move the live alias')
-    monitored = next((name for name, pipeline in pipelines.items() if pipeline.monitor.lambdas or pipeline.monitor.step_functions), None)
+    monitored = next((name for name, pipeline in pipelines.items() if pipeline.monitor.selected_aliases()), None)
     if monitored:
         lines.append(f'dectl {monitored} monitor — tail every monitored resource as one stream')
     return 'Examples:\n\n' + '\n\n'.join(lines)

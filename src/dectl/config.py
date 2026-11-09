@@ -464,6 +464,10 @@ class MonitorConfig(ResourceModel):
     lambdas: list[str] = []
     step_functions: list[str] = []
 
+    def selected_aliases(self) -> list[str]:
+        """Every alias this block selects, of every kind, in the order the kinds are declared."""
+        return [*self.lambdas, *self.step_functions]
+
 
 class PipelineConfig(ResourceModel):
     # The pipeline is not a resource held by alias, so it has no `RESOURCE` of its own — the
