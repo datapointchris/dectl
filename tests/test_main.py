@@ -15,6 +15,7 @@ from dectl.commands.iceberg import make_iceberg_app
 from dectl.commands.lambda_ import make_lambda_app
 from dectl.commands.s3 import make_s3_app
 from dectl.commands.stepfunctions import make_sfn_app
+from dectl.config import GLOBAL_COMMAND_NAMES
 from dectl.config import DectlConfig
 from dectl.config import Defaults
 from dectl.main import app
@@ -64,6 +65,14 @@ def test_the_layered_config_resolves_a_pipeline_through_the_installed_entry_poin
     assert resolved['iceberg']['events'] | {'paths': {}} == {'database': f'acme_prod_{pipeline}', 'table': dataset, 'paths': {}}
     assert resolved['jenkins'] == {'job_path': f'data-engineering/{pipeline}-deploy', 'actions': ['apply', 'plan']}
     assert resolved['monitor'] == {'lambdas': ['process', 'workflow'], 'step_functions': ['flow']}
+
+
+def test_the_reserved_pipeline_names_are_the_root_commands():
+    # A root command missing from GLOBAL_COMMAND_NAMES lets a pipeline file take its name, and
+    # the root command then hides that pipeline with no error.
+    root = typer.main.get_command(app)
+
+    assert set(root.commands) - set(dectl.main.ATTACHED_PIPELINES) == GLOBAL_COMMAND_NAMES
 
 
 def test_update_installs_the_published_release(monkeypatch):
