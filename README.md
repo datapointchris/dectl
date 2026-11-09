@@ -380,6 +380,11 @@ would collide with that read.
 The command appears only when the config has both `jenkins` blocks. The one in `config.yaml` names
 the server and its credentials. The pipeline file's own names the job.
 
+dectl checks the server's TLS certificate against the operating system's trust store, so a private
+CA installed there is trusted as it is. To trust one without installing it, point `SSL_CERT_FILE`
+at a bundle holding that CA, or `SSL_CERT_DIR` at a directory of them, where dectl runs. Either
+variable replaces the system store for these calls rather than adding to it.
+
 ## `monitor` — several resources tailed as one stream, in time order
 
 ```yaml
