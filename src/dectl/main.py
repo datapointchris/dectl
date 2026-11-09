@@ -22,6 +22,7 @@ from dectl.commands.jenkins import make_jenkins_app
 from dectl.commands.lambda_ import make_lambda_app
 from dectl.commands.monitor import run_monitor
 from dectl.commands.s3 import make_s3_app
+from dectl.commands.search import SEARCHERS
 from dectl.commands.search import run_search
 from dectl.commands.stepfunctions import make_sfn_app
 from dectl.config import CONFIG_LOAD_ERRORS
@@ -425,6 +426,13 @@ def main(
 
 @app.command(
     rich_help_panel='Global commands',
+    # Built from the scan's own table, so the help names exactly the services searched.
+    help=(
+        f'Search AWS by keyword across {", ".join(SEARCHERS)}.\n\n'
+        'Scans each of those services in your default region and prints one table per service '
+        'where a name contains the keyword. Useful for finding the real AWS name behind a config '
+        'alias, or checking whether a resource exists.'
+    ),
     epilog=(
         'Examples:\n\n'
         'dectl search sales — every AWS name containing "sales", one table per service\n\n'
@@ -435,12 +443,6 @@ def search(
     keyword: Annotated[str, typer.Argument(help='Case-insensitive substring to match against resource names')],
     as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
 ) -> None:
-    """Search AWS by keyword across S3, Lambda, layers, Glue, Step Functions, IAM, and Secrets.
-
-    Scans every configured service in your default region and prints one table
-    per service where a name contains the keyword. Useful for finding the real
-    AWS name behind a config alias, or checking whether a resource exists.
-    """
     config = require_config()
     session = make_session(config)
     run_search(session, keyword, config.defaults.region, as_json=as_json)

@@ -1,88 +1,86 @@
+from collections.abc import Callable
+from collections.abc import Iterator
+
 import boto3
 from rich.table import Table
 
 from dectl.output import console
 from dectl.output import emit_json
 
+# One row per resource, its name first. The name is what the keyword is matched against.
+Row = list[str]
 
-def search_service(session: boto3.Session, keyword: str, service: str, region: str) -> list[list[str]]:
-    results = []
+
+def s3_buckets(session: boto3.Session, region: str) -> Iterator[Row]:
+    for bucket in session.client('s3').list_buckets().get('Buckets', []):
+        yield [bucket['Name']]
+
+
+def lambda_functions(session: boto3.Session, region: str) -> Iterator[Row]:
+    for page in session.client('lambda', region_name=region).get_paginator('list_functions').paginate():
+        for fn in page.get('Functions', []):
+            yield [fn['FunctionName'], fn.get('Runtime', ''), fn.get('LastModified', '')]
+
+
+def lambda_layers(session: boto3.Session, region: str) -> Iterator[Row]:
+    for layer in session.client('lambda', region_name=region).list_layers().get('Layers', []):
+        yield [layer['LayerName'], str(layer.get('LatestMatchingVersion', {}).get('Version', ''))]
+
+
+def glue_jobs(session: boto3.Session, region: str) -> Iterator[Row]:
+    for name in session.client('glue', region_name=region).list_jobs().get('JobNames', []):
+        yield [name]
+
+
+def state_machines(session: boto3.Session, region: str) -> Iterator[Row]:
+    for machine in session.client('stepfunctions', region_name=region).list_state_machines().get('stateMachines', []):
+        yield [machine['name'], machine.get('status', '')]
+
+
+def iam_roles(session: boto3.Session, region: str) -> Iterator[Row]:
+    for page in session.client('iam').get_paginator('list_roles').paginate():
+        for role in page.get('Roles', []):
+            yield [role['RoleName']]
+
+
+def iam_policies(session: boto3.Session, region: str) -> Iterator[Row]:
+    for page in session.client('iam').get_paginator('list_policies').paginate(Scope='Local'):
+        for policy in page.get('Policies', []):
+            yield [policy['PolicyName']]
+
+
+def secrets(session: boto3.Session, region: str) -> Iterator[Row]:
+    for page in session.client('secretsmanager', region_name=region).get_paginator('list_secrets').paginate():
+        for secret in page.get('SecretList', []):
+            yield [secret['Name']]
+
+
+# The services `dectl search` scans, in the order it prints them. The search command's help and
+# the scan both read this, so a service added here is searched and documented at once.
+SEARCHERS: dict[str, Callable[[boto3.Session, str], Iterator[Row]]] = {
+    's3': s3_buckets,
+    'lambda': lambda_functions,
+    'lambda-layers': lambda_layers,
+    'glue': glue_jobs,
+    'stepfunctions': state_machines,
+    'iam-roles': iam_roles,
+    'iam-policies': iam_policies,
+    'secrets': secrets,
+}
+
+
+def search_service(session: boto3.Session, keyword: str, service: str, region: str) -> list[Row]:
+    needle = keyword.lower()
     try:
-        if service == 's3':
-            client = session.client('s3')
-            resp = client.list_buckets()
-            for b in resp.get('Buckets', []):
-                if keyword.lower() in b['Name'].lower():
-                    results.append([b['Name']])
-
-        elif service == 'lambda':
-            client = session.client('lambda', region_name=region)
-            paginator = client.get_paginator('list_functions')
-            for page in paginator.paginate():
-                for fn in page.get('Functions', []):
-                    if keyword.lower() in fn['FunctionName'].lower():
-                        results.append([fn['FunctionName'], fn.get('Runtime', ''), fn.get('LastModified', '')])
-
-        elif service == 'lambda-layers':
-            client = session.client('lambda', region_name=region)
-            resp = client.list_layers()
-            for layer in resp.get('Layers', []):
-                if keyword.lower() in layer['LayerName'].lower():
-                    version = layer.get('LatestMatchingVersion', {}).get('Version', '')
-                    results.append([layer['LayerName'], str(version)])
-
-        elif service == 'glue':
-            client = session.client('glue', region_name=region)
-            resp = client.list_jobs()
-            for name in resp.get('JobNames', []):
-                if keyword.lower() in name.lower():
-                    results.append([name])
-
-        elif service == 'stepfunctions':
-            client = session.client('stepfunctions', region_name=region)
-            resp = client.list_state_machines()
-            for sm in resp.get('stateMachines', []):
-                if keyword.lower() in sm['name'].lower():
-                    results.append([sm['name'], sm.get('status', '')])
-
-        elif service == 'iam-roles':
-            client = session.client('iam')
-            paginator = client.get_paginator('list_roles')
-            for page in paginator.paginate():
-                for role in page.get('Roles', []):
-                    if keyword.lower() in role['RoleName'].lower():
-                        results.append([role['RoleName']])
-
-        elif service == 'iam-policies':
-            client = session.client('iam')
-            paginator = client.get_paginator('list_policies')
-            for page in paginator.paginate(Scope='Local'):
-                for policy in page.get('Policies', []):
-                    if keyword.lower() in policy['PolicyName'].lower():
-                        results.append([policy['PolicyName']])
-
-        elif service == 'secrets':
-            client = session.client('secretsmanager', region_name=region)
-            paginator = client.get_paginator('list_secrets')
-            for page in paginator.paginate():
-                for secret in page.get('SecretList', []):
-                    if keyword.lower() in secret['Name'].lower():
-                        results.append([secret['Name']])
-
+        return [row for row in SEARCHERS[service](session, region) if needle in row[0].lower()]
     except Exception as e:
         if 'AccessDenied' in str(e) or 'not authorized' in str(e):
-            results.append(['(access denied)'])
-        else:
-            results.append([f'(error: {e})'])
-
-    return results
-
-
-SERVICES = ['s3', 'lambda', 'lambda-layers', 'glue', 'stepfunctions', 'iam-roles', 'iam-policies', 'secrets']
+            return [['(access denied)']]
+        return [[f'(error: {e})']]
 
 
 def run_search(session: boto3.Session, keyword: str, region: str, as_json: bool = False) -> None:
-    matches = {service: search_service(session, keyword, service, region) for service in SERVICES}
+    matches = {service: search_service(session, keyword, service, region) for service in SEARCHERS}
     matches = {service: rows for service, rows in matches.items() if rows}
 
     if as_json:
