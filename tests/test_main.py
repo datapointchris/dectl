@@ -13,7 +13,6 @@ from rich.text import Text
 
 import dectl.main
 from dectl.commands.glue import make_glue_app
-from dectl.commands.iceberg import make_iceberg_app
 from dectl.commands.jenkins import make_jenkins_app
 from dectl.commands.lambda_ import make_lambda_app
 from dectl.commands.s3 import make_s3_app
@@ -25,6 +24,8 @@ from dectl.config import DectlConfig
 from dectl.config import Defaults
 from dectl.config import load_config
 from dectl.main import app
+from dectl.resource_kinds import RESOURCE_KINDS
+from dectl.resource_kinds import attached_kinds
 from tests.conftest import LAYERED_CONFIG
 from tests.conftest import RefusalRunner
 
@@ -111,7 +112,7 @@ def test_the_reserved_alias_and_action_names_are_each_apps_own_commands():
     pipeline = config.pipelines['proj']
     assert pipeline.jenkins is not None
     s3 = typer.main.get_command(make_s3_app('proj', pipeline, config))
-    jenkins = typer.main.get_command(make_jenkins_app('proj', pipeline.jenkins, config))
+    jenkins = typer.main.get_command(make_jenkins_app('proj', pipeline, config))
 
     assert set(s3.commands) - set(pipeline.buckets) == S3_SET_VERBS
     assert set(jenkins.commands) - set(pipeline.jenkins.actions) == JENKINS_READ_VERBS
@@ -239,11 +240,8 @@ def whole_tree():
     )
     pipeline = config.pipelines['proj']
     root = typer.Typer()
-    root.add_typer(make_glue_app('proj', pipeline, config), name='glue')
-    root.add_typer(make_lambda_app('proj', pipeline, config), name='lambda')
-    root.add_typer(make_sfn_app('proj', pipeline, config), name='sfn')
-    root.add_typer(make_s3_app('proj', pipeline, config), name='s3')
-    root.add_typer(make_iceberg_app('proj', pipeline, config), name='iceberg')
+    for kind in attached_kinds(pipeline, config):
+        root.add_typer(kind.make_app('proj', pipeline, config), name=kind.word)
     return typer.main.get_command(root)
 
 
@@ -267,7 +265,7 @@ def test_every_limit_in_the_binary_refuses_a_negative():
     assert [path for path, param in found if getattr(param.type, 'min', None) != 0] == []
 
 
-REFERENCE_GROUPS = {'glue', 'lambda', 'sfn', 's3', 'iceberg', 'jenkins', 'config'}
+REFERENCE_GROUPS = {kind.word for kind in RESOURCE_KINDS} | {'config'}
 
 
 def reference_grammar(lines: list[str]) -> dict[str, frozenset[str]]:
@@ -322,13 +320,13 @@ def test_the_reference_grammar_lists_every_verb_and_option_the_tree_has():
         instance |= verbs_under(tree, f'{resource} {alias}', resource)
     assert reference_grammar(dectl.main.REFERENCE_INSTANCE_VERBS) == instance
     assert reference_grammar(dectl.main.REFERENCE_DURABLE_VERBS) == verbs_under(tree, 'lambda router', 'lambda')
+    listed = reference_grammar([*dectl.main.REFERENCE_INSTANCE_VERBS, *dectl.main.REFERENCE_SET_VERBS])
+    assert {kind.word for kind in RESOURCE_KINDS} <= {path.split()[0] for path in listed}
 
     config = DectlConfig.model_validate(
         {'defaults': {'account_id': '123456789012'}, 'pipelines': {'proj': {'jenkins': {'job_path': 'de/proj', 'actions': {'apply': {}}}}}}
     )
-    pipeline = config.pipelines['proj']
-    assert pipeline.jenkins is not None
-    jenkins = command_surface(typer.main.get_command(make_jenkins_app('proj', pipeline.jenkins, config)))
+    jenkins = command_surface(typer.main.get_command(make_jenkins_app('proj', config.pipelines['proj'], config)))
     jenkins = {path.replace('apply', 'ACTION'): options for path, options in jenkins.items()}
     set_verbs = {path: tree[path] for path in tree if path.split()[1] in S3_SET_VERBS}
     # `list` and `monitor` are attached per pipeline by make_pipeline_app, so no tree

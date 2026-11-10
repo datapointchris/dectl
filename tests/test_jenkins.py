@@ -51,7 +51,7 @@ def test_each_configured_action_queues_its_own_parameters_for_the_requested_envi
     monkeypatch.setattr('dectl.commands.jenkins.jenkins_request', jenkins_request)
     set_active_environment('prod', '--env')
 
-    result = runner.invoke(make_jenkins_app('proj', config.pipelines['proj'].jenkins, config), argv)
+    result = runner.invoke(make_jenkins_app('proj', config.pipelines['proj'], config), argv)
 
     assert result.exit_code == (0 if actions else 2)
     path = '/job/de/job/proj-deploy/buildWithParameters'
@@ -85,7 +85,7 @@ def test_status_exits_3_when_the_last_build_finished_without_succeeding(monkeypa
     )
     monkeypatch.setattr('dectl.commands.jenkins.jenkins_request', lambda *_a, **_k: LastBuild(building, build_result))
 
-    result = runner.invoke(make_jenkins_app('proj', config.pipelines['proj'].jenkins, config), ['status', *as_json])
+    result = runner.invoke(make_jenkins_app('proj', config.pipelines['proj'], config), ['status', *as_json])
 
     assert result.exit_code == exit_code
 
@@ -115,7 +115,7 @@ def test_a_failed_jenkins_request_ends_at_the_root_handler_rather_than_a_traceba
     monkeypatch.setattr(httpx2, 'Client', lambda **kwargs: client(transport=httpx2.MockTransport(handler), **kwargs))
     root = typer.Typer(cls=DectlGroup)
     root.callback()(lambda: None)
-    root.add_typer(make_jenkins_app('proj', config.pipelines['proj'].jenkins, config), name='jenkins')
+    root.add_typer(make_jenkins_app('proj', config.pipelines['proj'], config), name='jenkins')
 
     result = runner.invoke(root, ['jenkins', 'status'])
 

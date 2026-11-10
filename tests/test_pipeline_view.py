@@ -5,10 +5,11 @@ import pytest
 from dectl.config import ROOT_SITE
 from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
+from dectl.config import PipelineConfig
 from dectl.config import declared_paths
 from dectl.env import active_environment
 from dectl.pipeline_view import pipeline_to_dict
-from dectl.pipeline_view import resource_types
+from dectl.resource_kinds import RESOURCE_KINDS
 
 
 def make_pipeline() -> DectlConfig:
@@ -35,9 +36,11 @@ def make_pipeline() -> DectlConfig:
     )
 
 
-def test_resource_types_lists_configured_kinds_in_order():
-    pipeline = make_pipeline().pipelines['salesdata']
-    assert resource_types(pipeline) == ['glue', 'lambda', 'sfn', 's3', 'iceberg']
+def test_every_pipeline_field_is_a_resource_kind_or_named_otherwise():
+    """A collection missing from `RESOURCE_KINDS` gets no command, no summary and no `list` row."""
+    # `monitor` selects resources declared as kinds, and its command is the pipeline's own.
+    not_kinds = {'resolve_paths_from', 'variables', 'monitor'}
+    assert set(PipelineConfig.model_fields) - not_kinds == {kind.collection for kind in RESOURCE_KINDS}
 
 
 def test_pipeline_to_dict_has_stable_shape_and_substitutes_env(monkeypatch):

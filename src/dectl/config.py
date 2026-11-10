@@ -318,6 +318,10 @@ S3_SET_VERBS = frozenset({'export'})
 
 
 class JenkinsJobConfig(StrictModel):
+    # The word the CLI and `list` give this block, as a resource model's `RESOURCE` is. It is no
+    # `ResourceModel`, because it names no path, key or bucket for `values.py` to check.
+    RESOURCE: ClassVar[str] = 'jenkins'
+
     job_path: str
     parameters: dict[str, str] = {}
     # Each key is a verb on `dectl PIPELINE jenkins`, posting `parameters` with its own on top.

@@ -1,65 +1,21 @@
 from typing import Any
 
 from dectl.config import ROOT_SITE
-from dectl.config import GlueJobConfig
 from dectl.config import PipelineConfig
 from dectl.config import declared_paths
 from dectl.config import pipeline_root
 from dectl.config import resolve_from_root
 from dectl.config import resource_members
 from dectl.env import aws_names_of
-from dectl.env import substitute_env
 from dectl.env import warn_if_environment_had_no_effect
 from dectl.output import info
-from dectl.values import join_uri
+from dectl.resource_kinds import RESOURCE_KINDS
+from dectl.resource_kinds import AliasPaths
 
 
 def resource_types(pipeline: PipelineConfig) -> list[str]:
-    """The resource kinds this pipeline defines, in display order."""
-    types = []
-    if pipeline.glue_jobs:
-        types.append('glue')
-    if pipeline.lambdas:
-        types.append('lambda')
-    if pipeline.step_functions:
-        types.append('sfn')
-    if pipeline.buckets:
-        types.append('s3')
-    if pipeline.iceberg_tables:
-        types.append('iceberg')
-    return types
-
-
-def managed_definition(job: GlueJobConfig) -> dict[str, Any]:
-    """The optional definition fields this job's config decides, and what it sets them to.
-
-    Only the ones it names. An absent key means unmanaged, so the live value survives a deploy —
-    reporting it as a null would say dectl writes a null, which is the opposite of what absence
-    means and is the one thing a reader of this block must not conclude.
-
-    Built from the model's own declarations, so a field added to either map appears here without
-    anything being remembered. The question the whole managed-field surface exists to make
-    answerable is which fields are dectl's and which stay Terraform's, and a deploy's diff is a
-    write rather than a read."""
-    declared = {**job.DEFINITION_FIELDS, **job.NESTED_DEFINITION_FIELDS}
-    return {field: getattr(job, field) for field in declared if getattr(job, field) is not None}
-
-
-def script_uris(job: GlueJobConfig) -> list[str]:
-    """Where every script of one job lands, for a reader rather than for a deploy.
-
-    Three operands substituted, exactly as every neighboring row in both renderers substitutes
-    the name beside it. Both renderers then show the destination the deploy writes, which is the
-    point: two of the faults `config validate` reports are about this composed value and no
-    command rendered it.
-
-    `render_env_model` is deliberately not what does the substituting. It also asks the env
-    guard, and a renderer that asks it once per glue job answers a question its caller already
-    answered for the whole pipeline — with a narrower population, so a hardcoded job beside a
-    `{env}` bucket warned that `--env` changed nothing directly above two names it changed."""
-    bucket = substitute_env(job.script_bucket)
-    prefix = substitute_env(job.script_prefix)
-    return [join_uri(bucket, prefix, substitute_env(script)) for script in job.scripts]
+    """The resource kinds this pipeline declares, in display order."""
+    return [kind.word for kind in RESOURCE_KINDS if kind.declared(pipeline)]
 
 
 def aws_names_only(pipeline: PipelineConfig) -> dict[str, Any]:
@@ -86,24 +42,22 @@ def aws_names_only(pipeline: PipelineConfig) -> dict[str, Any]:
     return dumped
 
 
-def resolved_paths(pipeline: PipelineConfig) -> dict[tuple[str, str], dict[str, list[str]]]:
-    """Every declared path of this pipeline, resolved, keyed by resource and alias then field.
+def resolved_paths(pipeline: PipelineConfig) -> dict[str, AliasPaths]:
+    """Every declared path of this pipeline, resolved, keyed by resource word, then alias, then field.
 
     Both renderers read this rather than walking the resource dicts themselves, so a path field
-    added to a model already in their sections is resolved *and displayed* without either of
-    them being edited. Keying the field as well is what makes that row derived: it is guaranteed
-    by something that runs rather than by someone remembering to add one.
+    added to a model is resolved *and displayed* without either of them being edited. Keying the
+    field as well is what makes that row derived: it is guaranteed by something that runs rather
+    than by someone remembering to add one.
 
-    A resource kind neither renderer has a section for is resolved here and displayed by
-    neither, because the sections carry per-kind AWS fields and cannot be generated from this.
-
-    The outer key is the pair rather than a `resource/alias` string, so nothing rebuilds what a
-    `ValueSite` holds and an alias carrying a slash cannot collide with a different resource."""
-    grouped: dict[tuple[str, str], dict[str, list[str]]] = {}
+    Each kind's sections read the share under its word. The alias is a key of its own rather
+    than part of a `resource/alias` string, so an alias carrying a slash cannot collide with a
+    different resource."""
+    grouped: dict[str, AliasPaths] = {}
     for declared in declared_paths(pipeline):
         if declared.site == ROOT_SITE:
             continue
-        fields = grouped.setdefault((declared.site.resource, declared.site.alias), {})
+        fields = grouped.setdefault(declared.site.resource, {}).setdefault(declared.site.alias, {})
         fields.setdefault(declared.site.field, []).append(str(resolve_from_root(pipeline, declared.value)))
     return grouped
 
@@ -124,62 +78,10 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
             'path': str(pipeline_root(pipeline)),
             'declared': pipeline.resolve_paths_from is not None,
         },
-        'glue': {
-            alias: {
-                'name': substitute_env(job.name),
-                'script_bucket': substitute_env(job.script_bucket),
-                'script_prefix': substitute_env(job.script_prefix),
-                'scripts': [substitute_env(script) for script in job.scripts],
-                # The composed destination, beside the two strings it is built from. Two of the
-                # faults `config validate` reports are about this value, and a reader refused
-                # over one otherwise has to join two fields by hand to see what was refused.
-                'script_uris': script_uris(job),
-                # Which definition fields this config decides, so the split between dectl's and
-                # Terraform's is answerable from a read rather than from a deploy's diff.
-                'managed': managed_definition(job),
-                'paths': resolved.get(('glue', alias), {}),
-            }
-            for alias, job in pipeline.glue_jobs.items()
-        },
-        'lambda': {
-            alias: {
-                'name': substitute_env(fn.name),
-                'durable': fn.durable,
-                'source_dir': substitute_env(fn.source_dir),
-                'paths': resolved.get(('lambda', alias), {}),
-            }
-            for alias, fn in pipeline.lambdas.items()
-        },
-        'sfn': {
-            alias: {
-                'name': substitute_env(sfn.name),
-                'log_group': substitute_env(sfn.log_group),
-                'definition_file': substitute_env(sfn.definition_file) if sfn.definition_file is not None else None,
-                # What a deploy writes into the definition under this environment, which is the
-                # thing to check before deploying to a new one.
-                'definition_substitutions': {name: substitute_env(value) for name, value in sfn.definition_substitutions.items()},
-                'live_alias': substitute_env(sfn.live_alias) if sfn.live_alias else None,
-                'paths': resolved.get(('sfn', alias), {}),
-            }
-            for alias, sfn in pipeline.step_functions.items()
-        },
-        's3': {alias: {'bucket': substitute_env(bucket)} for alias, bucket in pipeline.buckets.items()},
-        # Aliases into this pipeline rather than AWS names, so nothing here is substituted.
-        # Both blocks have behavior behind them — `monitor` decides which log groups are
-        # tailed, `jenkins` whether a `jenkins` command exists and which verbs it has — and a
-        # reader could see neither resolved anywhere.
+        **{kind.word: kind.json_section(pipeline, resolved.get(kind.word, {})) for kind in RESOURCE_KINDS},
+        # Aliases into this pipeline rather than AWS names, so nothing here is substituted. It
+        # decides which log groups are tailed, and a reader could see that nowhere else.
         'monitor': pipeline.monitor.model_dump(),
-        'jenkins': None
-        if pipeline.jenkins is None
-        else {'job_path': substitute_env(pipeline.jenkins.job_path), 'actions': list(pipeline.jenkins.actions)},
-        'iceberg': {
-            alias: {
-                'database': substitute_env(table.database),
-                'table': substitute_env(table.table),
-                'paths': resolved.get(('iceberg', alias), {}),
-            }
-            for alias, table in pipeline.iceberg_tables.items()
-        },
     }
 
 
@@ -201,47 +103,19 @@ def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
     source = '' if declared else ' (working directory — resolve_paths_from is unset)'
     lines.append(f'  resolve_paths_from: {pipeline_root(pipeline)}{source}')
 
-    def print_paths(resource: str, alias: str) -> None:
-        """The resolved path of every field this resource declares, named by its config key.
-
-        The reader is asking which file a deploy would send, and the config string does not
-        answer that. Driven off `resolved_paths`, so a newly declared field prints here without
-        this function being edited."""
-        for field, paths in resolved.get((resource, alias), {}).items():
-            for path in paths:
-                lines.append(f'    {field}: {path}')
-
-    for alias, job in pipeline.glue_jobs.items():
-        lines.append(f'  glue/{alias}: {substitute_env(job.name)}')
-        for uri in script_uris(job):
-            lines.append(f'    deploys to: {uri}')
-        managed = managed_definition(job)
-        if managed:
-            lines.append(f'    manages: {", ".join(f"{field}={value}" for field, value in managed.items())}')
-        print_paths('glue', alias)
-    for alias, fn in pipeline.lambdas.items():
-        # Worth calling out inline: a durable function carries a different set of verbs.
-        marker = ' (durable)' if fn.durable else ''
-        lines.append(f'  lambda/{alias}: {substitute_env(fn.name)}{marker}')
-        print_paths('lambda', alias)
-    for alias, sfn in pipeline.step_functions.items():
-        lines.append(f'  sfn/{alias}: {substitute_env(sfn.name)}')
-        for name, value in sfn.definition_substitutions.items():
-            lines.append(f'    ${{{name}}}: {substitute_env(value)}')
-        if sfn.live_alias:
-            lines.append(f'    live alias: {substitute_env(sfn.live_alias)}')
-        print_paths('sfn', alias)
-    for alias, bucket in pipeline.buckets.items():
-        lines.append(f'  s3/{alias}: {substitute_env(bucket)}')
-    for alias, table in pipeline.iceberg_tables.items():
-        lines.append(f'  iceberg/{alias}: {substitute_env(table.database)}.{substitute_env(table.table)}')
-        print_paths('iceberg', alias)
-    # Aliases into the lists above rather than AWS names, so neither row is substituted.
+    for kind in RESOURCE_KINDS:
+        kind_paths = resolved.get(kind.word, {})
+        for row in kind.view_rows(pipeline):
+            label = f'{kind.word}/{row.alias}' if row.alias else kind.word
+            lines.append(f'  {label}: {row.headline}')
+            lines.extend(f'    {detail}' for detail in row.details)
+            # The resolved path of every field this resource declares, named by its config key.
+            # The reader is asking which file a deploy would send, and the config string does
+            # not answer that.
+            lines.extend(f'    {field}: {path}' for field, paths in kind_paths.get(row.alias, {}).items() for path in paths)
+    # Aliases into the rows above rather than AWS names, so nothing here is substituted.
     monitored = pipeline.monitor.selected_aliases()
     if monitored:
         lines.append(f'  monitor: {", ".join(monitored)}')
-    if pipeline.jenkins is not None:
-        actions = ', '.join(pipeline.jenkins.actions) or 'none, so nothing queues a build'
-        lines.append(f'  jenkins: {substitute_env(pipeline.jenkins.job_path)} (actions: {actions})')
     lines.append('')
     info('\n'.join(lines))

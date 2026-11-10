@@ -17,10 +17,14 @@ nothing else; add `glue_jobs` and a `glue` command appears. Running `dectl` with
 (commands like `config init` are always present) because `load_config()` returns `None` rather
 than raising.
 
-This means the command you see depends entirely on the user's config. When adding a resource
-type, you touch two places: the resource's own `make_*_app` module, and `make_pipeline_app` in
-`main.py` that conditionally wires it in (plus `pipeline_summary`, `pipeline_has_commands` and
-`pipeline_view.render_pipeline`).
+This means the command you see depends entirely on the user's config. Each resource kind is one
+`RESOURCE_KINDS` entry in `src/dectl/resource_kinds.py`. It names the kind's word, its
+`PipelineConfig` collection, its `make_*_app` factory, its help panel and its two `list` sections.
+`make_pipeline_app`, `pipeline_summary`, `pipeline_has_commands`, `reference`, `resource_types`
+and both renderers iterate it. So a new kind costs its command module, one entry, and its lines in
+`main.py`'s `REFERENCE_*` tables, which are static grammar.
+`test_every_pipeline_field_is_a_resource_kind_or_named_otherwise` fails on a collection with no
+entry, and the reference test fails on a kind `reference` never names.
 
 ## Grammar: `PIPELINE RESOURCE ALIAS VERB` (verb last)
 
@@ -172,10 +176,10 @@ docstring before changing either. What a new field or resource has to meet:
   and each resource. A consumer that traverses for itself reaches a narrower set, and a value
   nothing enumerates reports no fault. `aws_names_only` is the deliberate exception.
 - **Adding a path field to an existing resource is the whole edit.** Checking, resolution,
-  `--json` and the printed row all come from the declaration. **A new resource *kind* costs six
-  edits**: the `--json` section, its `paths` key, the human section, its `print_paths` call,
-  `resource_types`, and `make_pipeline_app` in `main.py`. `s3` has neither a `print_paths` call nor
-  a `paths` key today.
+  `--json` and the printed row all come from the declaration. `resolved_paths` keys each path by
+  the kind's word, then alias. `render_pipeline` prints every row's paths itself, and each
+  `--json` section reads its own word's share as `paths`. `s3`'s section carries no `paths` key,
+  because a bucket names no file.
 - **A new `ConfigFault` needs one `FAULT_REPORTING` row**: its wording, whether it is about
   spelling, and its form line. `recovery_lines` derives from the rows, in row order.
   `test_every_fault_is_reported_in_full` fails on a missing row, or a spelling row with no form.

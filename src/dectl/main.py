@@ -12,16 +12,10 @@ from rich.markup import escape
 from typer.core import TyperGroup
 
 from dectl.commands.config_cmd import config_app
-from dectl.commands.glue import make_glue_app
-from dectl.commands.iceberg import make_iceberg_app
 from dectl.commands.jenkins import JenkinsError
-from dectl.commands.jenkins import make_jenkins_app
-from dectl.commands.lambda_ import make_lambda_app
 from dectl.commands.monitor import run_monitor
-from dectl.commands.s3 import make_s3_app
 from dectl.commands.search import SEARCHERS
 from dectl.commands.search import run_search
-from dectl.commands.stepfunctions import make_sfn_app
 from dectl.config import CONFIG_PATH
 from dectl.config import DectlConfig
 from dectl.config import Defaults
@@ -37,8 +31,9 @@ from dectl.output import info
 from dectl.output import stderr_console
 from dectl.pipeline_view import pipeline_to_dict
 from dectl.pipeline_view import render_pipeline
-from dectl.pipeline_view import resource_types
 from dectl.prompt import set_no_input
+from dectl.resource_kinds import RESOURCE_KINDS
+from dectl.resource_kinds import attached_kinds
 from dectl.session import installed_version
 from dectl.session import make_session
 
@@ -144,45 +139,21 @@ DEFAULT_ENVIRONMENT = cfg.defaults.environment if cfg else 'dev'
 
 
 def pipeline_summary(pipeline: PipelineConfig, config: DectlConfig) -> str:
-    """Each resource the pipeline configures, with its aliases, as the root help lists it."""
-    resources = []
-    if pipeline.glue_jobs:
-        resources.append(f'glue ({", ".join(pipeline.glue_jobs)})')
-    if pipeline.lambdas:
-        resources.append(f'lambda ({", ".join(pipeline.lambdas)})')
-    if pipeline.step_functions:
-        resources.append(f'sfn ({", ".join(pipeline.step_functions)})')
-    if pipeline.buckets:
-        resources.append(f's3 ({", ".join(pipeline.buckets)})')
-    if pipeline.iceberg_tables:
-        resources.append(f'iceberg ({", ".join(pipeline.iceberg_tables)})')
-    if pipeline.jenkins and config.jenkins:
-        actions = pipeline.jenkins.actions
-        resources.append(f'jenkins ({", ".join(actions)})' if actions else 'jenkins')
+    """Each resource the pipeline has a command for, with its aliases, as the root help lists it."""
+    resources = [kind.summary(pipeline) for kind in attached_kinds(pipeline, config)]
     return ' · '.join(resources) if resources else 'none configured'
 
 
 def pipeline_has_commands(pipeline: PipelineConfig, config: DectlConfig) -> bool:
     """Whether the pipeline configures a resource or a monitor, without which it has no command."""
-    resources = [pipeline.glue_jobs, pipeline.lambdas, pipeline.step_functions, pipeline.buckets, pipeline.iceberg_tables]
-    return any(resources) or bool(pipeline.jenkins and config.jenkins) or bool(pipeline.monitor.selected_aliases())
+    return bool(attached_kinds(pipeline, config)) or bool(pipeline.monitor.selected_aliases())
 
 
 def make_pipeline_app(name: str, pipeline: PipelineConfig, config: DectlConfig) -> typer.Typer:
     """The tree under one pipeline's name: a sub-app per configured resource, then `list` and `monitor`."""
     pipeline_app = typer.Typer()
-    if pipeline.glue_jobs:
-        pipeline_app.add_typer(make_glue_app(name, pipeline, config), name='glue', rich_help_panel='Resources')
-    if pipeline.lambdas:
-        pipeline_app.add_typer(make_lambda_app(name, pipeline, config), name='lambda', rich_help_panel='Resources')
-    if pipeline.step_functions:
-        pipeline_app.add_typer(make_sfn_app(name, pipeline, config), name='sfn', rich_help_panel='Resources')
-    if pipeline.buckets:
-        pipeline_app.add_typer(make_s3_app(name, pipeline, config), name='s3', rich_help_panel='Resources')
-    if pipeline.iceberg_tables:
-        pipeline_app.add_typer(make_iceberg_app(name, pipeline, config), name='iceberg', rich_help_panel='Resources')
-    if pipeline.jenkins and config.jenkins:
-        pipeline_app.add_typer(make_jenkins_app(name, pipeline.jenkins, config), name='jenkins', rich_help_panel='Pipeline')
+    for kind in attached_kinds(pipeline, config):
+        pipeline_app.add_typer(kind.make_app(name, pipeline, config), name=kind.word, rich_help_panel=kind.panel)
 
     @pipeline_app.command('list', rich_help_panel='Pipeline')
     def list_resources(
@@ -330,12 +301,7 @@ def reference() -> None:
     console.print()
 
     if cfg:
-        kinds = set()
-        for pipeline in cfg.pipelines.values():
-            kinds.update(resource_types(pipeline))
-        configured = sorted(kinds)
-        if cfg.jenkins and any(p.jenkins for p in cfg.pipelines.values()):
-            configured.append('jenkins')
+        configured = [kind.word for kind in RESOURCE_KINDS if any(kind.attached(pipeline, cfg) for pipeline in cfg.pipelines.values())]
         info(f'Configured on this machine: {", ".join(configured) or "(none)"}')
     else:
         info('No config on this machine yet — run "dectl config init".')

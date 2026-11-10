@@ -9,6 +9,7 @@ import typer
 from dectl.config import CONFIG_PATH
 from dectl.config import DectlConfig
 from dectl.config import JenkinsJobConfig
+from dectl.config import PipelineConfig
 from dectl.env import render_env_model
 from dectl.output import emit_json
 from dectl.output import error
@@ -66,11 +67,14 @@ def job_url_path(job: JenkinsJobConfig) -> str:
     return '/job/' + job.job_path.replace('/', '/job/')
 
 
-def make_jenkins_app(pipeline_name: str, job_config: JenkinsJobConfig, config: DectlConfig) -> typer.Typer:
+def make_jenkins_app(pipeline_name: str, pipeline: PipelineConfig, config: DectlConfig) -> typer.Typer:
     """Build `dectl PIPELINE jenkins`: one verb per configured action, then `status` and `logs`.
 
     What a build does is the job's business, so dectl names no action itself. The panel and each
     verb's help show the config as written, because they are built before `--env` is parsed."""
+    job_config = pipeline.jenkins
+    if job_config is None:
+        raise ValueError(f'{pipeline_name} declares no jenkins job, so it has no jenkins command')
     if job_config.actions:
         verbs = 'Each action from the config queues a build posting its own parameters.'
     else:
