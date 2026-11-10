@@ -265,7 +265,7 @@ REFERENCE_SET_VERBS = [
     'list [--json] · monitor',
 ]
 REFERENCE_GLOBAL = [
-    'reference · env · list [--json] · search KEYWORD [--json] · update [--check]',
+    'reference · env [--json] · list [--json] · search KEYWORD [--json] · update [--check]',
     'config  init · show [--json] · path · example · edit · validate [--json]',
 ]
 

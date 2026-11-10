@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -244,6 +245,84 @@ def test_every_limit_in_the_binary_refuses_a_negative():
         'iceberg events branches',
     }
     assert [path for path, param in found if getattr(param.type, 'min', None) != 0] == []
+
+
+REFERENCE_GROUPS = {'glue', 'lambda', 'sfn', 's3', 'iceberg', 'jenkins', 'config'}
+
+
+def reference_grammar(lines: list[str]) -> dict[str, frozenset[str]]:
+    """Each command a reference table names, as `GROUP VERB`, with the long options it lists.
+
+    A line opening on a group carries it to its later segments and to the indented lines under
+    it. `ALIAS` and bracketed arguments are placeholders, and a parenthesis is a note."""
+    grammar: dict[str, frozenset[str]] = {}
+    group = None
+    for line in lines:
+        if not line.startswith(' '):
+            group = None
+        for segment in re.sub(r'\(.*?\)', '', line).split('·'):
+            words = [word for word in segment.split() if word != 'ALIAS' and not word.startswith('[')]
+            if not words:
+                continue
+            if words[0] in REFERENCE_GROUPS and len(words) > 1:
+                group = words.pop(0)
+            path = f'{group} {words[0]}' if group else words[0]
+            grammar[path] = frozenset(re.findall(r'--[a-z][a-z-]*', segment))
+    return grammar
+
+
+def command_surface(command, path: tuple[str, ...] | None = None) -> dict[str, frozenset[str]]:
+    """Each leaf command under a group, by its space-joined path below it, with the long options it takes."""
+    here = () if path is None else (*path, command.name)
+    children = getattr(command, 'commands', None)
+    if children is None:
+        options = {opt for param in command.params for opt in getattr(param, 'opts', ()) if opt.startswith('--')}
+        return {' '.join(here): frozenset(options - {'--help'})}
+    surface: dict[str, frozenset[str]] = {}
+    for child in children.values():
+        surface |= command_surface(child, here)
+    return surface
+
+
+def verbs_under(surface: dict[str, frozenset[str]], prefix: str, renamed: str) -> dict[str, frozenset[str]]:
+    """The commands under `prefix`, with `prefix` written as `renamed`."""
+    return {
+        f'{renamed} {path.removeprefix(prefix + " ")}'.strip(): options
+        for path, options in surface.items()
+        if path.startswith(prefix + ' ')
+    }
+
+
+def test_the_reference_grammar_lists_every_verb_and_option_the_tree_has():
+    """`reference` is read before any config exists, so a verb or option it omits is one a new
+    user never learns of, and one it invents fails on first use."""
+    tree = command_surface(whole_tree())
+    instance: dict[str, frozenset[str]] = {}
+    for resource, alias in [('glue', 'source-copy'), ('lambda', 'notify'), ('sfn', 'flow'), ('s3', 'raw'), ('iceberg', 'events')]:
+        instance |= verbs_under(tree, f'{resource} {alias}', resource)
+    assert reference_grammar(dectl.main.REFERENCE_INSTANCE_VERBS) == instance
+    assert reference_grammar(dectl.main.REFERENCE_DURABLE_VERBS) == verbs_under(tree, 'lambda router', 'lambda')
+
+    config = DectlConfig.model_validate(
+        {'defaults': {'account_id': '123456789012'}, 'pipelines': {'proj': {'jenkins': {'job_path': 'de/proj', 'actions': {'apply': {}}}}}}
+    )
+    pipeline = config.pipelines['proj']
+    assert pipeline.jenkins is not None
+    jenkins = command_surface(typer.main.get_command(make_jenkins_app('proj', pipeline.jenkins, config)))
+    jenkins = {path.replace('apply', 'ACTION'): options for path, options in jenkins.items()}
+    set_verbs = {path: tree[path] for path in tree if path.split()[1] in S3_SET_VERBS}
+    # `list` and `monitor` are attached per pipeline while main.py imports its config, so no tree
+    # built here holds them.
+    listed_set_verbs = {
+        path: options for path, options in reference_grammar(dectl.main.REFERENCE_SET_VERBS).items() if path not in {'list', 'monitor'}
+    }
+    assert listed_set_verbs == set_verbs | {f'jenkins {path}': options for path, options in jenkins.items()}
+
+    root = command_surface(typer.main.get_command(app))
+    attached = tuple(f'{name} ' for name in dectl.main.ATTACHED_PIPELINES)
+    assert reference_grammar(dectl.main.REFERENCE_GLOBAL) == {
+        path: options for path, options in root.items() if not path.startswith(attached)
+    }
 
 
 class RefusingClient:
