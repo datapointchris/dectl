@@ -169,8 +169,9 @@ docstring before changing either. What a new field or resource has to meet:
   edits**: the `--json` section, its `paths` key, the human section, its `print_paths` call,
   `resource_types`, and the pipeline loop in `main.py`. `s3` has neither a `print_paths` call nor
   a `paths` key today.
-- **A new `ConfigFault` needs a `FAULT_WORDING` entry, a `SPELLING_FAULTS` decision, and a line in
-  `recovery_lines`.** `test_every_fault_has_a_sentence` pins the first.
+- **A new `ConfigFault` needs one `FAULT_REPORTING` row**: its wording, whether it is about
+  spelling, and its form line. `recovery_lines` derives from the rows, in row order.
+  `test_every_fault_is_reported_in_full` fails on a missing row, or a spelling row with no form.
 - **`join_uri` joins three strings and all three are guarded.** `key_fault` covers the prefix and
   the script, and `bucket_fault` covers the bucket. A guard over some operands of a composed value
   and not the rest is the defect this surface keeps producing.

@@ -938,7 +938,7 @@ def pipeline_value_faults(
         # `~` naming nobody resolves to nothing at either site, and one row publishing the
         # literal string in the `path` key gives a `--json` consumer branching on `path is None`
         # two answers to one `fault` value. The written form is what the reader needs anyway:
-        # the missing slash is the finding, and `shown` reaches it through `SPELLING_FAULTS`.
+        # the missing slash is the finding, and `shown` reaches it through `about_spelling`.
         if fault := home_fault(declared.value):
             return [*problems, row(ROOT_SITE, None, fault, declared.value)]
         if fault := path_fault(root, declared.expects):

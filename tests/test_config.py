@@ -25,7 +25,7 @@ from dectl.config import load_config
 from dectl.config import pipeline_value_faults
 from dectl.config import read_config_files
 from dectl.config import resolve_from_root
-from dectl.values import FAULT_WORDING
+from dectl.values import FAULT_REPORTING
 from dectl.values import ConfigFault
 from dectl.values import DeclaresValues
 from dectl.values import Written
@@ -418,10 +418,13 @@ def test_every_shape_a_source_dir_can_take_is_judged(tmp_path, source_dir, fault
     assert [f.fault for f in pipeline_value_faults('p', pipeline, on_disk=True)] == faults
 
 
-def test_every_fault_has_a_sentence():
-    # FAULT_WORDING is indexed with no default, so a member added without one raises at the
-    # moment a reader needs the answer.
-    assert set(FAULT_WORDING) == set(ConfigFault)
+def test_every_fault_is_reported_in_full():
+    # FAULT_REPORTING is indexed with no default, so a member added without a row raises at the
+    # moment a reader needs the answer. A spelling fault cannot be sent to `config show`, so a
+    # spelling row with no form names no remedy at all.
+    assert set(FAULT_REPORTING) == set(ConfigFault)
+    incomplete = [fault for fault, row in FAULT_REPORTING.items() if not row.wording or (row.about_spelling and not row.form)]
+    assert incomplete == []
 
 
 def test_a_bucket_name_is_checked_on_a_pipeline_that_declares_no_root():

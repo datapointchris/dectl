@@ -59,7 +59,7 @@ class PathKind(StrEnum):
 class ConfigFault(StrEnum):
     """Why a value the config names outside the program cannot be used.
 
-    A name callers branch on. The sentence a reader sees is in FAULT_WORDING, so rewording the
+    A name callers branch on. The sentence a reader sees is in FAULT_REPORTING, so rewording the
     message does not break `validate --json`, whose `fault` key is this value."""
 
     ABSENT = 'absent'
@@ -73,42 +73,6 @@ class ConfigFault(StrEnum):
     KEY_ESCAPES_ROOT = 'key_escapes_root'
     NOT_A_ROOTED_PATH = 'not_a_rooted_path'
     NOT_A_BUCKET_NAME = 'not_a_bucket_name'
-
-
-# The faults about how a value is spelled rather than about what this machine holds. They are
-# reported against the configured string: resolution normalizes away the very thing a key fault
-# names, and a bucket name resolves to nothing at all.
-#
-# `ESCAPES_ROOT` is deliberately absent. A path that climbs out of the anchor resolves to a real
-# directory, and where it lands is the answer — so its row carries the resolved path and its
-# reader is sent to `config show`, which is the command that prints it.
-SPELLING_FAULTS = frozenset(
-    {
-        ConfigFault.NOT_A_CLEAN_KEY,
-        ConfigFault.KEY_ESCAPES_ROOT,
-        ConfigFault.NOT_A_BUCKET_NAME,
-        ConfigFault.NOT_A_ROOTED_PATH,
-        ConfigFault.UNRESOLVABLE_HOME,
-    }
-)
-
-# Every member gets a sentence, and a missing one raises at the moment a reader needs the
-# answer. `test_every_fault_has_a_sentence` is what keeps the mapping total; `SPELLING_FAULTS`
-# is the other property beside this enum and fails in the opposite direction, so it is pinned
-# too — a member missing from it silently reports the resolved path for a fault about spelling.
-FAULT_WORDING = {
-    ConfigFault.ABSENT: 'not found',
-    ConfigFault.EXPECTED_DIRECTORY: 'is a file, not a directory',
-    ConfigFault.EXPECTED_FILE: 'is a directory, not a file',
-    ConfigFault.EMPTY_DIRECTORY: 'holds nothing to deploy',
-    ConfigFault.DECLARES_NOTHING: 'names nothing to deploy',
-    ConfigFault.UNRESOLVABLE_HOME: 'names a home directory this machine cannot resolve',
-    ConfigFault.NOT_A_CLEAN_KEY: 'is not written as a plain relative path, and the S3 key is built from it',
-    ConfigFault.ESCAPES_ROOT: 'climbs out of the directory paths resolve from',
-    ConfigFault.KEY_ESCAPES_ROOT: 'climbs out of the directory paths resolve from, and the S3 key is built from it',
-    ConfigFault.NOT_A_ROOTED_PATH: 'is not absolute or ~-rooted, so it resolves against the working directory',
-    ConfigFault.NOT_A_BUCKET_NAME: 'is not a name S3 will accept for a bucket',
-}
 
 
 def join_key(prefix: str, name: str) -> str:
@@ -181,6 +145,74 @@ HOME_FORM = (
     'a ~-rooted path is written ~/x for your own home, or ~user/x for a named account. '
     '~x is neither, and names a user rather than a directory'
 )
+
+
+class FaultReporting(NamedTuple):
+    """How a refusal reports one `ConfigFault`. Every field is decided per member, with no default.
+
+    `wording` finishes the sentence that names the value.
+
+    `about_spelling` marks a fault about how a value is written rather than about what this
+    machine holds. Such a fault is reported against the configured string, because resolution
+    normalizes away the very thing a key fault names, and a bucket name resolves to nothing at
+    all. Its reader is sent to `config edit` rather than `config show`.
+
+    `form` is the line naming what the value has to look like. It is None where the fault is
+    about a file this machine lacks, and `config show` is the answer."""
+
+    wording: str
+    about_spelling: bool
+    form: str | None
+
+
+# One row per member, so a new fault is one decision in one place. The table is indexed with no
+# default, so a missing row raises at the moment a reader needs the answer, and
+# `test_every_fault_is_reported_in_full` fails until the row exists. A spelling row with no form
+# would name no remedy, and the same test refuses one.
+#
+# The rows are in the order their forms print. `NOT_A_CLEAN_KEY` and `KEY_ESCAPES_ROOT` share
+# `KEY_FORM`, which prints once.
+#
+# `ESCAPES_ROOT` is not about spelling. A path that climbs out of the anchor resolves to a real
+# directory, and where it lands is the answer. So its row carries the resolved path, and its
+# reader is sent to `config show`, which is the command that prints it.
+FAULT_REPORTING = {
+    ConfigFault.NOT_A_CLEAN_KEY: FaultReporting(
+        wording='is not written as a plain relative path, and the S3 key is built from it',
+        about_spelling=True,
+        form=KEY_FORM,
+    ),
+    ConfigFault.KEY_ESCAPES_ROOT: FaultReporting(
+        wording='climbs out of the directory paths resolve from, and the S3 key is built from it',
+        about_spelling=True,
+        form=KEY_FORM,
+    ),
+    ConfigFault.ESCAPES_ROOT: FaultReporting(
+        wording='climbs out of the directory paths resolve from',
+        about_spelling=False,
+        form=ANCHOR_FORM,
+    ),
+    ConfigFault.NOT_A_ROOTED_PATH: FaultReporting(
+        wording='is not absolute or ~-rooted, so it resolves against the working directory',
+        about_spelling=True,
+        form=ROOT_FORM,
+    ),
+    ConfigFault.NOT_A_BUCKET_NAME: FaultReporting(
+        wording='is not a name S3 will accept for a bucket',
+        about_spelling=True,
+        form=BUCKET_FORM,
+    ),
+    ConfigFault.UNRESOLVABLE_HOME: FaultReporting(
+        wording='names a home directory this machine cannot resolve',
+        about_spelling=True,
+        form=HOME_FORM,
+    ),
+    ConfigFault.ABSENT: FaultReporting(wording='not found', about_spelling=False, form=None),
+    ConfigFault.EXPECTED_DIRECTORY: FaultReporting(wording='is a file, not a directory', about_spelling=False, form=None),
+    ConfigFault.EXPECTED_FILE: FaultReporting(wording='is a directory, not a file', about_spelling=False, form=None),
+    ConfigFault.EMPTY_DIRECTORY: FaultReporting(wording='holds nothing to deploy', about_spelling=False, form=None),
+    ConfigFault.DECLARES_NOTHING: FaultReporting(wording='names nothing to deploy', about_spelling=False, form=None),
+}
 
 
 class DeclaresValues:
@@ -307,7 +339,7 @@ class UnusableValue(NamedTuple):
         What they wrote for a spelling fault, the resolved path otherwise. A spelling fault is
         quoted because the characters are the finding: bare, a trailing slash sits at the end of
         a sentence where nothing marks it, and an empty prefix shows as nothing at all."""
-        if self.fault in SPELLING_FAULTS:
+        if FAULT_REPORTING[self.fault].about_spelling:
             return repr(self.configured)
         if self.path is not None:
             return str(self.path)
@@ -315,7 +347,7 @@ class UnusableValue(NamedTuple):
 
     def __str__(self) -> str:
         shown = self.shown
-        line = f'{self.pipeline}: {self.site.label} {FAULT_WORDING[self.fault]}'
+        line = f'{self.pipeline}: {self.site.label} {FAULT_REPORTING[self.fault].wording}'
         if shown is not None:
             line = f'{line}: {shown}'
         if self.written is not None:
@@ -487,22 +519,14 @@ def recovery_lines(problems: list[UnusableValue]) -> list[str]:
     fix an anchored directory, so one line for both tells half its readers to avoid their own
     remedy."""
     faults = {problem.fault for problem in problems}
-    lines = []
-    if faults & {ConfigFault.NOT_A_CLEAN_KEY, ConfigFault.KEY_ESCAPES_ROOT}:
-        lines.append(KEY_FORM)
-    if ConfigFault.ESCAPES_ROOT in faults:
-        lines.append(ANCHOR_FORM)
-    if ConfigFault.NOT_A_ROOTED_PATH in faults:
-        lines.append(ROOT_FORM)
-    if ConfigFault.NOT_A_BUCKET_NAME in faults:
-        lines.append(BUCKET_FORM)
-    if ConfigFault.UNRESOLVABLE_HOME in faults:
-        lines.append(HOME_FORM)
-    if faults & SPELLING_FAULTS:
+    present = [row for fault, row in FAULT_REPORTING.items() if fault in faults]
+    # Two faults share a form, and the reader needs it once.
+    lines = list(dict.fromkeys(row.form for row in present if row.form is not None))
+    if any(row.about_spelling for row in present):
         # A form says what the value has to look like and no more. Every other fault names a
         # command, so a spelling-only run would be the one that names none.
         lines.append(EDIT_CONFIG)
-    if faults - SPELLING_FAULTS:
+    if any(not row.about_spelling for row in present):
         lines.append(SHOW_RESOLVED)
     return lines
 

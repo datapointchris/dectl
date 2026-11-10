@@ -43,7 +43,7 @@ from dectl.output import info
 from dectl.output import success
 from dectl.payloads import read_payload
 from dectl.session import make_session
-from dectl.values import FAULT_WORDING
+from dectl.values import FAULT_REPORTING
 from dectl.values import SHOW_RESOLVED
 from dectl.values import PathKind
 from dectl.values import deployable_files
@@ -72,7 +72,7 @@ def zip_lambda(source: Path) -> Path:
     altitude the config key is not known."""
     fault = path_fault(source, PathKind.NON_EMPTY_DIRECTORY)
     if fault:
-        error(f'lambda source_dir {FAULT_WORDING[fault]}: {source}')
+        error(f'lambda source_dir {FAULT_REPORTING[fault].wording}: {source}')
         error(SHOW_RESOLVED)
         raise typer.Exit(1)
 
