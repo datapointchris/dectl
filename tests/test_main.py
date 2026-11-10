@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 import typer
 from pydantic import ValidationError
+from rich.text import Text
 
 import dectl.main
 from dectl.commands.glue import make_glue_app
@@ -79,14 +80,15 @@ def test_root_help_completion_and_suggestions_offer_every_pipeline(monkeypatch):
     monkeypatch.setattr(dectl.main, 'cfg', load_config())
     monkeypatch.setattr(dectl.main, 'CONFIG_ERROR', None)
 
-    helped = runner.invoke(app, ['--help'])
+    # Typer forces colour when CI variables such as GITHUB_ACTIONS are set, so read plain text.
+    helped = Text.from_ansi(runner.invoke(app, ['--help']).stdout).plain
     completion = {'_DECTL_COMPLETE': 'complete_bash', 'COMP_WORDS': 'dectl ', 'COMP_CWORD': '1'}
     completed = runner.invoke(app, [], env=completion, prog_name='dectl')
-    mistyped = runner.invoke(app, ['salse', 'list'])
+    mistyped = Text.from_ansi(runner.invoke(app, ['salse', 'list']).stderr).plain
 
-    assert [line.split()[1] for line in helped.stdout.splitlines() if 'pipeline —' in line] == ['finance', 'sales']
+    assert [line.split()[1] for line in helped.splitlines() if 'pipeline —' in line] == ['finance', 'sales']
     assert {'finance', 'sales'} <= set(completed.stdout.split())
-    assert "Did you mean 'sales'?" in mistyped.stderr
+    assert "Did you mean 'sales'?" in mistyped
 
 
 def test_the_reserved_pipeline_names_are_the_root_commands():
