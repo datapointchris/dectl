@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 import typer
+from botocore.exceptions import ClientError
 
 from dectl import prompt
 from dectl.commands.glue import apply_glue_job_update
@@ -12,7 +13,7 @@ from dectl.commands.glue import follow_glue_run
 from dectl.commands.glue import job_definition_changes
 from dectl.commands.glue import make_glue_app
 from dectl.commands.glue import resolve_scripts
-from dectl.commands.glue import upload_scripts
+from dectl.commands.glue import upload_scripts_and_update_job
 from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
 from dectl.config import PipelineConfig
@@ -35,6 +36,7 @@ class FakeGlueClient:
     def __init__(self, existing_job):
         self.existing_job = existing_job
         self.captured_update = None
+        self.refusal: Exception | None = None
 
     def get_job(self, JobName):
         # A fresh copy per read, as boto3 parses one per response, so a second read is never the
@@ -45,6 +47,8 @@ class FakeGlueClient:
         worker_keys = sorted(key for key in ('WorkerType', 'NumberOfWorkers') if key in JobUpdate)
         if worker_keys and 'MaxCapacity' in JobUpdate:
             raise AssertionError(f'UpdateJob carries MaxCapacity beside {" and ".join(worker_keys)}; Glue refuses a job sized both ways')
+        if self.refusal is not None:
+            raise self.refusal
         self.captured_update = JobUpdate
         return {}
 
@@ -108,7 +112,7 @@ def test_unset_connections_leaves_the_jobs_own_connections_alone():
 
 def test_worker_sizing_on_a_python_shell_job_is_rejected():
     # The mirror of the case above, and the same cost it exists to avoid: UpdateJob refuses the
-    # pair on a pythonshell command, after upload_scripts has already run.
+    # pair on a pythonshell command, naming neither the job nor the config key.
     glue = FakeGlueClient(existing_job={'Command': {'Name': 'pythonshell'}, 'MaxCapacity': 1.0})
 
     with pytest.raises(typer.Exit):
@@ -405,7 +409,7 @@ def test_scripts_upload_from_the_repo_rather_than_the_working_directory(tmp_path
     job = pipeline.glue_jobs['j']
     s3 = FakeS3Client()
 
-    upload_scripts(FakeS3Session(s3), job, resolve_scripts('proj', pipeline, 'j'))
+    upload_scripts_and_update_job(FakeS3Session(s3), job, resolve_scripts('proj', pipeline, 'j'), None)
 
     assert s3.uploads == [(str(tmp_path / 'jobs' / 'copy.py'), 'salesdata-scripts', 'scripts/jobs/copy.py')]
 
@@ -522,10 +526,10 @@ class FakeDeploySession:
         return self.s3 if name == 's3' else self.glue
 
 
-def deploy_config(root, max_capacity=None) -> DectlConfig:
+def deploy_config(root, max_capacity=None, scripts=('copy.py',)) -> DectlConfig:
     # A real bucket name: FakeS3Client applies S3's own naming rule, and every deploy test here
     # but one refuses before reaching the upload, so a rejected name would go unnoticed.
-    job = {'name': 'my-job', 'script_bucket': 'salesdata-scripts', 'scripts': ['copy.py'], 'role': 'new-role'}
+    job = {'name': 'my-job', 'script_bucket': 'salesdata-scripts', 'scripts': list(scripts), 'role': 'new-role'}
     if max_capacity is not None:
         job['max_capacity'] = max_capacity
     return DectlConfig.model_validate(
@@ -566,6 +570,26 @@ def test_a_job_changed_while_the_deploy_waited_on_its_prompt_is_not_overwritten(
     assert result.exit_code == 1
     assert session.glue.captured_update is None
     assert 'changed in Glue after dectl read it (Timeout)' in ' '.join(result.stderr.split())
+
+
+def test_a_refused_update_leaves_the_job_on_the_scripts_it_ran(monkeypatch, tmp_path):
+    """UpdateJob can refuse a value only Glue checks. Overwriting the script the live job reads
+    before it does leaves the job running new code under the old definition."""
+    (tmp_path / 'copy.py').write_text('x')
+    (tmp_path / 'helpers.py').write_text('y')
+    config = deploy_config(tmp_path, scripts=('copy.py', 'helpers.py'))
+    live_script = {'Name': 'pythonshell', 'ScriptLocation': 's3://salesdata-scripts/scripts/copy.py'}
+    session = FakeDeploySession({'Name': 'my-job', 'Role': 'old-role', 'Command': live_script})
+    refusal = {
+        'Error': {'Code': 'InvalidInputException', 'Message': 'Max Capacity should be between 0.0 and 1.0 if present for pythonshell.'}
+    }
+    session.glue.refusal = ClientError(refusal, 'UpdateJob')
+    monkeypatch.setattr('dectl.commands.glue.make_session', lambda _config: session)
+
+    with pytest.raises(ClientError):
+        runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy', '--yes'])
+
+    assert [key for _, _, key in session.s3.uploads] == ['scripts/helpers.py']
 
 
 def test_plan_refuses_a_missing_script_rather_than_reporting_a_clean_diff(monkeypatch, tmp_path):

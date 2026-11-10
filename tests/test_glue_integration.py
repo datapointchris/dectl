@@ -23,9 +23,14 @@ import pytest
 
 from dectl.commands.glue import apply_glue_job_update
 from dectl.commands.glue import confirm_glue_job_update
+from dectl.commands.glue import make_glue_app
+from dectl.config import DectlConfig
 from dectl.config import GlueJobConfig
+from tests.conftest import RefusalRunner
 
 pytestmark = pytest.mark.integration
+
+runner = RefusalRunner()
 
 
 def create_job_with_role_retry(glue, **create_kwargs):
@@ -221,6 +226,70 @@ def test_a_python_shell_job_takes_max_capacity_and_a_python_version(session, glu
         live = session.client('glue').get_job(JobName=job_name)['Job']
         assert live['MaxCapacity'] == SHELL_FIELD_SPEC['max_capacity']
         assert live['Command']['PythonVersion'] == SHELL_FIELD_SPEC['python_version']
+
+
+@contextlib.contextmanager
+def live_bucket(session):
+    """A throwaway bucket, emptied and deleted whatever the test does."""
+    s3 = session.client('s3')
+    bucket = f'dectl-it-{uuid.uuid4().hex[:8]}'
+    create_kwargs: dict = {'Bucket': bucket}
+    if session.region_name != 'us-east-1':
+        create_kwargs['CreateBucketConfiguration'] = {'LocationConstraint': session.region_name}
+    s3.create_bucket(**create_kwargs)
+    try:
+        yield bucket
+    finally:
+        for listed in s3.list_objects_v2(Bucket=bucket).get('Contents', []):
+            s3.delete_object(Bucket=bucket, Key=listed['Key'])
+        s3.delete_bucket(Bucket=bucket)
+
+
+def test_a_refused_update_job_leaves_the_job_on_the_script_it_ran(session, glue_role_arn, tmp_path, monkeypatch):
+    """Glue refuses a Python shell job sized above one DPU, and nothing in dectl refuses it first.
+
+    That refusal arrives after the deploy has started writing. Only the service says which values
+    it refuses and that the refusal changes nothing, so this drives a real one. The second deploy,
+    with a size Glue takes, shows the overwrite still happens once the update is accepted."""
+    s3 = session.client('s3')
+    glue = session.client('glue')
+    with live_bucket(session) as bucket:
+        s3.put_object(Bucket=bucket, Key='scripts/main.py', Body=b'ran before')
+        command = {'Name': 'pythonshell', 'PythonVersion': '3.9', 'ScriptLocation': f's3://{bucket}/scripts/main.py'}
+        with live_job(session, Role=glue_role_arn, Command=command, MaxCapacity=0.0625) as job_name:
+            (tmp_path / 'main.py').write_text('deployed')
+            (tmp_path / 'helpers.py').write_text('helper')
+
+            def deploy(max_capacity: float):
+                job = {
+                    'name': job_name,
+                    'script_bucket': bucket,
+                    'scripts': ['main.py', 'helpers.py'],
+                    'role': glue_role_arn,
+                    'max_capacity': max_capacity,
+                }
+                config = DectlConfig.model_validate(
+                    {
+                        'defaults': {'account_id': '1'},
+                        'pipelines': {'proj': {'resolve_paths_from': str(tmp_path), 'glue_jobs': {'job': job}}},
+                    }
+                )
+                return runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['job', 'deploy', '--yes'])
+
+            monkeypatch.setattr('dectl.commands.glue.make_session', lambda _config: session)
+
+            with pytest.raises(botocore.exceptions.ClientError, match='InvalidInputException'):
+                deploy(max_capacity=2.0)
+
+            assert s3.get_object(Bucket=bucket, Key='scripts/main.py')['Body'].read() == b'ran before'
+            assert glue.get_job(JobName=job_name)['Job']['MaxCapacity'] == 0.0625
+
+            assert deploy(max_capacity=1.0).exit_code == 0
+
+            assert s3.get_object(Bucket=bucket, Key='scripts/main.py')['Body'].read() == b'deployed'
+            live = glue.get_job(JobName=job_name)['Job']
+            assert live['DefaultArguments']['--extra-py-files'] == f's3://{bucket}/scripts/helpers.py'
+            assert s3.get_object(Bucket=bucket, Key='scripts/helpers.py')['Body'].read() == b'helper'
 
 
 def test_migrating_a_dpu_sized_job_to_worker_sizing_is_accepted(session, glue_role_arn):

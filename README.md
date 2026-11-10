@@ -165,8 +165,11 @@ one and confirms before applying it. `deploy --yes` skips the prompt. Just befor
 the job again. If anything changed since the diff was shown, such as a Terraform apply while the
 prompt waited, it sends nothing and says which fields moved. Deploy again to see the new diff.
 
-`deploy` runs every check that can refuse before it writes anything. A refusal after the upload
-would leave the job pointing at code you were just told not to deploy.
+`deploy` runs every check that can refuse before it writes anything. Glue can still refuse the
+definition update itself, for a value only Glue checks. So a deploy overwrites the scripts the job
+runs only after Glue accepts the update, and a refused update leaves the job running what it ran
+before. A new script, at a key the job does not read yet, is uploaded before the update that names
+it.
 
 `run --follow` stops when the run ends, and exits non-zero when the run failed.
 

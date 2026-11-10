@@ -218,8 +218,12 @@ rendered job. `configured_uris` is handed a raw one, because the help panel is b
 environment's own name carries the token.
 
 `deploy` runs everything that can refuse before it writes anything: `resolve_scripts`, then
-`confirm_glue_job_update`, then the upload, then `apply_glue_job_update`. A refusal after the
-upload leaves `ScriptLocation` pointing at code the user was just told not to deploy. A config naming
+`confirm_glue_job_update`. `UpdateJob` can still refuse a value only Glue checks, so
+`upload_scripts_and_update_job` overwrites an object the live job reads only once `UpdateJob`
+has accepted the update. A script at a key the job does not read yet goes up first, so the
+update never names a missing object. A refused update then leaves the job on the scripts it ran
+before. The keys are the ones the config spells rather than one per deploy, because Terraform's
+`script_location` names them, and a key per deploy would drift from it on every code push. A config naming
 both sizing models, or half the worker pair, is refused by `GlueJobConfig` itself. That is a fact
 about the config alone, so it is a field validator rather than one of `values.py`'s faults.
 

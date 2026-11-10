@@ -383,7 +383,7 @@ class GlueJobConfig(ResourceModel):
     # Python shell jobs accept 0.0625 (1 GB) or 1 (16 GB); Spark jobs use WorkerType instead.
     max_capacity: float | None = None
     # The two halves of Spark sizing. Glue takes them together or not at all, so a job naming one
-    # and not the other is refused below rather than at UpdateJob, which lands after the upload.
+    # and not the other is refused below rather than at UpdateJob, which a deploy reaches only after its prompt.
     worker_type: str | None = None
     number_of_workers: int | None = Field(default=None, ge=1)
     # Left as plain strings because AWS owns both vocabularies and adds to them. An enum here

@@ -101,54 +101,6 @@ def resolve_scripts(pipeline_name: str, pipeline: PipelineConfig, alias: str) ->
     return [ResolvedScript(name, resolve_from_root(pipeline, name)) for name in names]
 
 
-def upload_scripts(session: 'boto3.Session', glue_job: GlueJobConfig, sources: list[ResolvedScript]) -> None:
-    """Upload each resolved script under the key its config string spells.
-
-    Every path is checked before the first byte goes anywhere: a partial upload leaves the job's
-    scripts split across two revisions, and the run that follows mixes them. The caller normally
-    checked them too, and repeating it here is what keeps that promise a property of this
-    function rather than of whoever calls it.
-
-    The set uploaded has to be the set the definition names, and taking `sources` from the
-    caller makes that breakable: a set omitting `scripts[0]` whose every path exists uploads
-    cleanly while `build_job_update` emits a `ScriptLocation` nothing wrote, which is what
-    `script_uri` exists to prevent.
-
-    `glue_job` arrives rendered and nothing here renders it again. Both sides of the comparison
-    are then one substitution deep — `ResolvedScript.name` and the job's own `scripts` — and
-    the destination is the one `build_job_update` names. Rendering here as well was live: an
-    environment whose own name carries the token wrote the object under a twice-substituted
-    bucket while `ScriptLocation` named the once-substituted one, and a script name carrying
-    the token failed the comparison below against itself."""
-    named = {source.name for source in sources}
-    defined = set(glue_job.scripts)
-    if named != defined:
-        error(f'{glue_job.name}: asked to upload {sorted(named)}, but the job definition names {sorted(defined)}')
-        raise typer.Exit(1)
-
-    missing = [source.path for source in sources if not source.path.is_file()]
-    if missing:
-        # Not the shared diagnosis, and deliberately worded so it does not read as one: the
-        # caller already reported every unusable path by its config key, so reaching here means
-        # a file that was present when the deploy started is not present now.
-        for path in missing:
-            error(f'script disappeared after the deploy checked it: {path}')
-        raise typer.Exit(1)
-
-    s3 = session.client('s3')
-    for source in sources:
-        # The key through `join_key` and the report through `script_uri`, so this call and
-        # `ScriptLocation` agree by construction. Joining the prefix here by hand would make
-        # them two renderings of one key, and the object then lands where the job definition
-        # does not name.
-        s3.upload_file(
-            Filename=str(source.path),
-            Bucket=glue_job.script_bucket,
-            Key=join_key(glue_job.script_prefix, source.name),
-        )
-        success(f'uploaded {source.path} -> {script_uri(glue_job, source.name)}')
-
-
 class JobUpdate(NamedTuple):
     """The definition to send, and the keys dropped from it that are not changes.
 
@@ -186,7 +138,7 @@ def refuse_sizing_the_job_type_cannot_take(existing: dict, glue_job: GlueJobConf
     """Refuse a sizing model the live job's type will not accept, before anything is uploaded.
 
     Both directions reach `UpdateJob` as the same failure — a rejection naming neither the job
-    nor the config key, arriving after `upload_scripts` has run. The config grammar does not
+    nor the config key, arriving after the confirmation and any new script's upload. The config grammar does not
     force either refusal, which is worth stating because it looks like it does: naming
     `max_capacity` is exactly as expressive as naming `worker_type`, and the symmetric
     implementation would pop `WORKER_KEYS` the way `build_job_update` already pops `MaxCapacity`.
@@ -255,7 +207,7 @@ def build_job_update(existing: dict, glue_job: GlueJobConfig) -> JobUpdate:
 
     # Read off the merged update rather than off `existing`, so a job being migrated to worker
     # sizing drops the DPU value it is replacing. Reading the live definition instead would send
-    # both models and let Glue refuse the deploy after the upload.
+    # both models, and Glue would refuse the deploy.
     worker_based = any(key in job_update for key in WORKER_KEYS)
     # Read off `existing`, and the opposite end from the line above. Which MaxCapacity Glue
     # derived is a fact about the live job, so asking the config gets it wrong — `JobUpdate`
@@ -400,6 +352,79 @@ def apply_glue_job_update(session: 'boto3.Session', glue_job: GlueJobConfig, upd
     success(f'updated job {glue_job.name}')
 
 
+def scripts_the_job_reads(definition: dict) -> frozenset[str]:
+    """The S3 URIs a job definition runs: its `ScriptLocation` and each of its `--extra-py-files`."""
+    extra = definition.get('DefaultArguments', {}).get('--extra-py-files', '')
+    return frozenset([definition.get('Command', {}).get('ScriptLocation', ''), *extra.split(',')]) - {''}
+
+
+def upload_scripts_and_update_job(
+    session: 'boto3.Session', glue_job: GlueJobConfig, sources: list[ResolvedScript], update: JobUpdate | None
+) -> None:
+    """Upload each resolved script under the key its config string spells, and send `update` if there is one.
+
+    No object the live job reads is overwritten until UpdateJob has accepted the update, so a
+    refused update leaves the job on the scripts it ran before rather than pairing them with the
+    old definition. A script at a key the live job does not read goes up first, because nothing
+    runs it yet and the update may name it. The keys stay the ones the config spells rather than
+    one per deploy, because Terraform's `script_location` names them too. So a run starting after
+    UpdateJob and before the last overwrite can still pair the new definition with an old script.
+
+    Every path is checked before the first byte goes anywhere: a partial upload leaves the job's
+    scripts split across two revisions, and the run that follows mixes them. The caller normally
+    checked them too, and repeating it here is what keeps that promise a property of this
+    function rather than of whoever calls it.
+
+    The set uploaded has to be the set the definition names, and taking `sources` from the
+    caller makes that breakable: a set omitting `scripts[0]` whose every path exists uploads
+    cleanly while `build_job_update` emits a `ScriptLocation` nothing wrote, which is what
+    `script_uri` exists to prevent.
+
+    `glue_job` arrives rendered and nothing here renders it again. Both sides of the comparison
+    are then one substitution deep — `ResolvedScript.name` and the job's own `scripts` — and
+    the destination is the one `build_job_update` names. Rendering here as well was live: an
+    environment whose own name carries the token wrote the object under a twice-substituted
+    bucket while `ScriptLocation` named the once-substituted one, and a script name carrying
+    the token failed the comparison below against itself."""
+    named = {source.name for source in sources}
+    defined = set(glue_job.scripts)
+    if named != defined:
+        error(f'{glue_job.name}: asked to upload {sorted(named)}, but the job definition names {sorted(defined)}')
+        raise typer.Exit(1)
+
+    missing = [source.path for source in sources if not source.path.is_file()]
+    if missing:
+        # Not the shared diagnosis, and deliberately worded so it does not read as one: the
+        # caller already reported every unusable path by its config key, so reaching here means
+        # a file that was present when the deploy started is not present now.
+        for path in missing:
+            error(f'script disappeared after the deploy checked it: {path}')
+        raise typer.Exit(1)
+
+    s3 = session.client('s3')
+
+    def upload(batch: list[ResolvedScript]) -> None:
+        for source in batch:
+            # The key through `join_key` and the report through `script_uri`, so this call and
+            # `ScriptLocation` agree by construction. Joining the prefix here by hand would make
+            # them two renderings of one key, and the object then lands where the job definition
+            # does not name.
+            s3.upload_file(
+                Filename=str(source.path),
+                Bucket=glue_job.script_bucket,
+                Key=join_key(glue_job.script_prefix, source.name),
+            )
+            success(f'uploaded {source.path} -> {script_uri(glue_job, source.name)}')
+
+    if update is None:
+        upload(sources)
+        return
+    read_now = scripts_the_job_reads(update.before)
+    upload([source for source in sources if script_uri(glue_job, source.name) not in read_now])
+    apply_glue_job_update(session, glue_job, update)
+    upload([source for source in sources if script_uri(glue_job, source.name) in read_now])
+
+
 # How far before a run's recorded start to begin scanning for its log events. Glue's StartedOn
 # comes from the control plane while the events are stamped by the worker, so they are close but
 # not ordered; a few minutes of slack costs nothing against a window this narrow.
@@ -535,9 +560,7 @@ def make_glue_job_app(
         sources = resolve_scripts(pipeline_name, pipeline, alias)
         session = make_session(config)
         update = confirm_glue_job_update(session, job, assume_yes=yes)
-        upload_scripts(session, job, sources)
-        if update is not None:
-            apply_glue_job_update(session, job, update)
+        upload_scripts_and_update_job(session, job, sources, update)
 
     @job_app.command(epilog=f'Example:\n\ndectl {pipeline_name} glue {alias} run --follow')
     def run(
