@@ -39,6 +39,11 @@ FAILED_RUN_STATES = TERMINAL_RUN_STATES - {'SUCCEEDED'}
 READ_ONLY_KEYS = ('Name', 'CreatedOn', 'LastModifiedOn', 'ProfileName', 'AllocatedCapacity')
 
 
+def editable_definition(job: dict) -> dict:
+    """A GetJob definition without the keys UpdateJob rejects. A shallow copy: nested dicts are the caller's."""
+    return {key: value for key, value in job.items() if key not in READ_ONLY_KEYS}
+
+
 def script_uri(glue_job: GlueJobConfig, script: str) -> str:
     """Where one script of a rendered job lands.
 
@@ -158,10 +163,14 @@ class JobUpdate(NamedTuple):
     replacing it, and that is a change worth seeing before it is applied.
 
     What decides between the two is the live job, never the config. A config naming the worker
-    sizing a job already has has asked for nothing."""
+    sizing a job already has has asked for nothing.
+
+    `before` is the live definition the update was built from and the diff was shown against.
+    `apply_glue_job_update` reads the job again and sends nothing unless it still matches."""
 
     definition: dict
     derived: frozenset[str]
+    before: dict
 
 
 DEFINITION_FIELDS = GlueJobConfig.DEFINITION_FIELDS
@@ -215,14 +224,14 @@ def build_job_update(existing: dict, glue_job: GlueJobConfig) -> JobUpdate:
     existing definition and overrides only what dectl manages. Otherwise every deploy silently
     resets omitted fields (Timeout, GlueVersion, WorkerType, MaxRetries, ...) to their defaults.
 
-    Copy `Command` and `ExecutionProperty` before writing into them. The comprehension below is
-    a shallow copy, so every nested dict in it is the caller's own object, and writing through
+    Copy `Command` and `ExecutionProperty` before writing into them. `editable_definition` is a
+    shallow copy, so every nested dict in it is the caller's own object, and writing through
     one edits the before-image that `job_definition_changes` diffs against. The diff then
     compares that object with itself and reports no change — so a definition whose only
     difference is inside a nested dict is read as converged, `UpdateJob` is skipped, and the
     scripts land at a location the live job is not pointing at."""
     refuse_sizing_the_job_type_cannot_take(existing, glue_job)
-    job_update = {key: value for key, value in existing.items() if key not in READ_ONLY_KEYS}
+    job_update = editable_definition(existing)
 
     for config_field, definition_key in DEFINITION_FIELDS.items():
         configured = getattr(glue_job, config_field)
@@ -280,7 +289,7 @@ def build_job_update(existing: dict, glue_job: GlueJobConfig) -> JobUpdate:
         default_args[arg_key] = value
     job_update['DefaultArguments'] = default_args
 
-    return JobUpdate(job_update, frozenset(derived))
+    return JobUpdate(job_update, frozenset(derived), existing)
 
 
 def render_value(value) -> str:
@@ -333,7 +342,7 @@ def render_job_changes(job_name: str, changes: list[tuple[str, str, str]]) -> No
     console.print(table)
 
 
-def diff_glue_job_update(session: 'boto3.Session', glue_job: GlueJobConfig) -> dict | None:
+def diff_glue_job_update(session: 'boto3.Session', glue_job: GlueJobConfig) -> JobUpdate | None:
     """Build the definition update and print what it changes, or None when nothing dectl manages differs.
 
     Reads the live job and writes nothing. Callers run `resolve_scripts` first, so a rehearsal
@@ -348,10 +357,10 @@ def diff_glue_job_update(session: 'boto3.Session', glue_job: GlueJobConfig) -> d
         return None
 
     render_job_changes(glue_job.name, changes)
-    return update.definition
+    return update
 
 
-def confirm_glue_job_update(session: 'boto3.Session', glue_job: GlueJobConfig, assume_yes: bool = False) -> dict | None:
+def confirm_glue_job_update(session: 'boto3.Session', glue_job: GlueJobConfig, assume_yes: bool = False) -> JobUpdate | None:
     """Everything about a definition update that can refuse: build it, show it, confirm it.
 
     Terraform owns these jobs once a pipeline is established, so an UpdateJob that silently
@@ -369,8 +378,25 @@ def confirm_glue_job_update(session: 'boto3.Session', glue_job: GlueJobConfig, a
     return job_update
 
 
-def apply_glue_job_update(session: 'boto3.Session', glue_job: GlueJobConfig, job_update: dict) -> None:
-    session.client('glue').update_job(JobName=glue_job.name, JobUpdate=job_update)
+def apply_glue_job_update(session: 'boto3.Session', glue_job: GlueJobConfig, update: JobUpdate) -> None:
+    """Send the update, unless the job changed in Glue since the read it was built from.
+
+    UpdateJob replaces the whole definition and takes no revision, so an update built from a read
+    taken before the prompt would silently revert whatever another writer, such as Terraform, set
+    while the diff was being read. Reading again here narrows that to one round trip, which is as
+    far as Glue lets a caller narrow it. `READ_ONLY_KEYS` are left out of the comparison, because a
+    write that changed nothing else moves `LastModifiedOn` and leaves the update still correct."""
+    glue = session.client('glue')
+    current = editable_definition(glue.get_job(JobName=glue_job.name)['Job'])
+    confirmed = editable_definition(update.before)
+    if current != confirmed:
+        changed = sorted(key for key in current.keys() | confirmed.keys() if current.get(key) != confirmed.get(key))
+        error(
+            f'{glue_job.name} changed in Glue after dectl read it ({", ".join(changed)}), and the definition '
+            'shown would revert that, so it was not sent. Run deploy again to see the diff against the job as it is now.'
+        )
+        raise typer.Exit(1)
+    glue.update_job(JobName=glue_job.name, JobUpdate=update.definition)
     success(f'updated job {glue_job.name}')
 
 
@@ -508,10 +534,10 @@ def make_glue_job_app(
         # Resolve and check before anything reaches AWS, so plan refuses what deploy refuses.
         sources = resolve_scripts(pipeline_name, pipeline, alias)
         session = make_session(config)
-        job_update = confirm_glue_job_update(session, job, assume_yes=yes)
+        update = confirm_glue_job_update(session, job, assume_yes=yes)
         upload_scripts(session, job, sources)
-        if job_update is not None:
-            apply_glue_job_update(session, job, job_update)
+        if update is not None:
+            apply_glue_job_update(session, job, update)
 
     @job_app.command(epilog=f'Example:\n\ndectl {pipeline_name} glue {alias} run --follow')
     def run(

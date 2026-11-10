@@ -161,7 +161,9 @@ A deploy is two writes with different owners. The script upload is always yours.
 is Terraform's once a pipeline is established. dectl keeps write access to it for the stretch before
 Terraform exists, when changing a worker type should not take a commit, a build and an apply.
 Because Terraform may own the definition, `deploy` diffs its computed definition against the live
-one and confirms before applying it. `deploy --yes` skips the prompt.
+one and confirms before applying it. `deploy --yes` skips the prompt. Just before applying, it reads
+the job again. If anything changed since the diff was shown, such as a Terraform apply while the
+prompt waited, it sends nothing and says which fields moved. Deploy again to see the new diff.
 
 `deploy` runs every check that can refuse before it writes anything. A refusal after the upload
 would leave the job pointing at code you were just told not to deploy.

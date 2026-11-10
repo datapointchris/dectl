@@ -297,6 +297,10 @@ exception: it is a few milliseconds, and the root group catches its errors.
   `UpdateJob` when nothing differs, and otherwise renders the field-level diff and confirms.
   `plan` shows it through `diff_glue_job_update` and uploads nothing; `deploy --yes` skips the
   prompt. The diff also reports keys dectl *drops*.
+- **`apply_glue_job_update` reads the job again and sends nothing if it moved.** `UpdateJob`
+  takes no revision, so an update built from the read before an open-ended prompt would revert
+  whatever Terraform set meanwhile. `JobUpdate.before` is that read, compared without
+  `READ_ONLY_KEYS`. Glue offers no conditional write, so one round trip of exposure remains.
 - **`DEFINITION_FIELDS` and `NESTED_DEFINITION_FIELDS` are the declared surface, not everything a
   deploy writes.** `rg -n "job_update\['" src/dectl/commands/glue.py` returns the four written by
   hand (`Role`, `Command`, `Connections`, `DefaultArguments`). An omitted declared key means

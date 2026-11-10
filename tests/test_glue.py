@@ -1,3 +1,4 @@
+import copy
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,9 @@ class FakeGlueClient:
         self.captured_update = None
 
     def get_job(self, JobName):
-        return {'Job': self.existing_job}
+        # A fresh copy per read, as boto3 parses one per response, so a second read is never the
+        # first one's object.
+        return {'Job': copy.deepcopy(self.existing_job)}
 
     def update_job(self, JobName, JobUpdate):
         worker_keys = sorted(key for key in ('WorkerType', 'NumberOfWorkers') if key in JobUpdate)
@@ -543,6 +546,26 @@ def test_a_refused_definition_change_uploads_nothing(monkeypatch, tmp_path):
     assert result.exit_code == 1
     assert session.s3.uploads == []
     assert session.glue.captured_update is None
+
+
+def test_a_job_changed_while_the_deploy_waited_on_its_prompt_is_not_overwritten(monkeypatch, tmp_path):
+    """UpdateJob replaces the whole definition, so one built before the prompt reverts every field
+    another writer set while the diff was read, and succeeds without a word."""
+    (tmp_path / 'copy.py').write_text('x')
+    config = deploy_config(tmp_path)
+    session = FakeDeploySession({'Name': 'my-job', 'Role': 'old-role', 'Timeout': 60})
+
+    def terraform_applies_during_the_prompt(_question):
+        session.glue.existing_job = {**session.glue.existing_job, 'Timeout': 120}
+
+    monkeypatch.setattr('dectl.commands.glue.confirm_or_exit', terraform_applies_during_the_prompt)
+    monkeypatch.setattr('dectl.commands.glue.make_session', lambda _config: session)
+
+    result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy'])
+
+    assert result.exit_code == 1
+    assert session.glue.captured_update is None
+    assert 'changed in Glue after dectl read it (Timeout)' in ' '.join(result.stderr.split())
 
 
 def test_plan_refuses_a_missing_script_rather_than_reporting_a_clean_diff(monkeypatch, tmp_path):
