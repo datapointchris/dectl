@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 from dectl.commands import search as search_mod
 
@@ -8,10 +9,10 @@ def test_run_search_json_emits_only_matching_services(monkeypatch, capsys):
     monkeypatch.setattr(
         search_mod,
         'search_service',
-        lambda session, keyword, service, region: [[f'{keyword}-{service}']] if service == 's3' else [],
+        lambda client, keyword, service: [[f'{keyword}-{service}']] if service == 's3' else [],
     )
 
-    search_mod.run_search(session=None, keyword='found', region='us-east-2', as_json=True)
+    search_mod.run_search(session=SimpleNamespace(client=lambda *_args, **_kwargs: None), keyword='found', region='us-east-2', as_json=True)
 
     data = json.loads(capsys.readouterr().out)
     assert data['keyword'] == 'found'
