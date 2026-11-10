@@ -295,6 +295,32 @@ def test_tail_log_groups_interleaves_sources_by_timestamp():
     assert output.index('bravo-msg') < output.index('alpha-msg')
 
 
+def test_tail_log_groups_names_a_group_that_does_not_exist_once(monkeypatch):
+    # A misnamed source otherwise reads exactly like a quiet one. Following polls every group
+    # again on each pass, and the group is named on the first of them only.
+    class TailStopped(Exception):
+        pass
+
+    passes = iter(range(2))
+
+    def sleep(_seconds):
+        if next(passes, None) is None:
+            raise TailStopped
+
+    reported: list[str] = []
+    monkeypatch.setattr('dectl.logs.time.sleep', sleep)
+    monkeypatch.setattr('dectl.logs.info', reported.append)
+    client = FakeCloudWatchLogs({}, missing_groups=('/aws/lambda/gone',))
+    sources = [('svc-a ', '/aws/lambda/a'), ('svc-gone ', '/aws/lambda/gone')]
+
+    with console.capture(), pytest.raises(TailStopped):
+        tail_log_groups(client, sources, follow=True)
+
+    assert len(client.filter_calls) == 2 * 3
+    assert len(reported) == 1
+    assert '/aws/lambda/gone' in reported[0]
+
+
 def test_render_event_folds_the_opaque_durable_ids_out_of_a_scoped_record():
     # The two operation ids identify an operation to the service and are unreadable; the execution
     # ARN is the filter this tail already applied. requestId stays, because one execution spans

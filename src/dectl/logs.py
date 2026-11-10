@@ -297,15 +297,22 @@ def tail_log_groups(logs_client, sources: list[tuple[str, str]], follow: bool = 
 
     sources is a list of (prefix, log_group). Each poll fetches new events from every group,
     merges them, and renders in timestamp order so the cross-source causal sequence (lambda A
-    fires -> state machine transitions -> lambda B fires) reads top to bottom."""
+    fires -> state machine transitions -> lambda B fires) reads top to bottom.
+
+    A group that does not exist is said once, because otherwise a misnamed source reads exactly
+    like a quiet one. Polling continues, so a group created mid-tail starts streaming."""
     now = int(time.time() * 1000)
     cursors = [(prefix, LogGroupCursor(group, start_time=now)) for prefix, group in sources]
+    reported_missing: set[str] = set()
 
     while True:
         batch = []
         for prefix, cursor in cursors:
             for event in cursor.poll(logs_client):
                 batch.append((event['timestamp'], prefix, event['message']))
+            if cursor.missing and cursor.log_group not in reported_missing:
+                reported_missing.add(cursor.log_group)
+                info(f'log group {cursor.log_group} does not exist')
         render_merged(batch)
 
         if not follow:
@@ -418,8 +425,12 @@ def tail_lambda_logs(
             start_time = int(time.time() * 1000)
 
     cursor = LogGroupCursor(log_group, start_time=start_time, filterPattern=filter_pattern, endTime=end_time)
+    reported_missing = False
     while True:
         new_events = cursor.poll(logs_client)
+        if cursor.missing and not reported_missing:
+            reported_missing = True
+            info(f'log group {log_group} does not exist')
         for event in new_events:
             render_event(event['message'], prefix='', hide_keys=hide_keys)
 
