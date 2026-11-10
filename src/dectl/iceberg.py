@@ -17,6 +17,7 @@ import datetime as dt
 import gzip
 import json
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Any
 
 import typer
@@ -100,10 +101,29 @@ class TableMetadata:
     def refs(self) -> dict[str, dict]:
         return self.document.get('refs') or {}
 
+    @cached_property
+    def snapshots_by_id(self) -> dict[int | None, dict]:
+        """Every snapshot under its id, indexed once per document.
+
+        `history`, `branches` and `diff` look a snapshot up for each row they print, and a table
+        holds tens of thousands, so a scan per lookup made each of them quadratic."""
+        indexed: dict[int | None, dict] = {}
+        for snapshot in self.snapshots:
+            indexed.setdefault(snapshot.get('snapshot-id'), snapshot)
+        return indexed
+
+    @cached_property
+    def ref_names_by_snapshot(self) -> dict[int | None, list[str]]:
+        """The names of the refs pointing at each snapshot, sorted, indexed once per document."""
+        names: dict[int | None, list[str]] = {}
+        for name, ref in sorted(self.refs.items()):
+            names.setdefault(ref.get('snapshot-id'), []).append(name)
+        return names
+
     def by_id(self, snapshot_id: int | None) -> dict | None:
         if snapshot_id is None:
             return None
-        return next((s for s in self.snapshots if s.get('snapshot-id') == snapshot_id), None)
+        return self.snapshots_by_id.get(snapshot_id)
 
 
 def parse_s3_uri(uri: str) -> tuple[str, str]:
@@ -313,13 +333,12 @@ def ancestry(metadata: TableMetadata, start_id: int | None) -> list[dict]:
     lineage while staying in the log — which is what makes a rollback visible when the two are
     shown side by side. The seen-set is a cycle guard: a parent chain that loops would otherwise
     walk forever on a metadata file nobody can fix from here."""
-    by_id = {s.get('snapshot-id'): s for s in metadata.snapshots}
     chain: list[dict] = []
     seen: set = set()
     current = start_id
-    while current is not None and current in by_id and current not in seen:
+    while current is not None and current in metadata.snapshots_by_id and current not in seen:
         seen.add(current)
-        snapshot = by_id[current]
+        snapshot = metadata.snapshots_by_id[current]
         chain.append(snapshot)
         current = snapshot.get('parent-snapshot-id')
     return chain
@@ -389,8 +408,7 @@ def resolve_snapshot(metadata: TableMetadata, reference: str | None) -> dict:
 
 
 def refs_pointing_at(metadata: TableMetadata, snapshot: dict) -> list[str]:
-    snapshot_id = snapshot.get('snapshot-id')
-    return sorted(name for name, ref in metadata.refs.items() if ref.get('snapshot-id') == snapshot_id)
+    return metadata.ref_names_by_snapshot.get(snapshot.get('snapshot-id'), [])
 
 
 def snapshot_to_dict(metadata: TableMetadata, snapshot: dict) -> dict:
