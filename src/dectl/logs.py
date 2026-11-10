@@ -190,31 +190,35 @@ def render_history_event(event: dict) -> None:
         console.print(f'  [bold red]cause[/bold red]: {escape(str(details["cause"]))}')
 
 
-def tail_execution_history(sfn_client, execution_arn: str, follow: bool = True) -> None:
-    """Poll a state machine execution's history until it reaches a terminal state.
+def execution_events_after(sfn_client, execution_arn: str, newest_shown: int) -> list[dict]:
+    """The execution's events numbered above `newest_shown`, oldest first.
 
-    Event ids are stable and unique within an execution, so dedup by id; get_execution_history
-    returns the full history each call in chronological order."""
-    seen_event_ids: set = set()
+    Read newest first, and paging stops at the first page reaching an event already shown. Step
+    Functions numbers an execution's events from one in order, so a poll of a running execution
+    reads one page however long its history has grown. Reading forward from the start fetched the
+    whole history on every poll, because the last page of a forward read carries no token to
+    resume from."""
+    fresh: list[dict] = []
+    kwargs: dict = {'executionArn': execution_arn, 'reverseOrder': True}
     while True:
-        events = []
-        next_token = None
-        while True:
-            kwargs: dict = {'executionArn': execution_arn}
-            if next_token:
-                kwargs['nextToken'] = next_token
-            resp = sfn_client.get_execution_history(**kwargs)
-            events.extend(resp.get('events', []))
-            next_token = resp.get('nextToken')
-            if not next_token:
-                break
+        resp = sfn_client.get_execution_history(**kwargs)
+        page = resp.get('events', [])
+        fresh.extend(event for event in page if event['id'] > newest_shown)
+        next_token = resp.get('nextToken')
+        if not next_token or any(event['id'] <= newest_shown for event in page):
+            return sorted(fresh, key=lambda event: event['id'])
+        kwargs['nextToken'] = next_token
 
+
+def tail_execution_history(sfn_client, execution_arn: str, follow: bool = True) -> None:
+    """Print a state machine execution's history, polling until it reaches a terminal event."""
+    newest_shown = 0
+    while True:
+        events = execution_events_after(sfn_client, execution_arn, newest_shown)
         for event in events:
-            if event['id'] in seen_event_ids:
-                continue
             render_history_event(event)
-            seen_event_ids.add(event['id'])
-
+        if events:
+            newest_shown = events[-1]['id']
         if not follow or any(event.get('type') in TERMINAL_EXECUTION_EVENTS for event in events):
             break
         time.sleep(2)

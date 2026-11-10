@@ -4,6 +4,7 @@ import pytest
 import typer
 from botocore.exceptions import ClientError
 
+from dectl.durable import fetch_history
 from dectl.durable import format_duration
 from dectl.durable import listing_qualifier
 from dectl.durable import render_durable_event
@@ -14,6 +15,7 @@ from dectl.durable import tail_durable_history
 from dectl.durable import version_of
 from dectl.output import console
 from dectl.output import stderr_console
+from tests.conftest import history_page
 
 STARTED = dt.datetime(2026, 7, 30, 12)
 
@@ -27,12 +29,14 @@ class FakeLambdaClient:
     def __init__(
         self,
         executions: list[dict] | None = None,
-        history_pages: list[dict] | None = None,
+        history: list[dict] | None = None,
+        history_page_size: int | None = None,
         aliases: dict[str, str] | None = None,
         versions: list[str] | None = None,
     ) -> None:
         self.executions = executions or []
-        self.history_pages = history_pages or []
+        self.history = history or []
+        self.history_page_size = history_page_size
         self.aliases = aliases or {}
         self.versions = versions or ['$LATEST', '1']
         self.list_calls: list[dict] = []
@@ -72,10 +76,11 @@ class FakeLambdaClient:
         return {'DurableExecutionArn': kwargs['DurableExecutionArn'], 'Status': 'SUCCEEDED'}
 
     def get_durable_execution_history(self, **kwargs) -> dict:
+        """One execution's history, served the way GetDurableExecutionHistory does."""
         self.history_calls.append(kwargs)
-        if self.history_pages:
-            return self.history_pages.pop(0)
-        return {'Events': []}
+        size = kwargs.get('MaxItems') or self.history_page_size
+        page, marker = history_page(self.history, reverse=kwargs.get('ReverseOrder', False), page_size=size, token=kwargs.get('Marker'))
+        return {'Events': page} | ({'NextMarker': marker} if marker else {})
 
 
 def execution(name: str, status: str = 'SUCCEEDED', ended: dt.datetime | None = None, version: str = '7', started=STARTED) -> dict:
@@ -213,37 +218,23 @@ def test_render_execution_header_surfaces_the_failure_reason():
     assert 'step exhausted retries' in output
 
 
-def test_tail_durable_history_stops_at_a_terminal_event():
-    events = [
-        {'EventId': 1, 'EventType': 'ExecutionStarted', 'EventTimestamp': STARTED},
-        {'EventId': 2, 'EventType': 'StepSucceeded', 'EventTimestamp': STARTED, 'Name': 'work'},
-        {'EventId': 3, 'EventType': 'ExecutionSucceeded', 'EventTimestamp': STARTED},
-    ]
-    client = FakeLambdaClient(history_pages=[{'Events': events}])
+def test_tail_durable_history_prints_a_growing_execution_once_in_order(monkeypatch):
+    def event(number: int, kind: str) -> dict:
+        return {'EventId': number, 'EventType': kind, 'EventTimestamp': STARTED}
+
+    client = FakeLambdaClient(history=[event(1, 'ExecutionStarted'), event(2, 'StepStarted')], history_page_size=2)
+    appended = [[event(3, 'StepSucceeded'), event(4, 'WaitStarted')], [event(5, 'ExecutionSucceeded')]]
+    monkeypatch.setattr('dectl.durable.time.sleep', lambda _seconds: client.history.extend(appended.pop(0)))
 
     with console.capture() as capture:
         tail_durable_history(client, 'arn:exec', follow=True)
-    output = capture.get()
 
-    assert 'ExecutionSucceeded' in output
-    assert len(client.history_calls) == 1
-
-
-def test_tail_durable_history_follows_pagination():
-    client = FakeLambdaClient(
-        history_pages=[
-            {'Events': [{'EventId': 1, 'EventType': 'ExecutionStarted', 'EventTimestamp': STARTED}], 'NextMarker': 'more'},
-            {'Events': [{'EventId': 2, 'EventType': 'ExecutionSucceeded', 'EventTimestamp': STARTED}]},
-        ]
-    )
-
-    with console.capture() as capture:
-        tail_durable_history(client, 'arn:exec', follow=False)
-    output = capture.get()
-
-    assert 'ExecutionStarted' in output
-    assert 'ExecutionSucceeded' in output
-    assert client.history_calls[1]['Marker'] == 'more'
+    printed = [line.split()[1] for line in capture.get().splitlines() if line and not line.startswith(' ')]
+    assert printed == ['ExecutionStarted', 'StepStarted', 'StepSucceeded', 'WaitStarted', 'ExecutionSucceeded']
+    # Each poll reads back only to the newest event it has shown, and stops at the terminal one.
+    assert len(client.history_calls) == 4
+    # `history --json` reads forward across every page.
+    assert [found['EventId'] for found in fetch_history(client, 'arn:exec')] == [1, 2, 3, 4, 5]
 
 
 def test_resolve_execution_takes_a_unique_tail_of_the_name():

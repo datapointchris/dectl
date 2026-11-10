@@ -17,6 +17,7 @@ from dectl.logs import tail_lambda_logs
 from dectl.logs import tail_log_groups
 from dectl.output import console
 from tests.conftest import FakeCloudWatchLogs
+from tests.conftest import history_page
 from tests.conftest import log_event
 
 
@@ -40,17 +41,20 @@ DURABLE_RECORD = {
 
 
 class FakeSfnClient:
-    """Step Functions stand-in returning queued get_execution_history pages."""
+    """Step Functions stand-in serving one execution's history the way GetExecutionHistory does.
 
-    def __init__(self, history_pages: list[dict]) -> None:
-        self.history_pages = history_pages
+    `events` is the execution so far, and a test appends to it to model the execution running on."""
+
+    def __init__(self, events: list[dict], page_size: int | None = None) -> None:
+        self.events = events
+        self.page_size = page_size
         self.history_calls: list[dict] = []
 
     def get_execution_history(self, **kwargs) -> dict:
         self.history_calls.append(kwargs)
-        if self.history_pages:
-            return self.history_pages.pop(0)
-        return {'events': []}
+        size = kwargs.get('maxResults') or self.page_size
+        page, token = history_page(self.events, reverse=kwargs.get('reverseOrder', False), page_size=size, token=kwargs.get('nextToken'))
+        return {'events': page} | ({'nextToken': token} if token else {})
 
 
 def capture_history_event(event: dict) -> str:
@@ -138,22 +142,24 @@ def test_render_history_event_surfaces_error_and_cause():
     assert 'lambda blew up' in output
 
 
-def test_tail_execution_history_stops_at_terminal_event():
+def test_tail_execution_history_prints_a_growing_execution_once_in_order(monkeypatch):
     timestamp = dt.datetime(2026, 7, 13, 12)
-    events = [
-        {'id': 1, 'type': 'ExecutionStarted', 'timestamp': timestamp},
-        {'id': 2, 'type': 'TaskStateEntered', 'timestamp': timestamp, 'stateEnteredEventDetails': {'name': 'Do'}},
-        {'id': 3, 'type': 'ExecutionSucceeded', 'timestamp': timestamp},
-    ]
-    client = FakeSfnClient([{'events': events}])
+
+    def event(number: int, kind: str) -> dict:
+        return {'id': number, 'type': kind, 'timestamp': timestamp}
+
+    client = FakeSfnClient([event(1, 'ExecutionStarted'), event(2, 'TaskStateEntered')], page_size=2)
+    appended = [[event(3, 'TaskScheduled'), event(4, 'TaskSucceeded')], [event(5, 'ExecutionSucceeded')]]
+    monkeypatch.setattr('dectl.logs.time.sleep', lambda _seconds: client.events.extend(appended.pop(0)))
+
     with console.capture() as capture:
         tail_execution_history(client, 'arn:execution', follow=True)
-    output = capture.get()
 
-    assert 'ExecutionStarted' in output
-    assert 'ExecutionSucceeded' in output
-    # Terminal event reached on the first fetch, so it must not poll again.
-    assert len(client.history_calls) == 1
+    printed = [line.split()[1] for line in capture.get().splitlines() if line and not line.startswith(' ')]
+    assert printed == ['ExecutionStarted', 'TaskStateEntered', 'TaskScheduled', 'TaskSucceeded', 'ExecutionSucceeded']
+    # Each poll reads back only to the newest event it has shown, and stops at the terminal one.
+    # Reading the whole history every poll is 1 + 2 + 3 pages.
+    assert len(client.history_calls) == 4
 
 
 RUN_START = 1_700_000_000_000

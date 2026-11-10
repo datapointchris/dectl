@@ -96,6 +96,18 @@ class RefusalRunner(CliRunner):
         return super().invoke(*args, **kwargs)
 
 
+def history_page(events: list[dict], *, reverse: bool, page_size: int | None, token: str | None) -> tuple[list[dict], str | None]:
+    """One page of an execution's history, as Step Functions' and Lambda's history calls serve it.
+
+    Both number an execution's events from one in order, return at most the page size, 100 when
+    unset or 0, newest first when asked to reverse, and hand back a token that resumes where the
+    page stopped."""
+    ordered = events[::-1] if reverse else events
+    start = int(token or 0)
+    end = start + (page_size or 100)
+    return ordered[start:end], (str(end) if end < len(ordered) else None)
+
+
 class FakeCloudWatchLogs:
     """CloudWatch Logs stand-in that enforces the constraints the real service does.
 

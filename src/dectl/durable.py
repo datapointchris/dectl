@@ -355,20 +355,34 @@ def fetch_history(client, execution_arn: str, include_data: bool = True) -> list
             return events
 
 
-def tail_durable_history(client, execution_arn: str, follow: bool = False, include_data: bool = True) -> None:
-    """Print an execution's history, optionally polling until it reaches a terminal event.
+def history_events_after(client, execution_arn: str, newest_shown: int, include_data: bool = True) -> list[dict]:
+    """The execution's history events numbered above `newest_shown`, oldest first.
 
-    EventIds are unique and stable within an execution, so a re-fetch is deduped by id the same
-    way the Step Functions history tailer works."""
-    seen_event_ids: set = set()
+    Read newest first, and paging stops at the first page reaching an event already shown. Event
+    ids increment sequentially within an execution, so a poll of a running execution reads one
+    page however long its history has grown. `fetch_history` reads forward, which a follower
+    would repeat in full on every poll, because the last page carries no marker to resume from."""
+    fresh: list[dict] = []
+    kwargs: dict[str, Any] = {'DurableExecutionArn': execution_arn, 'IncludeExecutionData': include_data, 'ReverseOrder': True}
     while True:
-        events = fetch_history(client, execution_arn, include_data=include_data)
-        for event in events:
-            if event.get('EventId') in seen_event_ids:
-                continue
-            render_durable_event(event)
-            seen_event_ids.add(event.get('EventId'))
+        resp = client.get_durable_execution_history(**kwargs)
+        page = resp.get('Events', [])
+        fresh.extend(event for event in page if event['EventId'] > newest_shown)
+        marker = resp.get('NextMarker')
+        if not marker or any(event['EventId'] <= newest_shown for event in page):
+            return sorted(fresh, key=lambda event: event['EventId'])
+        kwargs['Marker'] = marker
 
+
+def tail_durable_history(client, execution_arn: str, follow: bool = False, include_data: bool = True) -> None:
+    """Print an execution's history, optionally polling until it reaches a terminal event."""
+    newest_shown = 0
+    while True:
+        events = history_events_after(client, execution_arn, newest_shown, include_data=include_data)
+        for event in events:
+            render_durable_event(event)
+        if events:
+            newest_shown = events[-1]['EventId']
         if not follow or any(event.get('EventType') in TERMINAL_HISTORY_EVENTS for event in events):
             return
         time.sleep(2)
