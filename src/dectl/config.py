@@ -49,7 +49,7 @@ from dectl.variables import expand_variables
 from dectl.variables import file_and_key
 
 # libyaml's loader where PyYAML was built with it, as its wheels are. It parses a pipeline file
-# about eight times faster than the pure-Python one, and every invocation parses every file.
+# about eight times faster than the pure-Python one, and root help and `list` parse every file.
 try:
     from yaml import CSafeLoader as SafeLoader
 except ImportError:
@@ -278,8 +278,8 @@ buckets: {{}}
 
 class StrictModel(BaseModel):
     # Reject unknown keys everywhere so a typo (`step_function:` for `step_functions:`) is a
-    # loud error via `config validate` rather than a silently ignored field. main.py catches the
-    # resulting ValidationError at import so a bad config never bricks the CLI.
+    # loud error via `config validate` rather than a silently ignored field. `loaded_config`
+    # returns the resulting ValidationError rather than raising it, so a bad config never bricks the CLI.
     model_config = ConfigDict(extra='forbid')
 
 
@@ -440,7 +440,7 @@ class LambdaConfig(ResourceModel):
     # A durable function keeps a checkpointed execution log of its own, so it gets the extra
     # execution verbs (`executions`, `history`) and its invocations are qualified — Lambda rejects
     # an unqualified invoke of a durable function outright. Flagged in config rather than probed
-    # at runtime so the command surface stays assembled at import, like every other resource.
+    # from AWS so the command surface is assembled from config alone, like every other resource.
     durable: bool = False
 
 
@@ -901,8 +901,8 @@ def pipeline_value_faults(
 
     # First, because a root that is not rooted resolves against the working directory and every
     # path under it lands somewhere this cannot predict. Reported rather than raised at load: a
-    # schema failure sends `main.py` to `cfg = None` and takes every pipeline command with it,
-    # so the likeliest first spelling of a new key would blank the CLI that explains it.
+    # schema failure refuses every command of its pipeline, so the likeliest first spelling of a
+    # new key would blank the commands that explain it.
     if pipeline.resolve_paths_from is not None:
         fault = root_fault(pipeline.resolve_paths_from)
         if fault:
@@ -1045,8 +1045,49 @@ def pipeline_name_fault(name: str) -> str | None:
     return None
 
 
-def read_config_files() -> Any:
-    """config.yaml, with each `pipelines/<name>.yaml` beside it held under `pipelines` as `<name>`.
+# The pipeline files a read takes: these names, or every file in pipelines/ when None.
+type PipelineScope = tuple[str, ...] | None
+
+
+def pipeline_paths(scope: PipelineScope) -> list[Path]:
+    """The entries of pipelines/ a read of `scope` looks at.
+
+    A named pipeline costs one lookup. Where its file is absent, the entries sharing its stem are
+    looked at instead, so one saved as `sales.yml` is refused under the name it was meant to have
+    rather than reported as an unknown command."""
+    directory = pipelines_dir()
+    if not directory.is_dir():
+        return []
+    if scope is None:
+        return sorted(directory.iterdir())
+    paths: list[Path] = []
+    for name in scope:
+        # A name holding a separator would reach outside the directory.
+        if PurePosixPath(name).name != name:
+            continue
+        path = directory / f'{name}{PIPELINE_SUFFIX}'
+        if path.exists():
+            paths.append(path)
+        else:
+            paths += [directory / entry for entry in sorted(os.listdir(directory)) if entry.rpartition('.')[0] == name]
+    return paths
+
+
+def pipeline_file_stems() -> list[str]:
+    """The name each pipeline-looking file in pipelines/ would take, read from the listing alone."""
+    directory = pipelines_dir()
+    if not directory.is_dir():
+        return []
+    stem_and_suffix = (entry.rpartition('.') for entry in os.listdir(directory) if not entry.startswith('.'))
+    return sorted({stem for stem, dot, suffix in stem_and_suffix if dot and f'.{suffix.lower()}' in MISNAMED_PIPELINE_SUFFIXES})
+
+
+def read_config_files(scope: PipelineScope = None) -> Any:
+    """config.yaml, with each pipeline file `scope` names held under `pipelines` as `<name>`.
+
+    None reads every file in pipelines/, for the commands that list every pipeline. A command
+    naming one pipeline reads that file alone, so a sibling that does not load leaves it working
+    and its start does not grow with the number of files.
 
     What looks like a misnamed pipeline is refused, because a pipeline saved as `sales.yml`, or
     one named `search` that dectl's own `search` hides, would leave the tree with nothing said.
@@ -1060,9 +1101,8 @@ def read_config_files() -> Any:
         held = raw['pipelines']
         message = f'config.yaml cannot hold pipelines; each one is its own file, pipelines/<name>{PIPELINE_SUFFIX}'
         faults.append(pipelines_fault('pipelines_in_config', message, list(held) if isinstance(held, dict) else held))
-    directory = pipelines_dir()
     pipelines = {}
-    for path in sorted(directory.iterdir()) if directory.is_dir() else []:
+    for path in pipeline_paths(scope):
         if path.name.startswith('.') or path.suffix.lower() not in MISNAMED_PIPELINE_SUFFIXES:
             continue
         if path.suffix != PIPELINE_SUFFIX or not path.is_file():
@@ -1077,10 +1117,14 @@ def read_config_files() -> Any:
     return {**raw, 'pipelines': pipelines}
 
 
-def load_config() -> DectlConfig | None:
+def load_config(scope: PipelineScope = None) -> DectlConfig | None:
+    """The config holding the pipelines `scope` names, or every one when None.
+
+    A pipeline loads alone because nothing in it reads a sibling: no validator compares two
+    pipelines, and a pipeline's variables come from config.yaml and its own block."""
     if not CONFIG_PATH.exists():
         return None
-    return DectlConfig.model_validate(read_config_files())
+    return DectlConfig.model_validate(read_config_files(scope))
 
 
 # The two ways a config that exists still fails to load: YAML that will not parse, and YAML that
@@ -1097,21 +1141,21 @@ class LoadedConfig(NamedTuple):
 
 
 @functools.cache
-def loaded_config_at(path: Path) -> LoadedConfig:
+def loaded_config_at(path: Path, scope: PipelineScope) -> LoadedConfig:
     try:
-        return LoadedConfig(load_config(), None)
+        return LoadedConfig(load_config(scope), None)
     except CONFIG_LOAD_ERRORS as exc:
         return LoadedConfig(None, exc)
 
 
-def loaded_config() -> LoadedConfig:
-    """The config this process runs with, read the first time it is asked for.
+def loaded_config(scope: PipelineScope = None) -> LoadedConfig:
+    """The config holding `scope`'s pipelines that this process runs with, read the first time it is asked for.
 
-    main.py builds the command tree from it at import, and `config show` and `config validate`
-    report that same read rather than parsing every file again. It is keyed on CONFIG_PATH, which
-    tests point at a temporary directory, and a process running one command reads one path.
-    `load_config` reads the files every time it is called."""
-    return loaded_config_at(CONFIG_PATH)
+    `()` is config.yaml alone, which main.py reads at import for the root options' defaults.
+    Root help reads every file, and so do `list`, `config show` and `config validate`, which
+    share that one read. It is keyed on CONFIG_PATH, which tests point at a temporary
+    directory. `load_config` reads the files every time it is called."""
+    return loaded_config_at(CONFIG_PATH, scope)
 
 
 # A rejected value is shown so the reader can see which key the location names, but a `missing`

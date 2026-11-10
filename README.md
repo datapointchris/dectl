@@ -72,10 +72,12 @@ refuses and names it.
 Lambda functions and layers, Glue, Step Functions, IAM and Secrets Manager, in the configured
 region.
 
-**When a command is missing, run `dectl config validate`.** A config that does not load drops every
-pipeline and leaves the `config` commands working. Typing a pipeline name then prints the load error
-rather than "No such command". Unknown keys are errors, so a typo like `step_function:` fails here
-instead of being ignored.
+**When a command is missing, run `dectl config validate`.** A command naming a pipeline reads
+`config.yaml` and that pipeline's file alone. So a pipeline file that does not load drops only that
+pipeline's commands, and typing its name prints the load error rather than "No such command". A
+`config.yaml` that does not load drops every pipeline. Root help and `dectl list` read every file,
+so any file that does not load empties them. The `config` commands keep working throughout. Unknown
+keys are errors, so a typo like `step_function:` fails here instead of being ignored.
 
 ## The grammar
 

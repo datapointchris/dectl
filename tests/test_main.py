@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 import typer
-from pydantic import ValidationError
 from rich.text import Text
 
 import dectl.main
@@ -22,18 +21,18 @@ from dectl.config import JENKINS_READ_VERBS
 from dectl.config import S3_SET_VERBS
 from dectl.config import DectlConfig
 from dectl.config import Defaults
-from dectl.config import load_config
 from dectl.main import app
 from dectl.resource_kinds import RESOURCE_KINDS
 from dectl.resource_kinds import attached_kinds
 from tests.conftest import LAYERED_CONFIG
 from tests.conftest import RefusalRunner
+from tests.conftest import write_config_files
 
 runner = RefusalRunner()
 
 
 def dectl_with_config(config: Path, tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    """The installed entry point in a fresh process, because main.py builds the tree from the files at import."""
+    """The installed entry point in a fresh process, because main.py reads config.yaml at import for the root options' defaults."""
     home = tmp_path / 'xdg-config'
     (home / 'dectl').mkdir(parents=True, exist_ok=True)
     shutil.copy(config, home / 'dectl' / 'config.yaml')
@@ -78,8 +77,6 @@ def test_root_help_completion_and_suggestions_offer_every_pipeline(monkeypatch):
     # A pipeline's commands are built only when a command names it, and these three read the
     # pipeline names alone, so each could lose the pipelines without any command failing.
     monkeypatch.setattr('dectl.config.CONFIG_PATH', LAYERED_CONFIG)
-    monkeypatch.setattr(dectl.main, 'cfg', load_config())
-    monkeypatch.setattr(dectl.main, 'CONFIG_ERROR', None)
 
     # Typer forces colour when CI variables such as GITHUB_ACTIONS are set, so read plain text.
     helped = Text.from_ansi(runner.invoke(app, ['--help']).stdout).plain
@@ -97,7 +94,7 @@ def test_the_reserved_pipeline_names_are_the_root_commands():
     # the root command then hides that pipeline with no error.
     root = typer.main.get_command(app)
 
-    assert set(root.commands) - set(dectl.main.ATTACHED_PIPELINES) == GLOBAL_COMMAND_NAMES
+    assert set(root.commands) == GLOBAL_COMMAND_NAMES
 
 
 def test_the_reserved_alias_and_action_names_are_each_apps_own_commands():
@@ -130,19 +127,12 @@ def test_update_installs_the_published_release(monkeypatch):
     assert kwargs == {'check_only': True}
 
 
-def broken_config_error() -> ValidationError:
-    """The exception import-time load stores, produced the way the real one is."""
-    with pytest.raises(ValidationError) as caught:
-        DectlConfig.model_validate({'defaults': {'account_id': '1'}, 'pipelines': {'p': {'step_function': {}}}})
-    return caught.value
-
-
 @pytest.fixture
-def invalid_config(monkeypatch):
-    """The state import-time load leaves behind when the config file exists but does not load."""
+def invalid_config(monkeypatch, tmp_path):
+    """A config directory whose one pipeline file does not match the schema."""
     monkeypatch.setenv('COLUMNS', '200')
-    monkeypatch.setattr(dectl.main, 'cfg', None)
-    monkeypatch.setattr(dectl.main, 'CONFIG_ERROR', broken_config_error())
+    config = write_config_files(tmp_path, "defaults:\n  account_id: '1'\npipelines:\n  p:\n    step_function: {}\n")
+    monkeypatch.setattr('dectl.config.CONFIG_PATH', config)
 
 
 def test_version_answers_a_config_that_does_not_load(invalid_config, monkeypatch):
@@ -169,9 +159,9 @@ def test_list_reports_the_validation_error_not_a_missing_config(invalid_config):
     assert 'config init' not in result.stderr
 
 
-def test_an_unknown_name_reports_why_the_pipeline_tree_is_missing(invalid_config):
-    # Every pipeline is a subcommand built from config, so a config that does not load takes
-    # the whole tree with it and Click can only say the name is unknown.
+def test_a_pipeline_whose_file_does_not_load_reports_why(invalid_config):
+    # A pipeline is a subcommand built from its file, so a file that does not load leaves no
+    # command, and Click could only say the name is unknown.
     result = runner.invoke(app, ['p'])
 
     assert result.exit_code == 1
@@ -179,15 +169,34 @@ def test_an_unknown_name_reports_why_the_pipeline_tree_is_missing(invalid_config
     assert 'No such command' not in result.stderr
 
 
-def test_env_json_carries_every_default_the_human_view_shows(monkeypatch):
+def test_a_sibling_pipeline_file_that_does_not_load_leaves_a_pipeline_working(monkeypatch, tmp_path):
+    # A command naming a pipeline reads config.yaml and that pipeline's file alone. Root
+    # commands read every file, so `config validate` still refuses a file saved as `.yml`.
+    shutil.copytree(LAYERED_CONFIG.parent, tmp_path / 'dectl')
+    pipelines = tmp_path / 'dectl' / 'pipelines'
+    (pipelines / 'finance.yaml').write_text('step_function: {}\n')
+    (pipelines / 'orders.yml').write_text('buckets: {}\n')
+    for module in ('dectl.config', 'dectl.commands.config_cmd'):
+        monkeypatch.setattr(f'{module}.CONFIG_PATH', tmp_path / 'dectl' / 'config.yaml')
+
+    sales = runner.invoke(app, ['sales', 'list', '--json'])
+    finance = runner.invoke(app, ['finance', 'list'])
+    validated = runner.invoke(app, ['config', 'validate'])
+
+    assert sales.exit_code == 0
+    assert json.loads(sales.stdout)['pipeline'] == 'sales'
+    assert 'pipelines/finance.yaml step_function' in finance.stderr
+    assert 'orders.yml is not a pipeline file' in validated.stderr
+
+
+def test_env_json_carries_every_default_the_human_view_shows(monkeypatch, tmp_path):
     """`config show` prints four resolved defaults and no machine door carried any of them.
 
     `aws_profile` is the one that decides which AWS account a deploy reaches. Derived from
     `Defaults.model_fields`, so a field added to the model reaches this document without an
     edit — the same derivation the human rows use, which is what keeps the two level."""
-    config = DectlConfig.model_validate({'defaults': {'account_id': '123456789012', 'aws_profile': 'data-eng'}, 'pipelines': {}})
-    monkeypatch.setattr(dectl.main, 'CONFIG_ERROR', None)
-    monkeypatch.setattr(dectl.main, 'cfg', config)
+    config = write_config_files(tmp_path, "defaults:\n  account_id: '123456789012'\n  aws_profile: data-eng\n")
+    monkeypatch.setattr('dectl.config.CONFIG_PATH', config)
 
     result = runner.invoke(dectl.main.app, ['--env', 'prod', 'env', '--json'])
 
@@ -336,11 +345,7 @@ def test_the_reference_grammar_lists_every_verb_and_option_the_tree_has():
     }
     assert listed_set_verbs == set_verbs | {f'jenkins {path}': options for path, options in jenkins.items()}
 
-    root = command_surface(typer.main.get_command(app))
-    attached = tuple(f'{name} ' for name in dectl.main.ATTACHED_PIPELINES)
-    assert reference_grammar(dectl.main.REFERENCE_GLOBAL) == {
-        path: options for path, options in root.items() if not path.startswith(attached)
-    }
+    assert reference_grammar(dectl.main.REFERENCE_GLOBAL) == command_surface(typer.main.get_command(app))
 
 
 class RefusingClient:

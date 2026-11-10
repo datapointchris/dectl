@@ -474,9 +474,9 @@ def root_fault(configured: str) -> ConfigFault | None:
     written in. An empty one is the same thing spelled shorter.
 
     Reported rather than raised, for the reason every other spelling check is. A schema failure
-    sends `main.py` to `cfg = None` and takes every pipeline command with it, including the ones
-    that would name the problem — so the likeliest first spelling of a brand-new key would blank
-    the CLI that explains it. `{env}` is replaced with a plain name rather than substituted,
+    refuses every command of its pipeline, including the ones that would name the problem — so
+    the likeliest first spelling of a brand-new key would blank the commands that explain it.
+    `{env}` is replaced with a plain name rather than substituted,
     because the active environment is not known at load; a leading token reads as relative,
     which is what it is."""
     if not configured or not (configured.startswith('~') or PurePosixPath(configured.replace(ENV_PLACEHOLDER, 'x')).is_absolute()):
@@ -496,9 +496,8 @@ def key_fault(configured: str) -> ConfigFault | None:
     `$HOME` — the same dependence on where the deploy ran that `resolve_paths_from` exists to
     remove, arriving by a different route.
 
-    Checked here rather than in a field validator on purpose. A schema failure blanks the whole
-    pipeline tree, because `main.py` falls back to `cfg = None` and every pipeline command
-    disappears with it. A config carrying a malformed key still loads, `config validate` names
+    Checked here rather than in a field validator on purpose. A schema failure refuses every
+    command of its pipeline, and root help and `list` with it. A config carrying a malformed key still loads, `config validate` names
     it and the deploy refuses it, so the diagnosis reaches the reader without the CLI that
     delivers it going away."""
     if configured.startswith('~') or PurePosixPath(configured).is_absolute() or holds_traversal(configured):

@@ -370,8 +370,8 @@ def test_the_declared_root_anchors_a_relative_path(tmp_path):
 def test_a_root_that_is_not_rooted_is_reported_rather_than_raised(root):
     # A relative root resolves against the working directory, which is the dependency the key
     # exists to remove. It is reported for the reason every other spelling fault is: a schema
-    # failure sends `main.py` to `cfg = None` and takes every pipeline command with it, so the
-    # likeliest first spelling of a new key would blank the CLI that explains it.
+    # failure refuses every command of its pipeline, so the likeliest first spelling of a new key
+    # would blank the commands that explain it.
     #
     # A leading `{env}` is relative whatever the environment resolves to, and `--env` is parsed
     # after the config loads, so the token is replaced with a plain name rather than substituted.

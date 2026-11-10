@@ -1,5 +1,6 @@
 import importlib.metadata
 import json
+from difflib import get_close_matches
 from itertools import starmap
 from typing import TYPE_CHECKING
 from typing import Annotated
@@ -20,7 +21,9 @@ from dectl.config import CONFIG_PATH
 from dectl.config import DectlConfig
 from dectl.config import Defaults
 from dectl.config import PipelineConfig
+from dectl.config import PipelineScope
 from dectl.config import loaded_config
+from dectl.config import pipeline_file_stems
 from dectl.config import report_config_error
 from dectl.env import active_environment
 from dectl.env import set_active_environment
@@ -40,64 +43,87 @@ from dectl.session import make_session
 if TYPE_CHECKING:
     import pyselfupdate
 
-# A present-but-invalid config must not brick the CLI: raised here, the ValidationError would
-# propagate out of import and take down every command, including the `config validate` /
-# `config edit` you would use to fix it. So `loaded_config` returns the failure rather than raising
-# it, and the reason surfaces wherever the missing pipelines are noticed.
-#
-# The exception itself is kept, not str(exc): every reporting site renders it through
-# report_config_error, which walks exc.errors() for the location and the rejected value.
-cfg, CONFIG_ERROR = loaded_config()
 
+def require_config(scope: PipelineScope) -> DectlConfig:
+    """The config holding `scope`'s pipelines, refusing with the reason there is none, and never the wrong one.
 
-def require_config() -> DectlConfig:
-    """Refuse with the reason there are no pipelines, and never with the wrong one.
-
-    `cfg is None` covers two states that need opposite answers — no config file, and a config
-    file that failed to load. Naming the second as the first sends the reader to `config init`,
-    which refuses because the file it would write is already there. `CONFIG_ERROR` is what
-    separates them, so it is consulted before `cfg`.
-
-    Returning the config is what keeps a caller from reading the global after the guard, where
-    the type is `DectlConfig | None` and every use needs a narrowing it cannot get.
-    """
-    if CONFIG_ERROR is not None:
-        report_config_error(CONFIG_ERROR)
+    No config covers two states that need opposite answers — no config file, and a config that
+    failed to load. Naming the second as the first sends the reader to `config init`, which
+    refuses because the file it would write is already there. So the failure is consulted
+    first. `loaded_config` returns it rather than raising, because a failure raised at import
+    would take down every command, including the `config validate` that explains it."""
+    config, failure = loaded_config(scope)
+    if failure is not None:
+        report_config_error(failure)
         raise typer.Exit(1)
-    if cfg is None:
+    if config is None:
         error(f'no config found at {CONFIG_PATH} — run "dectl config init" first')
         raise typer.Exit(1)
-    return cfg
+    return config
 
 
 class DectlGroup(TyperGroup):
-    """The root group: the global commands, then a `PipelineGroup` for each attached pipeline.
+    """The root group: the global commands, and a `PipelineGroup` for each pipeline asked for.
 
-    It also decides how a failure no command handled reaches the reader."""
+    A command naming a pipeline attaches it from config.yaml and that pipeline's file alone, so
+    it reads no sibling and a sibling that does not load leaves it working. Root help and
+    completion list every pipeline, so they read every file. It also decides how a failure no
+    command handled reaches the reader."""
 
     def __init__(self, **attrs: Any) -> None:
         super().__init__(**attrs)
-        if cfg is not None:
-            for name, pipeline in cfg.pipelines.items():
-                if pipeline_has_commands(pipeline, cfg):
-                    self.add_command(PipelineGroup(name, pipeline, cfg))
+        self.every_pipeline_attached = False
+
+    def attach(self, name: str, pipeline: PipelineConfig, config: DectlConfig) -> None:
+        # A pipeline configuring no resource has no commands, so it is never attached.
+        if name not in self.commands and pipeline_has_commands(pipeline, config):
+            self.add_command(PipelineGroup(name, pipeline, config))
+
+    def attach_every_pipeline(self) -> None:
+        config = None if self.every_pipeline_attached else loaded_config().config
+        self.every_pipeline_attached = True
+        if config is not None:
+            for name, pipeline in config.pipelines.items():
+                self.attach(name, pipeline, config)
 
     # `Any` because typer vendors click privately as `typer._click`, and those are the types
     # this signature has to match. `click` itself is not a dectl dependency and would be the
     # wrong hierarchy anyway; `typer.Context` is a subclass of the vendored one, so naming it
     # here narrows a parameter the base widens.
     def get_command(self, ctx: Any, cmd_name: str) -> Any:
-        """Report the config failure where an unknown pipeline name is what the reader typed.
+        """The command named, attaching the pipeline of that name from its own file when no global command takes it.
 
-        Every pipeline is a subcommand assembled from config, so a config that does not load
-        takes the whole pipeline tree with it. Click can only report the name as unknown, which
-        sends the reader after a typo in a command they have run for months. The substitution
-        holds only while there is no loaded config to have contained the name — with one loaded,
-        an unknown name really is unknown and Click's usage error is the right answer."""
+        A config that does not load is reported here, where the reader typed a pipeline's name.
+        Click could only call the name unknown, which sends the reader after a typo in a command
+        they have run for months."""
         command = super().get_command(ctx, cmd_name)
-        if command is None and cfg is None:
-            require_config()
+        if command is None:
+            config = require_config((cmd_name,))
+            if (pipeline := config.pipelines.get(cmd_name)) is not None:
+                self.attach(cmd_name, pipeline, config)
+            command = super().get_command(ctx, cmd_name)
         return command
+
+    def list_commands(self, ctx: Any) -> list[str]:
+        self.attach_every_pipeline()
+        return super().list_commands(ctx)
+
+    def resolve_command(self, ctx: Any, args: list[str]) -> Any:
+        """Refuse a name no command or pipeline answers, suggesting the close ones among both.
+
+        Typer suggests from the commands attached so far, which hold no pipeline but the ones
+        asked for. The pipeline names come from the directory listing, so a typo reads no file."""
+        name = args[0] if args else ''
+        if name and not name.startswith('-') and not ctx.resilient_parsing and self.get_command(ctx, name) is None:
+            matches = get_close_matches(name, list(dict.fromkeys([*self.commands, *pipeline_file_stems()])))
+            suggestion = f' Did you mean {", ".join(map(repr, matches))}?' if matches else ''
+            ctx.fail(f'No such command {name!r}.{suggestion}')
+        return super().resolve_command(ctx, args)
+
+    def format_help(self, ctx: Any, formatter: Any) -> None:
+        self.attach_every_pipeline()
+        self.epilog = root_examples({name: group.pipeline for name, group in self.commands.items() if isinstance(group, PipelineGroup)})
+        super().format_help(ctx, formatter)
 
     def invoke(self, ctx: Any) -> Any:
         """End on the remote's own sentence where AWS or Jenkins refused and no command said more.
@@ -132,10 +158,12 @@ def resolve_env_source(ctx: typer.Context) -> str:
     source_name = source.name if source is not None else 'DEFAULT'
     # A DEFAULT source means the option default fired — and that default is sourced from the
     # config's `environment` field (falling back to 'dev' only when there is no config at all).
-    return ENV_SOURCE_LABELS.get(source_name, 'config' if cfg else 'default')
+    return ENV_SOURCE_LABELS.get(source_name, 'config' if SETTINGS else 'default')
 
 
-DEFAULT_ENVIRONMENT = cfg.defaults.environment if cfg else 'dev'
+# config.yaml alone, read at import because the root options' defaults come from it.
+SETTINGS = loaded_config(()).config
+DEFAULT_ENVIRONMENT = SETTINGS.defaults.environment if SETTINGS else 'dev'
 
 
 def pipeline_summary(pipeline: PipelineConfig, config: DectlConfig) -> str:
@@ -209,18 +237,13 @@ class PipelineGroup(TyperGroup):
         return super().get_command(ctx, cmd_name)
 
 
-# A pipeline configuring no resource has no commands, so it is never attached to the tree.
-ATTACHED_PIPELINES: list[str] = [name for name, pipeline in cfg.pipelines.items() if pipeline_has_commands(pipeline, cfg)] if cfg else []
-
-
-def root_examples(config: DectlConfig | None, attached: list[str]) -> str:
-    """The root screen's examples, spelled with the config's own names so each runs as typed."""
-    if config is None or not attached:
+def root_examples(pipelines: dict[str, PipelineConfig]) -> str:
+    """The root screen's examples, spelled with the attached pipelines' own names so each runs as typed."""
+    if not pipelines:
         return (
             'Examples:\n\ndectl config init — write a starting config that shows every option\n\ndectl reference — the full command grammar'
         )
-    pipelines = {name: config.pipelines[name] for name in attached}
-    lines = [f'dectl {attached[0]} list — the aliases this pipeline takes, and the AWS names behind them']
+    lines = [f'dectl {next(iter(pipelines))} list — the aliases this pipeline takes, and the AWS names behind them']
     job = next(((name, alias) for name, pipeline in pipelines.items() for alias in pipeline.glue_jobs), None)
     if job:
         lines.append(f'dectl {job[0]} glue {job[1]} deploy — upload the script, confirming any change to the job first')
@@ -300,8 +323,11 @@ def reference() -> None:
         console.print(f'  {line}', markup=False)
     console.print()
 
-    if cfg:
-        configured = [kind.word for kind in RESOURCE_KINDS if any(kind.attached(pipeline, cfg) for pipeline in cfg.pipelines.values())]
+    config = loaded_config().config
+    if config:
+        configured = [
+            kind.word for kind in RESOURCE_KINDS if any(kind.attached(pipeline, config) for pipeline in config.pipelines.values())
+        ]
         info(f'Configured on this machine: {", ".join(configured) or "(none)"}')
     else:
         info('No config on this machine yet — run "dectl config init".')
@@ -368,10 +394,7 @@ def update(
     run_update(update_config(), check_only=check_only)
 
 
-@app.callback(
-    invoke_without_command=True,
-    epilog=root_examples(cfg, ATTACHED_PIPELINES),
-)
+@app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
     env: Annotated[
@@ -422,8 +445,8 @@ def main(
         notify(update_config())
     if ctx.invoked_subcommand is None:
         print_environment_banner()
-        if CONFIG_ERROR is not None:
-            report_config_error(CONFIG_ERROR)
+        if (failure := loaded_config().error) is not None:
+            report_config_error(failure)
             stderr_console.print('pipeline commands are absent from the help below until it loads')
         print(ctx.get_help())
 
@@ -447,7 +470,7 @@ def search(
     keyword: Annotated[str, typer.Argument(help='Case-insensitive substring to match against resource names')],
     as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
 ) -> None:
-    config = require_config()
+    config = require_config(())
     session = make_session(config)
     run_search(session, keyword, config.defaults.region, as_json=as_json)
 
@@ -479,7 +502,7 @@ def show_env(
     # Every field of `Defaults` beside the environment, derived from the model so a field added
     # to it reaches this without an edit. The environment is the resolved one rather than the
     # file's, and its source is the fact only this document carries.
-    config = require_config()
+    config = require_config(())
     resolved = {field: getattr(config.defaults, field) for field in Defaults.model_fields if field != 'environment'}
     emit_json({'environment': active_environment.name, 'source': active_environment.source, **resolved})
 
@@ -497,7 +520,7 @@ def list_all(
     as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
 ) -> None:
     """List every pipeline with its jobs, functions, and buckets (alias → AWS name)."""
-    config = require_config()
+    config = require_config(None)
 
     if as_json:
         emit_json(list(starmap(pipeline_to_dict, config.pipelines.items())))

@@ -4,18 +4,20 @@ Data engineering control CLI for driving AWS pipelines (Glue, Lambda, Step Funct
 Jenkins deploys) from one config directory. Installed via `uv tool install`; the entry point is
 `dectl.main:app`.
 
-## The core idea: the CLI surface is assembled from config at import time
+## The core idea: the CLI surface is assembled from config as a command asks for it
 
-There is no static command tree. `src/dectl/main.py` calls `loaded_config()` **at module import**,
-and the root `DectlGroup` holds a `PipelineGroup` for each pipeline in
-`$XDG_CONFIG_HOME/dectl/pipelines/` that configures a resource. A `PipelineGroup` carries only
-its name, its help line and its panel until a command under it is asked for. Then
-`make_pipeline_app` builds its tree, attaching only the resource sub-apps the pipeline defines.
-So root help and TAB completion read every pipeline's name and help line, and a run builds the
-tree of the one pipeline it names. A pipeline with just `buckets` gets an `s3` command and
-nothing else; add `glue_jobs` and a `glue` command appears. Running `dectl` with no config still works
-(commands like `config init` are always present) because `load_config()` returns `None` rather
-than raising.
+There is no static command tree. `src/dectl/main.py` reads `config.yaml` alone **at module
+import**, because the root options' defaults come from it. The root `DectlGroup` holds the global
+commands. When a command names a pipeline, `DectlGroup.get_command` reads `config.yaml` and
+`$XDG_CONFIG_HOME/dectl/pipelines/<name>.yaml` alone, and attaches a `PipelineGroup` if the
+pipeline configures a resource. Root help and TAB completion list every pipeline, so
+`list_commands` reads every file and attaches a group for each. A `PipelineGroup` carries only its
+name, its help line and its panel until a command under it is asked for. Then `make_pipeline_app`
+builds its tree, attaching only the resource sub-apps the pipeline defines. So a run reads and
+builds the one pipeline it names, and its start does not grow with the number of pipeline files.
+A pipeline with just `buckets` gets an `s3` command and nothing else; add `glue_jobs` and a `glue`
+command appears. Running `dectl` with no config still works (commands like `config init` are
+always present) because `load_config()` returns `None` rather than raising.
 
 This means the command you see depends entirely on the user's config. Each resource kind is one
 `RESOURCE_KINDS` entry in `src/dectl/resource_kinds.py`. It names the kind's word, its
@@ -87,7 +89,12 @@ is honored rather than `~/.config` being hardcoded. `config.yaml` holds `default
 
 **The files are joined at the loader, and nothing after it knows there are several.**
 `read_config_files` joins them into the one mapping `DectlConfig` validates, so everything after
-loading sees each pipeline under `pipelines.<stem>`. It refuses a `pipelines` key in
+loading sees each pipeline under `pipelines.<stem>`. Its `PipelineScope` names which pipeline
+files it joins: `('sales',)` joins one, `()` none, and `None` every file. A pipeline loads alone
+because nothing in it reads a sibling: no validator compares two pipelines, and its variables
+come from `config.yaml` and its own block. A named pipeline costs one file lookup. Only a miss
+lists the directory, for the entries sharing its stem, so `sales.yml` is refused when `sales` is
+typed. It refuses a `pipelines` key in
 `config.yaml`. In `pipelines/` it refuses what looks like a misnamed pipeline: a `.yml`, `.yaml` in
 another case, or a stem in `GLOBAL_COMMAND_NAMES`, which the root's own command would hide. It
 skips everything else, since one editor backup refused would take every pipeline down with it.
@@ -121,7 +128,9 @@ chokepoints. A pipeline variable redefining one from `config.yaml`, a variable n
 non-string value are each a `ValidationError` carrying the key's own location. When any of those
 fire, the validator runs the schema anyway, and a key it refuses is reported alone. A `variables`
 block under the wrong key, or a pipeline file still wrapped in its name, defines nothing, so every
-reference reads as undefined and the `{{name}}` hint sends the reader the wrong way. An anchor or merge
+reference reads as undefined and the `{{name}}` hint sends the reader the wrong way. A read of one
+pipeline holds no sibling's `variables`, so an undefined `{name}` names the blocks it searched.
+Only a read of every file can say a sibling defines it, which `config validate` does. An anchor or merge
 is YAML's, resolved before the pass sees the mapping, and reaches only within one file. The pass
 builds new mappings rather than editing the one it was handed, because YAML gives an anchored block
 to each alias and merge of it as one object. `{{name}}` is the escape for a literal `{name}` another
@@ -148,12 +157,13 @@ they round-trip through the models, so update them with any model change. Its
 `config init` would write a config that fails `config validate`.
 
 **All models inherit `StrictModel` (`extra='forbid'`)**, so a typo like `step_function:` is a loud
-error. `main.py` takes its import-time config from `loaded_config()`, which returns the load's
-exception rather than raising it. An invalid config falls back to `cfg = None`, keeping the
-`config` commands reachable, and the exception is kept in `CONFIG_ERROR`. `loaded_config` reads
-the directory once per process, so `config show` and `config validate` report the same read
-rather than parsing every file again. `load_config` reads the files on every call. Only a
-*missing* config yields `None` directly; `CONFIG_LOAD_ERRORS` is the tuple every caller catches. `report_config_error` is the single renderer for that failure. It writes to
+error. `loaded_config(scope)` returns the load's exception rather than raising it, so a config
+that does not load keeps the `config` commands reachable. It reads each scope once per process.
+`main.py` reads `()` at import for the root options' defaults, and `search` and `env --json`
+need nothing more. A command naming a pipeline reads that pipeline's scope. Root help, `list`,
+`reference`, `config show` and `config validate` share the read of every file. `load_config`
+reads the files on every call. Only a *missing* config yields `None` directly;
+`CONFIG_LOAD_ERRORS` is the tuple every caller catches. `report_config_error` is the single renderer for that failure. It writes to
 stderr, keeps the rejected value because it identifies an ambiguous location, and disables markup
 because a rejected list renders as `['a']`, which rich would eat as a style tag.
 
@@ -372,12 +382,18 @@ exception: it is a few milliseconds, and the root group catches its errors.
 
 **Config and output**
 
-- **`cfg is None` covers two states needing opposite answers**: no config (`config init`) and a
-  config that failed to load (`config edit`). `require_config` is the guard; it consults
-  `CONFIG_ERROR` first and returns the config.
-- **A config that does not load takes the whole pipeline tree with it.** `DectlGroup.get_command`
-  answers a pipeline name with the config failure instead of "No such command", only while
-  `cfg is None`.
+- **A `None` config covers two states needing opposite answers**: no config (`config init`) and
+  a config that failed to load (`config edit`). `require_config(scope)` is the guard; it consults
+  the load's failure first and returns the config.
+- **A pipeline file that does not load takes only its own pipeline's commands with it.** A command
+  naming a pipeline reads `config.yaml` and that file alone, so a broken or misnamed sibling
+  leaves it working. `DectlGroup.get_command` answers the name with that read's failure instead
+  of "No such command". A broken `config.yaml` takes every pipeline. Root help, `list`,
+  `reference`, `config show` and `config validate` read every file, so any file that does not
+  load stops them.
+- **Typer's "Did you mean" reads only the attached commands**, which hold no pipeline a command
+  has not named. `DectlGroup.resolve_command` refuses an unknown name itself and suggests from the
+  directory listing too, so a typo reads no pipeline file.
 - **stdout is data and stderr is everything else.** Every refusal calls `output.error`, never
   `console.print`. `success` and `info` stay on stdout because they are the answer.
 - **An AWS or Jenkins error no command catches ends on its own sentence, never a traceback.**
@@ -424,7 +440,7 @@ through each one's prefix, and `finance.yaml` is written out like `sales.yaml` u
 pipeline and dataset. The scripts and Lambda sources it names sit beside it, so its relative paths
 resolve. `test_config.py` loads it through `load_config` for the load-time faults and refusals.
 `test_main.py` starts the installed `dectl` against it in a fresh process, because `main.py`
-builds the tree from the files at import.
+reads `config.yaml` at import for the root options' defaults.
 `test_stepfunctions_integration.py` deploys its `flow.asl.json.tftpl` with `finance`'s
 substitutions, so live Step Functions validates the JSONata. A config shape that has to work goes
 in these files rather than in a test's inline dict. The template is named `.tftpl`, Terraform's
