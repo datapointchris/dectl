@@ -1,3 +1,4 @@
+import functools
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import PurePosixPath
 from typing import Annotated
 from typing import Any
 from typing import ClassVar
+from typing import NamedTuple
 from typing import get_args
 
 import yaml
@@ -1081,6 +1083,32 @@ def load_config() -> DectlConfig | None:
 # does not match the models. Declared once because every caller catches them together — a reader
 # hitting either one needs the same answer, and `except Exception` would swallow real bugs.
 CONFIG_LOAD_ERRORS = (yaml.YAMLError, ValidationError)
+
+
+class LoadedConfig(NamedTuple):
+    """What a read of the config directory came to. Both None means there is no config.yaml."""
+
+    config: DectlConfig | None
+    error: yaml.YAMLError | ValidationError | None
+
+
+@functools.cache
+def loaded_config_at(path: Path) -> LoadedConfig:
+    try:
+        return LoadedConfig(load_config(), None)
+    except CONFIG_LOAD_ERRORS as exc:
+        return LoadedConfig(None, exc)
+
+
+def loaded_config() -> LoadedConfig:
+    """The config this process runs with, read the first time it is asked for.
+
+    main.py builds the command tree from it at import, and `config show` and `config validate`
+    report that same read rather than parsing every file again. It is keyed on CONFIG_PATH, which
+    tests point at a temporary directory, and a process running one command reads one path.
+    `load_config` reads the files every time it is called."""
+    return loaded_config_at(CONFIG_PATH)
+
 
 # A rejected value is shown so the reader can see which key the location names, but a `missing`
 # error's input is the whole parent object and a large pipeline block would bury the message.

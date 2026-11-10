@@ -10,7 +10,6 @@ import typer
 from rich.syntax import Syntax
 
 from dectl import external_command
-from dectl.config import CONFIG_LOAD_ERRORS
 from dectl.config import CONFIG_PATH
 from dectl.config import PIPELINE_STUB
 from dectl.config import PIPELINE_SUFFIX
@@ -18,7 +17,7 @@ from dectl.config import Defaults
 from dectl.config import config_error_outcome
 from dectl.config import config_value_faults
 from dectl.config import init_config
-from dectl.config import load_config
+from dectl.config import loaded_config
 from dectl.config import pipeline_name_fault
 from dectl.config import pipelines_dir
 from dectl.config import report_config_error
@@ -75,11 +74,10 @@ def config_show(
     as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
 ) -> None:
     """Display the loaded pipelines and their resources (alias → AWS name)."""
-    try:
-        cfg = load_config()
-    except CONFIG_LOAD_ERRORS as exc:
-        report_config_error(exc)
-        raise typer.Exit(1) from exc
+    cfg, failure = loaded_config()
+    if failure is not None:
+        report_config_error(failure)
+        raise typer.Exit(1) from failure
     if cfg is None:
         error(f'no config found at {CONFIG_PATH} — run "dectl config init" to create one')
         raise typer.Exit(1)
@@ -237,18 +235,14 @@ def config_validate(
             emit_json({'outcome': outcome, 'unusable_values': []})
         raise typer.Exit(NEEDS_A_PERSON_EXIT)
 
-    if not CONFIG_PATH.exists():
-        refuse('no_config', f'no config found at {CONFIG_PATH} — run "dectl config init" to create one')
-
-    try:
-        config = load_config()
-    except CONFIG_LOAD_ERRORS as exc:
-        report_config_error(exc)
+    config, failure = loaded_config()
+    if failure is not None:
+        report_config_error(failure)
         if as_json:
-            emit_json({'outcome': config_error_outcome(exc), 'unusable_values': []})
-        raise typer.Exit(NEEDS_A_PERSON_EXIT) from exc
+            emit_json({'outcome': config_error_outcome(failure), 'unusable_values': []})
+        raise typer.Exit(NEEDS_A_PERSON_EXIT) from failure
     if config is None:
-        refuse('no_config', f'{CONFIG_PATH} was removed while it was being read')
+        refuse('no_config', f'no config found at {CONFIG_PATH} — run "dectl config init" to create one')
 
     problems = config_value_faults(config)
     if as_json:

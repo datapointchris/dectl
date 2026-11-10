@@ -6,7 +6,7 @@ Jenkins deploys) from one config directory. Installed via `uv tool install`; the
 
 ## The core idea: the CLI surface is assembled from config at import time
 
-There is no static command tree. `src/dectl/main.py` calls `load_config()` **at module import**,
+There is no static command tree. `src/dectl/main.py` calls `loaded_config()` **at module import**,
 and the root `DectlGroup` holds a `PipelineGroup` for each pipeline in
 `$XDG_CONFIG_HOME/dectl/pipelines/` that configures a resource. A `PipelineGroup` carries only
 its name, its help line and its panel until a command under it is asked for. Then
@@ -144,10 +144,12 @@ they round-trip through the models, so update them with any model change. Its
 `config init` would write a config that fails `config validate`.
 
 **All models inherit `StrictModel` (`extra='forbid'`)**, so a typo like `step_function:` is a loud
-error. `main.py` wraps its import-time `load_config()` so an invalid config falls back to
-`cfg = None`, keeping the `config` commands reachable, and stores the exception in
-`CONFIG_ERROR`. Only a *missing* config yields `None` directly; `CONFIG_LOAD_ERRORS` is the tuple
-every caller catches. `report_config_error` is the single renderer for that failure. It writes to
+error. `main.py` takes its import-time config from `loaded_config()`, which returns the load's
+exception rather than raising it. An invalid config falls back to `cfg = None`, keeping the
+`config` commands reachable, and the exception is kept in `CONFIG_ERROR`. `loaded_config` reads
+the directory once per process, so `config show` and `config validate` report the same read
+rather than parsing every file again. `load_config` reads the files on every call. Only a
+*missing* config yields `None` directly; `CONFIG_LOAD_ERRORS` is the tuple every caller catches. `report_config_error` is the single renderer for that failure. It writes to
 stderr, keeps the rejected value because it identifies an ambiguous location, and disables markup
 because a rejected list renders as `['a']`, which rich would eat as a style tag.
 

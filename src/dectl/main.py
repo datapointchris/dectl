@@ -6,10 +6,8 @@ from typing import Annotated
 from typing import Any
 
 import typer
-import yaml
 from botocore.exceptions import BotoCoreError
 from botocore.exceptions import ClientError
-from pydantic import ValidationError
 from rich.markup import escape
 from typer.core import TyperGroup
 
@@ -24,12 +22,11 @@ from dectl.commands.s3 import make_s3_app
 from dectl.commands.search import SEARCHERS
 from dectl.commands.search import run_search
 from dectl.commands.stepfunctions import make_sfn_app
-from dectl.config import CONFIG_LOAD_ERRORS
 from dectl.config import CONFIG_PATH
 from dectl.config import DectlConfig
 from dectl.config import Defaults
 from dectl.config import PipelineConfig
-from dectl.config import load_config
+from dectl.config import loaded_config
 from dectl.config import report_config_error
 from dectl.env import active_environment
 from dectl.env import set_active_environment
@@ -48,19 +45,14 @@ from dectl.session import make_session
 if TYPE_CHECKING:
     import pyselfupdate
 
-# A present-but-invalid config must not brick the CLI: without this guard the ValidationError
-# would propagate out of import and take down every command, including the `config validate` /
-# `config edit` you would use to fix it. Fall back to no config and surface the reason wherever
-# the missing pipelines are noticed.
+# A present-but-invalid config must not brick the CLI: raised here, the ValidationError would
+# propagate out of import and take down every command, including the `config validate` /
+# `config edit` you would use to fix it. So `loaded_config` returns the failure rather than raising
+# it, and the reason surfaces wherever the missing pipelines are noticed.
 #
 # The exception itself is kept, not str(exc): every reporting site renders it through
 # report_config_error, which walks exc.errors() for the location and the rejected value.
-try:
-    cfg = load_config()
-    CONFIG_ERROR: yaml.YAMLError | ValidationError | None = None
-except CONFIG_LOAD_ERRORS as exc:
-    cfg = None
-    CONFIG_ERROR = exc
+cfg, CONFIG_ERROR = loaded_config()
 
 
 def require_config() -> DectlConfig:
