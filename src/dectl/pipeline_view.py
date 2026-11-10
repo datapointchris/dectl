@@ -184,17 +184,22 @@ def pipeline_to_dict(name: str, pipeline: PipelineConfig) -> dict[str, Any]:
 
 
 def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
-    """Print a pipeline's resources as human-readable, env-substituted alias -> AWS name lines."""
+    """Print a pipeline's resources as human-readable, env-substituted alias -> AWS name lines.
+
+    The lines are printed as one text rather than one call each. rich parses markup, highlights
+    and wraps per call, and that setup was most of `list` and `config show` across many
+    pipelines. The output is byte-identical either way."""
     warn_if_environment_had_no_effect(aws_names_only(pipeline))
+    lines: list[str] = []
     resolved = resolved_paths(pipeline)
     types = resource_types(pipeline)
-    info(f'[bold]{name}[/bold] ({", ".join(types) or "none configured"})')
+    lines.append(f'[bold]{name}[/bold] ({", ".join(types) or "none configured"})')
     # `is not None`, matching `pipeline_to_dict`'s `declared`. Truthiness calls an empty string
     # unset, and the two renderers then disagree about one fact — with the human one sending a
     # reader to add a key their file already has.
     declared = pipeline.resolve_paths_from is not None
     source = '' if declared else ' (working directory — resolve_paths_from is unset)'
-    info(f'  resolve_paths_from: {pipeline_root(pipeline)}{source}')
+    lines.append(f'  resolve_paths_from: {pipeline_root(pipeline)}{source}')
 
     def print_paths(resource: str, alias: str) -> None:
         """The resolved path of every field this resource declares, named by its config key.
@@ -204,38 +209,39 @@ def render_pipeline(name: str, pipeline: PipelineConfig) -> None:
         this function being edited."""
         for field, paths in resolved.get((resource, alias), {}).items():
             for path in paths:
-                info(f'    {field}: {path}')
+                lines.append(f'    {field}: {path}')
 
     for alias, job in pipeline.glue_jobs.items():
-        info(f'  glue/{alias}: {substitute_env(job.name)}')
+        lines.append(f'  glue/{alias}: {substitute_env(job.name)}')
         for uri in script_uris(job):
-            info(f'    deploys to: {uri}')
+            lines.append(f'    deploys to: {uri}')
         managed = managed_definition(job)
         if managed:
-            info(f'    manages: {", ".join(f"{field}={value}" for field, value in managed.items())}')
+            lines.append(f'    manages: {", ".join(f"{field}={value}" for field, value in managed.items())}')
         print_paths('glue', alias)
     for alias, fn in pipeline.lambdas.items():
         # Worth calling out inline: a durable function carries a different set of verbs.
         marker = ' (durable)' if fn.durable else ''
-        info(f'  lambda/{alias}: {substitute_env(fn.name)}{marker}')
+        lines.append(f'  lambda/{alias}: {substitute_env(fn.name)}{marker}')
         print_paths('lambda', alias)
     for alias, sfn in pipeline.step_functions.items():
-        info(f'  sfn/{alias}: {substitute_env(sfn.name)}')
+        lines.append(f'  sfn/{alias}: {substitute_env(sfn.name)}')
         for name, value in sfn.definition_substitutions.items():
-            info(f'    ${{{name}}}: {substitute_env(value)}')
+            lines.append(f'    ${{{name}}}: {substitute_env(value)}')
         if sfn.live_alias:
-            info(f'    live alias: {substitute_env(sfn.live_alias)}')
+            lines.append(f'    live alias: {substitute_env(sfn.live_alias)}')
         print_paths('sfn', alias)
     for alias, bucket in pipeline.buckets.items():
-        info(f'  s3/{alias}: {substitute_env(bucket)}')
+        lines.append(f'  s3/{alias}: {substitute_env(bucket)}')
     for alias, table in pipeline.iceberg_tables.items():
-        info(f'  iceberg/{alias}: {substitute_env(table.database)}.{substitute_env(table.table)}')
+        lines.append(f'  iceberg/{alias}: {substitute_env(table.database)}.{substitute_env(table.table)}')
         print_paths('iceberg', alias)
     # Aliases into the lists above rather than AWS names, so neither row is substituted.
     monitored = pipeline.monitor.selected_aliases()
     if monitored:
-        info(f'  monitor: {", ".join(monitored)}')
+        lines.append(f'  monitor: {", ".join(monitored)}')
     if pipeline.jenkins is not None:
         actions = ', '.join(pipeline.jenkins.actions) or 'none, so nothing queues a build'
-        info(f'  jenkins: {substitute_env(pipeline.jenkins.job_path)} (actions: {actions})')
-    info('')
+        lines.append(f'  jenkins: {substitute_env(pipeline.jenkins.job_path)} (actions: {actions})')
+    lines.append('')
+    info('\n'.join(lines))
