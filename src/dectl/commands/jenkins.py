@@ -27,7 +27,14 @@ def resolve_env(value: str) -> str:
     return value
 
 
-def jenkins_request(config: DectlConfig, method: str, path: str, **kwargs):
+class JenkinsError(Exception):
+    """A Jenkins request that failed in transport or answered a status its caller did not expect.
+
+    The root group ends on its message, so no caller checks a status or catches a transport
+    error itself, and the next verb gets both by passing the status it expects."""
+
+
+def jenkins_request(config: DectlConfig, method: str, path: str, expected_status: int, **kwargs) -> httpx2.Response:
     jenkins = config.jenkins
     if not jenkins:
         error(f'no jenkins config in {CONFIG_PATH}')
@@ -36,9 +43,16 @@ def jenkins_request(config: DectlConfig, method: str, path: str, **kwargs):
     url = f'{jenkins.url.rstrip("/")}/{path.lstrip("/")}'
     auth = (resolve_env(jenkins.user), resolve_env(jenkins.token))
 
-    with httpx2.Client(auth=auth, timeout=30) as client:
-        resp = client.request(method, url, **kwargs)
-        return resp
+    try:
+        with httpx2.Client(auth=auth, timeout=30) as client:
+            resp = client.request(method, url, **kwargs)
+    except httpx2.HTTPError as exc:
+        raise JenkinsError(f'Jenkins {method} {url} failed: {exc}') from exc
+
+    if resp.status_code != expected_status:
+        detail = f': {resp.text.strip()}' if resp.text.strip() else ''
+        raise JenkinsError(f'Jenkins {method} {url} answered {resp.status_code}, expected {expected_status}{detail}')
+    return resp
 
 
 def job_url_path(job: JenkinsJobConfig) -> str:
@@ -74,13 +88,8 @@ def make_jenkins_app(pipeline_name: str, job_config: JenkinsJobConfig, config: D
     def queue_build(action: str, follow: bool) -> None:
         job = resolved()
         params = {**job.parameters, **job.actions[action]}
-        resp = jenkins_request(config, 'POST', f'{job_url_path(job)}/buildWithParameters', data=params)
-
-        if resp.status_code == 201:
-            info(f'build queued for {pipeline_name} ({action})')
-        else:
-            error(f'failed to queue build: {resp.status_code} {resp.text}')
-            raise typer.Exit(1)
+        jenkins_request(config, 'POST', f'{job_url_path(job)}/buildWithParameters', 201, data=params)
+        info(f'build queued for {pipeline_name} ({action})')
 
         if follow:
             time.sleep(3)
@@ -110,12 +119,7 @@ def make_jenkins_app(pipeline_name: str, job_config: JenkinsJobConfig, config: D
         """Show the result of the most recent Jenkins build for this pipeline.
 
         Exits 0 while the build runs or once it succeeded, and 3 when it finished any other way."""
-        resp = jenkins_request(config, 'GET', f'{job_url_path(resolved())}/lastBuild/api/json')
-
-        if resp.status_code != 200:
-            error(f'failed to get build status: {resp.status_code}')
-            raise typer.Exit(1)
-
+        resp = jenkins_request(config, 'GET', f'{job_url_path(resolved())}/lastBuild/api/json', 200)
         data = resp.json()
         building = data.get('building', False)
         result = data.get('result', 'IN PROGRESS' if building else 'UNKNOWN')
@@ -151,12 +155,7 @@ def make_jenkins_app(pipeline_name: str, job_config: JenkinsJobConfig, config: D
         offset = 0
 
         while True:
-            resp = jenkins_request(config, 'GET', f'{job_url_path(job)}/lastBuild/logText/progressiveText?start={offset}')
-
-            if resp.status_code != 200:
-                error(f'failed to get logs: {resp.status_code}')
-                raise typer.Exit(1)
-
+            resp = jenkins_request(config, 'GET', f'{job_url_path(job)}/lastBuild/logText/progressiveText?start={offset}', 200)
             text = resp.text
             if text:
                 print(strip_jenkins_noise(text), end='')

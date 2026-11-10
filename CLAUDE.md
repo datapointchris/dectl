@@ -244,7 +244,8 @@ its own `Config`, so no call site sets one. Every program dectl starts on this
 machine, `mount-s3`, `umount` and the config editor, goes through `external_command.run`. Call
 sites reach it as `external_command.run` rather than importing the function, so a test patches
 `dectl.external_command.run` once. Jenkins is reached through `jenkins_request` in
-`commands/jenkins.py`.
+`commands/jenkins.py`. Its caller passes the status it expects, and a transport failure or any
+other status raises one `JenkinsError`, so no call site checks a status.
 
 ## Gotchas
 
@@ -360,8 +361,9 @@ sites reach it as `external_command.run` rather than importing the function, so 
   `cfg is None`.
 - **stdout is data and stderr is everything else.** Every refusal calls `output.error`, never
   `console.print`. `success` and `info` stay on stdout because they are the answer.
-- **An AWS error no command catches ends on botocore's own sentence, never a traceback.**
-  `DectlGroup.invoke` catches `ClientError` and `BotoCoreError`, prints the message and exits 1.
+- **An AWS or Jenkins error no command catches ends on its own sentence, never a traceback.**
+  `DectlGroup.invoke` catches `ClientError`, `BotoCoreError` and `JenkinsError`, prints the
+  message and exits 1.
   A command that knows what a refusal means catches it first and says that instead, as
   `locate_metadata` does for a missing table.
 

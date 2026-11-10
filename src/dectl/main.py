@@ -18,6 +18,7 @@ from typer.core import TyperGroup
 from dectl.commands.config_cmd import config_app
 from dectl.commands.glue import make_glue_app
 from dectl.commands.iceberg import make_iceberg_app
+from dectl.commands.jenkins import JenkinsError
 from dectl.commands.jenkins import make_jenkins_app
 from dectl.commands.lambda_ import make_lambda_app
 from dectl.commands.monitor import run_monitor
@@ -102,14 +103,15 @@ class DectlGroup(TyperGroup):
         return command
 
     def invoke(self, ctx: Any) -> Any:
-        """End on AWS's own sentence where AWS refused and no command said more.
+        """End on the remote's own sentence where AWS or Jenkins refused and no command said more.
 
         botocore's message names the operation, the error code and the resource, which is all a
-        traceback through botocore's frames would add. A command that knows what a refusal
-        means catches it first and says that instead."""
+        traceback through botocore's frames would add. A `JenkinsError` names the request, and
+        the status or transport failure it met. A command that knows what a refusal means
+        catches it first and says that instead."""
         try:
             return super().invoke(ctx)
-        except (BotoCoreError, ClientError) as exc:
+        except (BotoCoreError, ClientError, JenkinsError) as exc:
             error(escape(str(exc)))
             raise typer.Exit(1) from exc
 
