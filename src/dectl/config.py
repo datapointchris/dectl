@@ -46,6 +46,13 @@ from dectl.values import root_fault
 from dectl.variables import expand_variables
 from dectl.variables import file_and_key
 
+# libyaml's loader where PyYAML was built with it, as its wheels are. It parses a pipeline file
+# about eight times faster than the pure-Python one, and every invocation parses every file.
+try:
+    from yaml import CSafeLoader as SafeLoader
+except ImportError:
+    from yaml import SafeLoader
+
 
 def config_home() -> Path:
     override = os.environ.get('XDG_CONFIG_HOME')
@@ -1000,7 +1007,7 @@ def pipelines_dir() -> Path:
 def read_yaml(path: Path) -> Any:
     # The open file rather than its text, so a YAML error's position names the file.
     with path.open('rb') as handle:
-        return yaml.safe_load(handle)
+        return yaml.load(handle, Loader=SafeLoader)
 
 
 def unknown_key(err: ErrorDetails) -> InitErrorDetails:
