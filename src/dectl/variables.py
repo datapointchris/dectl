@@ -129,7 +129,9 @@ class Pass:
 
         The escape is offered last, because escaping a variable that exists elsewhere ships the
         braces to AWS as text. Moving a variable to the top level is offered only where it would
-        work: one built from another pipeline's variables cannot be read outside that pipeline."""
+        work: one built from another pipeline's variables cannot be read outside that pipeline.
+        A variable no block defines is reported with the blocks searched, because a command
+        naming one pipeline reads no sibling's block and cannot say it is defined nowhere."""
         if name in below:
             return f'variable {token} is defined below this one, and a variable sees only those above it'
         if name in self.defined:
@@ -145,7 +147,10 @@ class Pass:
                 f"{unseen}. A pipeline's variables reach that pipeline alone: define it in {here} too, or move it "
                 f'to {TOP_LEVEL_VARIABLES} if every pipeline shares its value'
             )
-        missing = f'variable {token} cannot be found'
+        searched = [TOP_LEVEL_VARIABLES]
+        if location[0] == 'pipelines' and len(location) > 1:
+            searched.append(file_and_key(('pipelines', location[1], 'variables')))
+        missing = f'variable {token} cannot be found in {" or ".join(searched)}'
         escape = f'If a job or Jenkinsfile fills {token} itself, write {{{token}}}'
         # A placeholder the job fills can sit close to a variable's name, as {date} does to {dataset}.
         close = difflib.get_close_matches(name, list(scope), n=1)
@@ -232,7 +237,7 @@ def unquoted_token(value: Any) -> bool:
 
 
 def defined_variables(raw: dict[Any, Any]) -> dict[str, list[Definition]]:
-    """Every variable name config.yaml and the pipeline files define, and each block defining it."""
+    """Every variable name config.yaml and the pipeline files read define, and each block defining it."""
     blocks: list[tuple[str, Any]] = [(TOP_LEVEL_VARIABLES, raw.get('variables'))]
     pipelines = raw.get('pipelines')
     if isinstance(pipelines, dict):
