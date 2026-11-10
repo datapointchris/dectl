@@ -84,7 +84,16 @@ def require_config() -> DectlConfig:
 
 
 class DectlGroup(TyperGroup):
-    """The root group, which decides how a failure no command handled reaches the reader."""
+    """The root group: the global commands, then a `PipelineGroup` for each attached pipeline.
+
+    It also decides how a failure no command handled reaches the reader."""
+
+    def __init__(self, **attrs: Any) -> None:
+        super().__init__(**attrs)
+        if cfg is not None:
+            for name, pipeline in cfg.pipelines.items():
+                if pipeline_has_commands(pipeline, cfg):
+                    self.add_command(PipelineGroup(name, pipeline, cfg))
 
     # `Any` because typer vendors click privately as `typer._click`, and those are the types
     # this signature has to match. `click` itself is not a dectl dependency and would be the
@@ -141,78 +150,104 @@ def resolve_env_source(ctx: typer.Context) -> str:
 
 DEFAULT_ENVIRONMENT = cfg.defaults.environment if cfg else 'dev'
 
-# A pipeline configuring no resource has no commands, so it is never attached to the tree.
-ATTACHED_PIPELINES: list[str] = []
-if cfg:
-    for name, pipeline in cfg.pipelines.items():
-        resources = []
-        if pipeline.glue_jobs:
-            resources.append(f'glue ({", ".join(pipeline.glue_jobs)})')
-        if pipeline.lambdas:
-            resources.append(f'lambda ({", ".join(pipeline.lambdas)})')
-        if pipeline.step_functions:
-            resources.append(f'sfn ({", ".join(pipeline.step_functions)})')
-        if pipeline.buckets:
-            resources.append(f's3 ({", ".join(pipeline.buckets)})')
-        if pipeline.iceberg_tables:
-            resources.append(f'iceberg ({", ".join(pipeline.iceberg_tables)})')
-        if pipeline.jenkins and cfg.jenkins:
-            actions = pipeline.jenkins.actions
-            resources.append(f'jenkins ({", ".join(actions)})' if actions else 'jenkins')
-        summary = ' · '.join(resources) if resources else 'none configured'
-        pipeline_app = typer.Typer(
+
+def pipeline_summary(pipeline: PipelineConfig, config: DectlConfig) -> str:
+    """Each resource the pipeline configures, with its aliases, as the root help lists it."""
+    resources = []
+    if pipeline.glue_jobs:
+        resources.append(f'glue ({", ".join(pipeline.glue_jobs)})')
+    if pipeline.lambdas:
+        resources.append(f'lambda ({", ".join(pipeline.lambdas)})')
+    if pipeline.step_functions:
+        resources.append(f'sfn ({", ".join(pipeline.step_functions)})')
+    if pipeline.buckets:
+        resources.append(f's3 ({", ".join(pipeline.buckets)})')
+    if pipeline.iceberg_tables:
+        resources.append(f'iceberg ({", ".join(pipeline.iceberg_tables)})')
+    if pipeline.jenkins and config.jenkins:
+        actions = pipeline.jenkins.actions
+        resources.append(f'jenkins ({", ".join(actions)})' if actions else 'jenkins')
+    return ' · '.join(resources) if resources else 'none configured'
+
+
+def pipeline_has_commands(pipeline: PipelineConfig, config: DectlConfig) -> bool:
+    """Whether the pipeline configures a resource or a monitor, without which it has no command."""
+    resources = [pipeline.glue_jobs, pipeline.lambdas, pipeline.step_functions, pipeline.buckets, pipeline.iceberg_tables]
+    return any(resources) or bool(pipeline.jenkins and config.jenkins) or bool(pipeline.monitor.selected_aliases())
+
+
+def make_pipeline_app(name: str, pipeline: PipelineConfig, config: DectlConfig) -> typer.Typer:
+    """The tree under one pipeline's name: a sub-app per configured resource, then `list` and `monitor`."""
+    pipeline_app = typer.Typer()
+    if pipeline.glue_jobs:
+        pipeline_app.add_typer(make_glue_app(name, pipeline, config), name='glue', rich_help_panel='Resources')
+    if pipeline.lambdas:
+        pipeline_app.add_typer(make_lambda_app(name, pipeline, config), name='lambda', rich_help_panel='Resources')
+    if pipeline.step_functions:
+        pipeline_app.add_typer(make_sfn_app(name, pipeline, config), name='sfn', rich_help_panel='Resources')
+    if pipeline.buckets:
+        pipeline_app.add_typer(make_s3_app(name, pipeline, config), name='s3', rich_help_panel='Resources')
+    if pipeline.iceberg_tables:
+        pipeline_app.add_typer(make_iceberg_app(name, pipeline, config), name='iceberg', rich_help_panel='Resources')
+    if pipeline.jenkins and config.jenkins:
+        pipeline_app.add_typer(make_jenkins_app(name, pipeline.jenkins, config), name='jenkins', rich_help_panel='Pipeline')
+
+    @pipeline_app.command('list', rich_help_panel='Pipeline')
+    def list_resources(
+        as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
+    ) -> None:
+        """Show this pipeline's jobs, functions, and buckets with their real AWS names."""
+        if as_json:
+            emit_json(pipeline_to_dict(name, pipeline))
+        else:
+            render_pipeline(name, pipeline)
+
+    if pipeline.monitor.selected_aliases():
+
+        @pipeline_app.command('monitor', rich_help_panel='Pipeline')
+        def monitor_pipeline() -> None:
+            """Tail every configured monitor source for this pipeline as one interleaved stream."""
+            run_monitor(pipeline, config)
+
+    return pipeline_app
+
+
+class PipelineGroup(TyperGroup):
+    """One pipeline's command group, whose tree is built the first time a command under it is asked for.
+
+    Root help and shell completion read a pipeline's name, help and panel and nothing below them,
+    so a run builds the tree of the one pipeline it names. Building every pipeline's tree on every
+    run made each command's start grow with the number of pipeline files."""
+
+    def __init__(self, name: str, pipeline: PipelineConfig, config: DectlConfig) -> None:
+        super().__init__(
+            name=name,
+            help=f'[bold]{name}[/bold] pipeline — {pipeline_summary(pipeline, config)}',
             no_args_is_help=True,
-            help=f'[bold]{name}[/bold] pipeline — {summary}',
+            rich_help_panel='Pipelines',
         )
-        has_commands = False
-        if pipeline.glue_jobs:
-            pipeline_app.add_typer(make_glue_app(name, pipeline, cfg), name='glue', rich_help_panel='Resources')
-            has_commands = True
-        if pipeline.lambdas:
-            pipeline_app.add_typer(make_lambda_app(name, pipeline, cfg), name='lambda', rich_help_panel='Resources')
-            has_commands = True
-        if pipeline.step_functions:
-            pipeline_app.add_typer(make_sfn_app(name, pipeline, cfg), name='sfn', rich_help_panel='Resources')
-            has_commands = True
-        if pipeline.buckets:
-            pipeline_app.add_typer(make_s3_app(name, pipeline, cfg), name='s3', rich_help_panel='Resources')
-            has_commands = True
-        if pipeline.iceberg_tables:
-            pipeline_app.add_typer(make_iceberg_app(name, pipeline, cfg), name='iceberg', rich_help_panel='Resources')
-            has_commands = True
-        if pipeline.jenkins and cfg.jenkins:
-            pipeline_app.add_typer(make_jenkins_app(name, pipeline.jenkins, cfg), name='jenkins', rich_help_panel='Pipeline')
-            has_commands = True
-        has_monitor = bool(pipeline.monitor.selected_aliases())
-        if has_monitor:
-            has_commands = True
-        if has_commands:
+        self.pipeline_name = name
+        self.pipeline = pipeline
+        self.config = config
+        self.built = False
 
-            def _make_list_cmd(papp: typer.Typer, pname: str, pconfig: PipelineConfig):
-                @papp.command('list', rich_help_panel='Pipeline')
-                def list_resources(
-                    as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
-                ) -> None:
-                    """Show this pipeline's jobs, functions, and buckets with their real AWS names."""
-                    if as_json:
-                        emit_json(pipeline_to_dict(pname, pconfig))
-                    else:
-                        render_pipeline(pname, pconfig)
+    def build(self) -> None:
+        if not self.built:
+            tree = typer.main.get_group(make_pipeline_app(self.pipeline_name, self.pipeline, self.config))
+            self.commands.update(tree.commands)
+            self.built = True
 
-            _make_list_cmd(pipeline_app, name, pipeline)
+    def list_commands(self, ctx: Any) -> list[str]:
+        self.build()
+        return super().list_commands(ctx)
 
-            if has_monitor:
+    def get_command(self, ctx: Any, cmd_name: str) -> Any:
+        self.build()
+        return super().get_command(ctx, cmd_name)
 
-                def register_monitor_command(papp: typer.Typer, pconfig: PipelineConfig, gconfig) -> None:
-                    @papp.command('monitor', rich_help_panel='Pipeline')
-                    def monitor_pipeline() -> None:
-                        """Tail every configured monitor source for this pipeline as one interleaved stream."""
-                        run_monitor(pconfig, gconfig)
 
-                register_monitor_command(pipeline_app, pipeline, cfg)
-
-            app.add_typer(pipeline_app, name=name, rich_help_panel='Pipelines')
-            ATTACHED_PIPELINES.append(name)
+# A pipeline configuring no resource has no commands, so it is never attached to the tree.
+ATTACHED_PIPELINES: list[str] = [name for name, pipeline in cfg.pipelines.items() if pipeline_has_commands(pipeline, cfg)] if cfg else []
 
 
 def root_examples(config: DectlConfig | None, attached: list[str]) -> str:

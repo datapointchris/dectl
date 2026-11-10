@@ -6,17 +6,20 @@ Jenkins deploys) from one config directory. Installed via `uv tool install`; the
 
 ## The core idea: the CLI surface is assembled from config at import time
 
-There is no static command tree. `src/dectl/main.py` calls `load_config()` **at module import**
-and then builds the Typer app dynamically: it loops over the pipelines in
-`$XDG_CONFIG_HOME/dectl/pipelines/` and, for each one, attaches only the resource sub-apps
-that the pipeline actually defines. A pipeline with just `buckets` gets an `s3` command and
+There is no static command tree. `src/dectl/main.py` calls `load_config()` **at module import**,
+and the root `DectlGroup` holds a `PipelineGroup` for each pipeline in
+`$XDG_CONFIG_HOME/dectl/pipelines/` that configures a resource. A `PipelineGroup` carries only
+its name, its help line and its panel until a command under it is asked for. Then
+`make_pipeline_app` builds its tree, attaching only the resource sub-apps the pipeline defines.
+So root help and TAB completion read every pipeline's name and help line, and a run builds the
+tree of the one pipeline it names. A pipeline with just `buckets` gets an `s3` command and
 nothing else; add `glue_jobs` and a `glue` command appears. Running `dectl` with no config still works
 (commands like `config init` are always present) because `load_config()` returns `None` rather
 than raising.
 
 This means the command you see depends entirely on the user's config. When adding a resource
-type, you touch two places: the resource's own `make_*_app` module, and the pipeline loop in
-`main.py` that conditionally wires it in (plus the `resources` summary line and
+type, you touch two places: the resource's own `make_*_app` module, and `make_pipeline_app` in
+`main.py` that conditionally wires it in (plus `pipeline_summary`, `pipeline_has_commands` and
 `pipeline_view.render_pipeline`).
 
 ## Grammar: `PIPELINE RESOURCE ALIAS VERB` (verb last)
@@ -169,7 +172,7 @@ docstring before changing either. What a new field or resource has to meet:
 - **Adding a path field to an existing resource is the whole edit.** Checking, resolution,
   `--json` and the printed row all come from the declaration. **A new resource *kind* costs six
   edits**: the `--json` section, its `paths` key, the human section, its `print_paths` call,
-  `resource_types`, and the pipeline loop in `main.py`. `s3` has neither a `print_paths` call nor
+  `resource_types`, and `make_pipeline_app` in `main.py`. `s3` has neither a `print_paths` call nor
   a `paths` key today.
 - **A new `ConfigFault` needs one `FAULT_REPORTING` row**: its wording, whether it is about
   spelling, and its form line. `recovery_lines` derives from the rows, in row order.

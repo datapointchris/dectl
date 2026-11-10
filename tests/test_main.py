@@ -22,6 +22,7 @@ from dectl.config import JENKINS_READ_VERBS
 from dectl.config import S3_SET_VERBS
 from dectl.config import DectlConfig
 from dectl.config import Defaults
+from dectl.config import load_config
 from dectl.main import app
 from tests.conftest import LAYERED_CONFIG
 from tests.conftest import RefusalRunner
@@ -69,6 +70,23 @@ def test_the_layered_config_resolves_a_pipeline_through_the_installed_entry_poin
     assert resolved['iceberg']['events'] | {'paths': {}} == {'database': f'acme_prod_{pipeline}', 'table': dataset, 'paths': {}}
     assert resolved['jenkins'] == {'job_path': f'data-engineering/{pipeline}-deploy', 'actions': ['apply', 'plan']}
     assert resolved['monitor'] == {'lambdas': ['process', 'workflow'], 'step_functions': ['flow']}
+
+
+def test_root_help_completion_and_suggestions_offer_every_pipeline(monkeypatch):
+    # A pipeline's commands are built only when a command names it, and these three read the
+    # pipeline names alone, so each could lose the pipelines without any command failing.
+    monkeypatch.setattr('dectl.config.CONFIG_PATH', LAYERED_CONFIG)
+    monkeypatch.setattr(dectl.main, 'cfg', load_config())
+    monkeypatch.setattr(dectl.main, 'CONFIG_ERROR', None)
+
+    helped = runner.invoke(app, ['--help'])
+    completion = {'_DECTL_COMPLETE': 'complete_bash', 'COMP_WORDS': 'dectl ', 'COMP_CWORD': '1'}
+    completed = runner.invoke(app, [], env=completion, prog_name='dectl')
+    mistyped = runner.invoke(app, ['salse', 'list'])
+
+    assert [line.split()[1] for line in helped.stdout.splitlines() if 'pipeline —' in line] == ['finance', 'sales']
+    assert {'finance', 'sales'} <= set(completed.stdout.split())
+    assert "Did you mean 'sales'?" in mistyped.stderr
 
 
 def test_the_reserved_pipeline_names_are_the_root_commands():
@@ -311,7 +329,7 @@ def test_the_reference_grammar_lists_every_verb_and_option_the_tree_has():
     jenkins = command_surface(typer.main.get_command(make_jenkins_app('proj', pipeline.jenkins, config)))
     jenkins = {path.replace('apply', 'ACTION'): options for path, options in jenkins.items()}
     set_verbs = {path: tree[path] for path in tree if path.split()[1] in S3_SET_VERBS}
-    # `list` and `monitor` are attached per pipeline while main.py imports its config, so no tree
+    # `list` and `monitor` are attached per pipeline by make_pipeline_app, so no tree
     # built here holds them.
     listed_set_verbs = {
         path: options for path, options in reference_grammar(dectl.main.REFERENCE_SET_VERBS).items() if path not in {'list', 'monitor'}
