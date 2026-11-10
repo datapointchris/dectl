@@ -282,8 +282,9 @@ REFERENCE_DURABLE_VERBS = [
 ]
 REFERENCE_SET_VERBS = [
     's3 export [--prefix STR]',
-    'jenkins ACTION [--follow] · jenkins status [--json] · jenkins logs [--follow]',
+    'jenkins ACTION [--follow] · status [BUILD] [--json] · logs [BUILD] [--follow]',
     "        (ACTION: a key of the job's actions in config)",
+    '        (BUILD: the number an action printed, or the most recent build)',
     'list [--json] · monitor',
 ]
 REFERENCE_GLOBAL = [

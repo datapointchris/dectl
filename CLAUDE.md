@@ -75,7 +75,9 @@ names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
   `actions`, each posting `parameters` with its own on top, beside `status` and `logs`. dectl
   names no action itself: what `ACTION=dry_run` does is the Jenkinsfile's, which dectl never
   sees, so a verb dectl named would be a guess at it. Every action queues a build, whatever it
-  is called, and that build is the one `status` and `logs` then read.
+  is called, and polls the queue item the POST's `Location` names until Jenkins numbers the
+  build. That number is what `--follow` streams and what `status` and `logs` take. A queued
+  build is not `lastBuild` until it starts, so they read `lastBuild` only when given no number.
 - `monitor` is a **pipeline-level** command registered on `pipeline_app`, because it spans
   several resources. It tails every resource its `monitor` config block selects as one
   time-ordered stream via `logs.tail_log_groups`.

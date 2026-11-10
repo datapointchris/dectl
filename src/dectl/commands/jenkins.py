@@ -67,6 +67,50 @@ def job_url_path(job: JenkinsJobConfig) -> str:
     return '/job/' + job.job_path.replace('/', '/job/')
 
 
+def build_url_path(job: JenkinsJobConfig, build: int | None) -> str:
+    """One build's URL path: the numbered one, or with None the job's most recent."""
+    return f'{job_url_path(job)}/{"lastBuild" if build is None else build}'
+
+
+# Jenkins names the queue item in the 201's Location. Only its number is read, and the request
+# goes to the configured URL, because a proxy can make the Location's host differ from it.
+QUEUE_ITEM_LOCATION = re.compile(r'/queue/item/(\d+)/?$')
+QUEUE_POLL_SECONDS = 2
+
+
+def queue_item_number(response: 'httpx2.Response') -> int:
+    location = response.headers.get('Location', '')
+    match = QUEUE_ITEM_LOCATION.search(location)
+    if match is None:
+        raise JenkinsError(
+            f'Jenkins queued the build without naming its queue item (Location: {location or "absent"}), '
+            'so dectl cannot tell its build from any other'
+        )
+    return int(match.group(1))
+
+
+def wait_for_build_number(config: DectlConfig, item: int) -> dict:
+    """Poll one queue item until Jenkins starts its build, and return the build's `executable`.
+
+    A build has no number while it is queued, and `lastBuild` is meanwhile the previous one, so
+    the number is the only handle that names the build this POST queued. Each new reason Jenkins
+    gives for the wait is printed once, compared without its digits so a countdown is one reason."""
+    reported = None
+    while True:
+        queued = jenkins_request(config, 'GET', f'/queue/item/{item}/api/json', 200).json()
+        if queued.get('executable'):
+            return queued['executable']
+        if queued.get('cancelled'):
+            error(f'queue item {item} was cancelled in Jenkins before its build started')
+            raise typer.Exit(1)
+        why = queued.get('why') or ''
+        reason = re.sub(r'[\d.]+', '', why)
+        if why and reason != reported:
+            reported = reason
+            info(f'waiting for Jenkins to start it: {why}')
+        time.sleep(QUEUE_POLL_SECONDS)
+
+
 def make_jenkins_app(pipeline_name: str, pipeline: PipelineConfig, config: DectlConfig) -> typer.Typer:
     """Build `dectl PIPELINE jenkins`: one verb per configured action, then `status` and `logs`.
 
@@ -76,7 +120,7 @@ def make_jenkins_app(pipeline_name: str, pipeline: PipelineConfig, config: Dectl
     if job_config is None:
         raise ValueError(f'{pipeline_name} declares no jenkins job, so it has no jenkins command')
     if job_config.actions:
-        verbs = 'Each action from the config queues a build posting its own parameters.'
+        verbs = 'Each action from the config queues a build posting its own parameters, and prints its number once it starts.'
     else:
         verbs = (
             'No actions are configured, so nothing here queues a build. Each key under this '
@@ -86,7 +130,7 @@ def make_jenkins_app(pipeline_name: str, pipeline: PipelineConfig, config: Dectl
     jenkins_app = typer.Typer(
         help=(
             f'Build the Jenkins job of [bold]{pipeline_name}[/bold]: {job_config.job_path}\n\n'
-            f'{verbs} "status" and "logs" read the last build without starting a new one.'
+            f'{verbs} "status" and "logs" read the build whose number they are given, or the most recent one.'
         ),
         no_args_is_help=True,
     )
@@ -98,12 +142,15 @@ def make_jenkins_app(pipeline_name: str, pipeline: PipelineConfig, config: Dectl
     def queue_build(action: str, follow: bool) -> None:
         job = resolved()
         params = {**job.parameters, **job.actions[action]}
-        jenkins_request(config, 'POST', f'{job_url_path(job)}/buildWithParameters', 201, data=params)
-        info(f'build queued for {pipeline_name} ({action})')
+        response = jenkins_request(config, 'POST', f'{job_url_path(job)}/buildWithParameters', 201, data=params)
+        item = queue_item_number(response)
+        info(f'build queued for {pipeline_name} ({action}) as queue item {item}')
+        executable = wait_for_build_number(config, item)
+        number = int(executable['number'])
+        success(f'build #{number} started: {executable.get("url", build_url_path(job, number))}')
 
         if follow:
-            time.sleep(3)
-            stream_console(job)
+            stream_console(job, number)
 
     def add_action_verb(action: str, own_parameters: dict[str, str]) -> None:
         posted = ', '.join(f'{name}={value}' for name, value in own_parameters.items())
@@ -122,14 +169,17 @@ def make_jenkins_app(pipeline_name: str, pipeline: PipelineConfig, config: Dectl
     for action, own_parameters in job_config.actions.items():
         add_action_verb(action, own_parameters)
 
-    @jenkins_app.command()
+    build_argument = typer.Argument(help='The build number an action printed. Defaults to the most recent build.', metavar='BUILD', min=1)
+
+    @jenkins_app.command(epilog=f'Example:\n\ndectl {pipeline_name} jenkins status 42')
     def status(
+        build: Annotated[int | None, build_argument] = None,
         as_json: Annotated[bool, typer.Option('--json', help='Emit machine-readable JSON to stdout.')] = False,
     ) -> None:
-        """Show the result of the most recent Jenkins build for this pipeline.
+        """Show the result of one Jenkins build of this pipeline, the most recent by default.
 
         Exits 0 while the build runs or once it succeeded, and 3 when it finished any other way."""
-        resp = jenkins_request(config, 'GET', f'{job_url_path(resolved())}/lastBuild/api/json', 200)
+        resp = jenkins_request(config, 'GET', f'{build_url_path(resolved(), build)}/api/json', 200)
         data = resp.json()
         building = data.get('building', False)
         result = data.get('result', 'IN PROGRESS' if building else 'UNKNOWN')
@@ -149,23 +199,24 @@ def make_jenkins_app(pipeline_name: str, pipeline: PipelineConfig, config: Dectl
         if exit_code:
             raise typer.Exit(exit_code)
 
-    @jenkins_app.command()
+    @jenkins_app.command(epilog=f'Example:\n\ndectl {pipeline_name} jenkins logs 42 --follow')
     def logs(
+        build: Annotated[int | None, build_argument] = None,
         follow: Annotated[bool, typer.Option('--follow', '-f', help='Keep tailing while the build is still running')] = False,
     ) -> None:
-        """Show (and optionally tail) console output from the most recent build."""
-        stream_console(resolved(), follow=follow)
+        """Show (and optionally tail) console output from one build, the most recent by default."""
+        stream_console(resolved(), build, follow=follow)
 
     def strip_jenkins_noise(text: str) -> str:
         text = re.sub(r'\x1b\[8m.*?\x1b\[0m', '', text)
         lines = text.splitlines(keepends=True)
         return ''.join(line for line in lines if not line.strip().startswith('[Pipeline]'))
 
-    def stream_console(job: JenkinsJobConfig, follow: bool = True) -> None:
+    def stream_console(job: JenkinsJobConfig, build: int | None, follow: bool = True) -> None:
         offset = 0
 
         while True:
-            resp = jenkins_request(config, 'GET', f'{job_url_path(job)}/lastBuild/logText/progressiveText?start={offset}', 200)
+            resp = jenkins_request(config, 'GET', f'{build_url_path(job, build)}/logText/progressiveText?start={offset}', 200)
             text = resp.text
             if text:
                 print(strip_jenkins_noise(text), end='')

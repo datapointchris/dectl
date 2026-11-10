@@ -367,10 +367,10 @@ environment's name.
 ## `jenkins` — dectl queues the build, and the Jenkinsfile decides what it does
 
 ```bash
-dectl example-pipeline jenkins plan            # queue a build posting ACTION=dry_run, as the starter has it
-dectl example-pipeline jenkins apply --follow  # queue one posting ACTION=deploy and stream its console
-dectl example-pipeline jenkins status          # the most recent build's result; exits 3 if it failed
-dectl example-pipeline jenkins logs --follow   # its console output
+dectl example-pipeline jenkins plan              # queue a build posting ACTION=dry_run, as the starter has it
+dectl example-pipeline jenkins apply --follow    # queue one posting ACTION=deploy and stream that build's console
+dectl example-pipeline jenkins status 42         # build 42's result; exits 3 if it failed
+dectl example-pipeline jenkins logs 42 --follow  # its console output
 ```
 
 `jenkins` has no aliases, since a pipeline has one job. Its writes are the keys of the job's
@@ -378,6 +378,11 @@ dectl example-pipeline jenkins logs --follow   # its console output
 no action itself. What `ACTION=dry_run` does belongs to the Jenkinsfile, which dectl never sees, so
 a verb dectl named would be a guess at it. An action cannot be called `status` or `logs`, because it
 would collide with that read.
+
+An action waits until Jenkins starts its build, then prints the build's number. A queued build has
+no number yet, and until it starts the job's most recent build is the one before it. So `--follow`
+streams the numbered build, and `status` and `logs` take the number. Without one they read the most
+recent build, which may be another person's.
 
 The command appears only when the config has both `jenkins` blocks. The one in `config.yaml` names
 the server and its credentials. The pipeline file's own names the job.
