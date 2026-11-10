@@ -62,3 +62,21 @@ def test_build_monitor_sources_substitutes_active_env(monkeypatch):
 
     assert warnings == []
     assert sources[0][1] == '/aws/lambda/salesdata-prod-ingest'
+
+
+def test_env_guard_reads_only_monitored_resources(monkeypatch):
+    monkeypatch.setattr(active_environment, 'name', 'prod')
+    monkeypatch.setattr(active_environment, 'source', '--env')
+    monkeypatch.setattr(active_environment, 'warned_about_missing_placeholder', False)
+    pipeline = pipeline_from(
+        {
+            'lambdas': {
+                'ingest': {'name': 'salesdata-dev-ingest', 'source_dir': 'x'},
+                'unwatched': {'name': 'salesdata-{env}-other', 'source_dir': 'x'},
+            },
+            'monitor': {'lambdas': ['ingest']},
+        }
+    )
+    build_monitor_sources(pipeline)
+
+    assert active_environment.warned_about_missing_placeholder is True
