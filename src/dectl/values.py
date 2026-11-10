@@ -17,6 +17,7 @@ Nothing here knows what a pipeline is. The models and the walk over them are `co
 
 import os
 import re
+from collections.abc import Iterator
 from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
@@ -380,10 +381,14 @@ DIRECTORY_KINDS = frozenset({PathKind.DIRECTORY, PathKind.NON_EMPTY_DIRECTORY})
 NEVER_DEPLOYED = frozenset({'__pycache__', '.git'})
 
 
-def is_deployable(source: Path, found: Path) -> bool:
-    """Whether one entry under `source` is a file a deploy would send.
+def walk_deployable(source: Path) -> Iterator[Path]:
+    """Every file under `source` a deploy would send, never descending into an excluded directory.
 
-    Exclusions are tested against the path *below* `source`, never the absolute one. Reading the
+    Excluded directories are dropped from the walk before it enters them. Filtering what a full
+    walk found instead stats every object in a `.git` to send none of them, which is most of the
+    walk beside a checkout of any age.
+
+    Exclusions are tested on the names *below* `source`, never on the absolute path. Reading the
     whole path puts every directory above the checkout into the question, so a source under
     anything named `__pycache__` — a scratch tree, a container mount — reports as holding
     nothing to deploy, and `config validate` calls a directory with a handler in it empty.
@@ -392,8 +397,14 @@ def is_deployable(source: Path, found: Path) -> bool:
     https remote its config carries a credential helper line, and a `source_dir` naming the
     checkout root — `.` resolves to exactly that — would upload it as the function's own bytes.
     Excluding it here rather than refusing that one spelling also covers the submodule case,
-    where a `.git` sits below a source directory that is otherwise ordinary."""
-    return found.is_file() and not NEVER_DEPLOYED.intersection(found.relative_to(source).parts)
+    where a `.git` sits below a source directory that is otherwise ordinary, as a directory or
+    as the file a submodule's checkout holds."""
+    for directory, directories, files in source.walk():
+        directories[:] = [name for name in directories if name not in NEVER_DEPLOYED]
+        for name in files:
+            found = directory / name
+            if name not in NEVER_DEPLOYED and found.is_file():
+                yield found
 
 
 def deployable_files(source: Path) -> list[Path]:
@@ -402,12 +413,12 @@ def deployable_files(source: Path) -> list[Path]:
     `zip_lambda` needs the list. `path_fault` needs only whether there is one, which is
     `has_deployable_files` — building and sorting a whole tree to answer yes or no costs 70ms
     on a 7,000-file source against 0.4ms, and `config validate` reads a config file."""
-    return sorted(found for found in source.rglob('*') if is_deployable(source, found))
+    return sorted(walk_deployable(source))
 
 
 def has_deployable_files(source: Path) -> bool:
     """Whether `source` holds anything a deploy would send, stopping at the first one."""
-    return any(is_deployable(source, found) for found in source.rglob('*'))
+    return next(walk_deployable(source), None) is not None
 
 
 def holds_traversal(configured: str) -> bool:
