@@ -323,12 +323,14 @@ def reference() -> None:
         console.print(f'  {line}', markup=False)
     console.print()
 
-    config = loaded_config().config
+    config, failure = loaded_config()
     if config:
         configured = [
             kind.word for kind in RESOURCE_KINDS if any(kind.attached(pipeline, config) for pipeline in config.pipelines.values())
         ]
         info(f'Configured on this machine: {", ".join(configured) or "(none)"}')
+    elif failure:
+        info('The config on this machine does not load — run "dectl config validate" to see why.')
     else:
         info('No config on this machine yet — run "dectl config init".')
 
