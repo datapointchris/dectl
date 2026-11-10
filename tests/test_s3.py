@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from dectl.commands.s3 import make_s3_app
 from dectl.config import DectlConfig
@@ -15,6 +16,13 @@ def make_config(buckets: dict[str, str]) -> DectlConfig:
             'pipelines': {'proj': {'buckets': buckets}},
         }
     )
+
+
+def test_a_bucket_alias_named_like_the_export_command_is_refused():
+    with pytest.raises(ValidationError) as refused:
+        make_config({'export': 'my-bucket'})
+
+    assert [error['loc'][-1] for error in refused.value.errors()] == ['buckets']
 
 
 def test_export_emits_evalable_lowercase_statements():

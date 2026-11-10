@@ -54,7 +54,9 @@ names. `dectl PIPELINE list` prints the alias → AWS-name mapping.
 - `iceberg` is the one resource whose verbs are all reads. Its domain lives in
   `src/dectl/iceberg.py`, the same split as `durable.py` beside `lambda_.py`.
 - `s3` is the one resource with a set-level verb: `export` spans every bucket and is a command on
-  the `s3` app itself, beside the per-bucket alias sub-apps.
+  the `s3` app itself, beside the per-bucket alias sub-apps. `S3_SET_VERBS` in `config.py` names
+  it, so a bucket alias of the same name is refused at load, as `JENKINS_READ_VERBS` refuses an
+  action named `status` or `logs`. A test holds each set equal to its app's commands.
 - `lambda`/`sfn` `run` take payloads through `payloads.read_payload`: from `--payload-file F` or
   from stdin as `-`, never from an inline string argument.
 - `sfn` `plan` and `deploy` exist only for a machine naming a `definition_file`: config decides

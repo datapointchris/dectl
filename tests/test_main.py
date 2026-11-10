@@ -12,10 +12,13 @@ from pydantic import ValidationError
 import dectl.main
 from dectl.commands.glue import make_glue_app
 from dectl.commands.iceberg import make_iceberg_app
+from dectl.commands.jenkins import make_jenkins_app
 from dectl.commands.lambda_ import make_lambda_app
 from dectl.commands.s3 import make_s3_app
 from dectl.commands.stepfunctions import make_sfn_app
 from dectl.config import GLOBAL_COMMAND_NAMES
+from dectl.config import JENKINS_READ_VERBS
+from dectl.config import S3_SET_VERBS
 from dectl.config import DectlConfig
 from dectl.config import Defaults
 from dectl.main import app
@@ -73,6 +76,24 @@ def test_the_reserved_pipeline_names_are_the_root_commands():
     root = typer.main.get_command(app)
 
     assert set(root.commands) - set(dectl.main.ATTACHED_PIPELINES) == GLOBAL_COMMAND_NAMES
+
+
+def test_the_reserved_alias_and_action_names_are_each_apps_own_commands():
+    # A command missing from its set lets a bucket alias or a jenkins action take its name, and
+    # one of the two then hides the other with no error.
+    config = DectlConfig.model_validate(
+        {
+            'defaults': {'account_id': '123456789012'},
+            'pipelines': {'proj': {'buckets': {'raw': 'raw-bucket'}, 'jenkins': {'job_path': 'de/proj', 'actions': {'apply': {}}}}},
+        }
+    )
+    pipeline = config.pipelines['proj']
+    assert pipeline.jenkins is not None
+    s3 = typer.main.get_command(make_s3_app('proj', pipeline, config))
+    jenkins = typer.main.get_command(make_jenkins_app('proj', pipeline.jenkins, config))
+
+    assert set(s3.commands) - set(pipeline.buckets) == S3_SET_VERBS
+    assert set(jenkins.commands) - set(pipeline.jenkins.actions) == JENKINS_READ_VERBS
 
 
 def test_update_installs_the_published_release(monkeypatch):

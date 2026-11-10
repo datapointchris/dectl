@@ -300,7 +300,12 @@ class JenkinsConfig(StrictModel):
     token: str
 
 
+# The jenkins app's own commands, which an action of the same name would collide with. A test
+# holds this equal to the tree.
 JENKINS_READ_VERBS = frozenset({'status', 'logs'})
+# The s3 app's set-level commands, which a bucket alias of the same name would collide with. A
+# test holds this equal to the tree.
+S3_SET_VERBS = frozenset({'export'})
 
 
 class JenkinsJobConfig(StrictModel):
@@ -502,6 +507,15 @@ class PipelineConfig(ResourceModel):
     iceberg_tables: dict[str, IcebergTableConfig] = {}
     monitor: MonitorConfig = MonitorConfig()
     jenkins: JenkinsJobConfig | None = None
+
+    @field_validator('buckets')
+    @classmethod
+    def refuse_aliases_named_like_a_set_verb(cls, buckets: dict[str, str]) -> dict[str, str]:
+        """An alias named `export` would share that command's name under `s3`, and only one survives."""
+        taken = sorted(set(buckets) & S3_SET_VERBS)
+        if taken:
+            raise ValueError(f'{", ".join(taken)} already names an s3 command; give the bucket another alias')
+        return buckets
 
 
 class DectlConfig(StrictModel):
