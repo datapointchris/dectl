@@ -401,28 +401,44 @@ def upload_scripts_and_update_job(
             error(f'script disappeared after the deploy checked it: {path}')
         raise typer.Exit(1)
 
+    # Imported here rather than at the top, as every door's client is: the session is open, so
+    # boto3 is loaded already. upload_file wraps S3's refusal in this, which is no ClientError, so
+    # the root group would end it in a traceback.
+    from boto3.exceptions import S3UploadFailedError
+
     s3 = session.client('s3')
 
-    def upload(batch: list[ResolvedScript]) -> None:
+    def upload(batch: list[ResolvedScript], state_if_refused: str) -> None:
         for source in batch:
             # The key through `join_key` and the report through `script_uri`, so this call and
             # `ScriptLocation` agree by construction. Joining the prefix here by hand would make
             # them two renderings of one key, and the object then lands where the job definition
             # does not name.
-            s3.upload_file(
-                Filename=str(source.path),
-                Bucket=glue_job.script_bucket,
-                Key=join_key(glue_job.script_prefix, source.name),
-            )
+            try:
+                s3.upload_file(
+                    Filename=str(source.path),
+                    Bucket=glue_job.script_bucket,
+                    Key=join_key(glue_job.script_prefix, source.name),
+                )
+            except S3UploadFailedError as exc:
+                error(str(exc))
+                error(state_if_refused)
+                raise typer.Exit(1) from exc
             success(f'uploaded {source.path} -> {script_uri(glue_job, source.name)}')
 
     if update is None:
-        upload(sources)
+        upload(sources, f'Any script uploaded above is already what {glue_job.name} runs.')
         return
     read_now = scripts_the_job_reads(update.before)
-    upload([source for source in sources if script_uri(glue_job, source.name) not in read_now])
+    upload(
+        [source for source in sources if script_uri(glue_job, source.name) not in read_now],
+        f'Nothing {glue_job.name} runs was changed, and its definition was not updated.',
+    )
     apply_glue_job_update(session, glue_job, update)
-    upload([source for source in sources if script_uri(glue_job, source.name) in read_now])
+    upload(
+        [source for source in sources if script_uri(glue_job, source.name) in read_now],
+        f'The job definition was already updated, so {glue_job.name} runs it with the scripts it ran before until a deploy uploads them.',
+    )
 
 
 # How far before a run's recorded start to begin scanning for its log events. Glue's StartedOn

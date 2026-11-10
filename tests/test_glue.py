@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 import typer
+from boto3.exceptions import S3UploadFailedError
 from botocore.exceptions import ClientError
 
 from dectl import prompt
@@ -36,7 +37,7 @@ class FakeGlueClient:
     def __init__(self, existing_job):
         self.existing_job = existing_job
         self.captured_update = None
-        self.refusal: Exception | None = None
+        self.refusal = None
 
     def get_job(self, JobName):
         # A fresh copy per read, as boto3 parses one per response, so a second read is never the
@@ -365,13 +366,18 @@ class FakeS3Client:
     A fake accepting any string would let a resolver that produces a wrong path look identical
     to one that produces the right path, which is the whole of what these tests measure."""
 
-    def __init__(self) -> None:
+    def __init__(self, absent_buckets: frozenset[str] = frozenset()) -> None:
         self.uploads: list[tuple[str, str, str]] = []
+        self.absent_buckets = absent_buckets
 
     def upload_file(self, **kwargs):
         filename = kwargs['Filename']
         if not Path(filename).is_file():
             raise FileNotFoundError(filename)
+        # upload_file wraps S3's refusal in boto3's own exception, which is no ClientError.
+        if kwargs['Bucket'] in self.absent_buckets:
+            cause = 'An error occurred (NoSuchBucket) when calling the PutObject operation: The specified bucket does not exist'
+            raise S3UploadFailedError(f'Failed to upload {filename} to {kwargs["Bucket"]}/{kwargs["Key"]}: {cause}')
         # Real S3 answers InvalidBucketName for anything outside its naming rule, so a fake that
         # took any string would let an unsubstituted `b-{env}` look identical to a substituted
         # one. The rule is `bucket_fault`, read rather than restated: a second copy of the same
@@ -590,6 +596,24 @@ def test_a_refused_update_leaves_the_job_on_the_scripts_it_ran(monkeypatch, tmp_
         runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy', '--yes'])
 
     assert [key for _, _, key in session.s3.uploads] == ['scripts/helpers.py']
+
+
+def test_a_refused_upload_ends_on_its_cause_and_the_state_it_left(monkeypatch, tmp_path):
+    """S3's refusal reaches dectl as boto3's own exception, which the root group does not catch,
+    so it would end in a traceback. Here the update already landed, so the job runs the new
+    definition with the old script, which only this command can say."""
+    (tmp_path / 'copy.py').write_text('x')
+    config = deploy_config(tmp_path)
+    live_script = {'Name': 'pythonshell', 'ScriptLocation': 's3://salesdata-scripts/scripts/copy.py'}
+    session = FakeDeploySession({'Name': 'my-job', 'Role': 'old-role', 'Command': live_script})
+    session.s3.absent_buckets = frozenset({'salesdata-scripts'})
+    monkeypatch.setattr('dectl.commands.glue.make_session', lambda _config: session)
+
+    result = runner.invoke(make_glue_app('proj', config.pipelines['proj'], config), ['copy', 'deploy', '--yes'])
+
+    assert result.exit_code == 1
+    assert 'NoSuchBucket' in result.stderr
+    assert 'definition was already updated' in ' '.join(result.stderr.split())
 
 
 def test_plan_refuses_a_missing_script_rather_than_reporting_a_clean_diff(monkeypatch, tmp_path):
