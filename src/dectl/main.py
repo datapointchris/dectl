@@ -1,6 +1,7 @@
 import importlib.metadata
 import json
 from itertools import starmap
+from typing import TYPE_CHECKING
 from typing import Annotated
 from typing import Any
 
@@ -9,9 +10,6 @@ import yaml
 from botocore.exceptions import BotoCoreError
 from botocore.exceptions import ClientError
 from pydantic import ValidationError
-from pyselfupdate import Config
-from pyselfupdate import notify
-from pyselfupdate.typercmd import run_update
 from rich.markup import escape
 from typer.core import TyperGroup
 
@@ -46,6 +44,9 @@ from dectl.pipeline_view import resource_types
 from dectl.prompt import set_no_input
 from dectl.session import installed_version
 from dectl.session import make_session
+
+if TYPE_CHECKING:
+    import pyselfupdate
 
 # A present-but-invalid config must not brick the CLI: without this guard the ValidationError
 # would propagate out of import and take down every command, including the `config validate` /
@@ -313,13 +314,19 @@ def reference() -> None:
         info('No config on this machine yet — run "dectl config init".')
 
 
-# Shared by the `update` command and the daily check in the root callback, so the
-# notice cannot name a release the update command would not install.
-#
-# No token is configured because pyselfupdate authenticates itself, running
-# `gh auth token` when a request is about to be made. `$GITHUB_TOKEN_COMMAND`
-# redirects that or empties it, and it is the user's lever rather than ours.
-UPDATE_CONFIG = Config(tool='dectl', owner='datapointchris')
+def update_config() -> 'pyselfupdate.Config':
+    """What `update` installs and what the root callback's daily check compares against.
+
+    One source, so the notice cannot name a release the update command would not install. No
+    token is configured because pyselfupdate authenticates itself, running `gh auth token` when a
+    request is about to be made. `$GITHUB_TOKEN_COMMAND` redirects that or empties it, and it is
+    the user's lever rather than ours.
+
+    pyselfupdate is imported here rather than at the top, so `--help`, `--version` and shell
+    completion, which never reach the callback, do not load it."""
+    import pyselfupdate
+
+    return pyselfupdate.Config(tool='dectl', owner='datapointchris')
 
 
 def installed_commit() -> str | None:
@@ -363,7 +370,9 @@ def update(
     check_only: Annotated[bool, typer.Option('--check', help='Report whether an update is available without installing it')] = False,
 ) -> None:
     """Update dectl to the latest published GitHub release."""
-    run_update(UPDATE_CONFIG, check_only=check_only)
+    from pyselfupdate.typercmd import run_update
+
+    run_update(update_config(), check_only=check_only)
 
 
 @app.callback(
@@ -415,7 +424,9 @@ def main(
     # command's own output. `dectl update` is the only place an update failure is reported, and is
     # skipped here because it is about to do the thing the notice would suggest.
     if ctx.invoked_subcommand != 'update':
-        notify(UPDATE_CONFIG)
+        from pyselfupdate import notify
+
+        notify(update_config())
     if ctx.invoked_subcommand is None:
         print_environment_banner()
         if CONFIG_ERROR is not None:

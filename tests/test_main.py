@@ -99,7 +99,7 @@ def test_the_reserved_alias_and_action_names_are_each_apps_own_commands():
 
 def test_update_installs_the_published_release(monkeypatch):
     calls = []
-    monkeypatch.setattr(dectl.main, 'run_update', lambda config, **kwargs: calls.append((config, kwargs)))
+    monkeypatch.setattr('pyselfupdate.typercmd.run_update', lambda config, **kwargs: calls.append((config, kwargs)))
 
     result = runner.invoke(app, ['update', '--check'])
 

@@ -1,9 +1,9 @@
 import os
 import re
 import time
+from typing import TYPE_CHECKING
 from typing import Annotated
 
-import httpx2
 import typer
 
 from dectl.config import CONFIG_PATH
@@ -14,6 +14,9 @@ from dectl.output import emit_json
 from dectl.output import error
 from dectl.output import info
 from dectl.output import success
+
+if TYPE_CHECKING:
+    import httpx2
 
 
 def resolve_env(value: str) -> str:
@@ -34,7 +37,10 @@ class JenkinsError(Exception):
     error itself, and the next verb gets both by passing the status it expects."""
 
 
-def jenkins_request(config: DectlConfig, method: str, path: str, expected_status: int, **kwargs) -> httpx2.Response:
+def jenkins_request(config: DectlConfig, method: str, path: str, expected_status: int, **kwargs) -> 'httpx2.Response':
+    # The HTTP client is imported when a request is made, so no command that sends none loads it.
+    import httpx2
+
     jenkins = config.jenkins
     if not jenkins:
         error(f'no jenkins config in {CONFIG_PATH}')

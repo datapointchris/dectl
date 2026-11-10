@@ -1,9 +1,9 @@
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 from typing import Annotated
 from typing import NamedTuple
 
-import boto3
 import typer
 from rich.table import Table
 
@@ -25,6 +25,9 @@ from dectl.session import make_session
 from dectl.values import join_key
 from dectl.values import join_uri
 from dectl.values import refuse_unusable_values
+
+if TYPE_CHECKING:
+    import boto3
 
 RUN_STATE_COLORS = {'SUCCEEDED': 'green', 'FAILED': 'red', 'STOPPED': 'red', 'TIMEOUT': 'red', 'RUNNING': 'cyan'}
 
@@ -93,7 +96,7 @@ def resolve_scripts(pipeline_name: str, pipeline: PipelineConfig, alias: str) ->
     return [ResolvedScript(name, resolve_from_root(pipeline, name)) for name in names]
 
 
-def upload_scripts(session: boto3.Session, glue_job: GlueJobConfig, sources: list[ResolvedScript]) -> None:
+def upload_scripts(session: 'boto3.Session', glue_job: GlueJobConfig, sources: list[ResolvedScript]) -> None:
     """Upload each resolved script under the key its config string spells.
 
     Every path is checked before the first byte goes anywhere: a partial upload leaves the job's
@@ -330,7 +333,7 @@ def render_job_changes(job_name: str, changes: list[tuple[str, str, str]]) -> No
     console.print(table)
 
 
-def diff_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig) -> dict | None:
+def diff_glue_job_update(session: 'boto3.Session', glue_job: GlueJobConfig) -> dict | None:
     """Build the definition update and print what it changes, or None when nothing dectl manages differs.
 
     Reads the live job and writes nothing. Callers run `resolve_scripts` first, so a rehearsal
@@ -348,7 +351,7 @@ def diff_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig) -> dic
     return update.definition
 
 
-def confirm_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig, assume_yes: bool = False) -> dict | None:
+def confirm_glue_job_update(session: 'boto3.Session', glue_job: GlueJobConfig, assume_yes: bool = False) -> dict | None:
     """Everything about a definition update that can refuse: build it, show it, confirm it.
 
     Terraform owns these jobs once a pipeline is established, so an UpdateJob that silently
@@ -366,7 +369,7 @@ def confirm_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig, ass
     return job_update
 
 
-def apply_glue_job_update(session: boto3.Session, glue_job: GlueJobConfig, job_update: dict) -> None:
+def apply_glue_job_update(session: 'boto3.Session', glue_job: GlueJobConfig, job_update: dict) -> None:
     session.client('glue').update_job(JobName=glue_job.name, JobUpdate=job_update)
     success(f'updated job {glue_job.name}')
 
@@ -407,7 +410,7 @@ def run_log_start(glue_client, job_name: str, run_id: str) -> int:
     return epoch_ms - LOG_START_SLACK_MS
 
 
-def follow_glue_run(session: boto3.Session, glue_job: GlueJobConfig, run_id: str) -> None:
+def follow_glue_run(session: 'boto3.Session', glue_job: GlueJobConfig, run_id: str) -> None:
     """Tail a run to completion and exit non-zero if it did not succeed.
 
     Tailing starts immediately rather than waiting for the run to reach RUNNING: the log groups
@@ -424,7 +427,7 @@ def follow_glue_run(session: boto3.Session, glue_job: GlueJobConfig, run_id: str
     success(f'run {run_id} {watcher.state}')
 
 
-def start_glue_run(session: boto3.Session, glue_job: GlueJobConfig, follow: bool) -> None:
+def start_glue_run(session: 'boto3.Session', glue_job: GlueJobConfig, follow: bool) -> None:
     """Start a Glue job run. With follow, tail its logs until the run reaches a terminal state;
     otherwise just print the run id and return (the default — streaming is an explicit opt-in)."""
     glue = session.client('glue')

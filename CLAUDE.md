@@ -241,13 +241,21 @@ out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipeli
 
 **Each kind of external effect has one door.** Every AWS client comes from `make_session` in
 `session.py`, except Lambda's `Invoke`, which `invoke.py` owns. A client-level setting (retry
-mode, timeout, user agent) goes in `DEFAULT_CLIENT_CONFIG` there, which every client merges under
-its own `Config`, so no call site sets one. Every program dectl starts on this
+mode, timeout, user agent) goes in `default_client_config` there. `make_session` sets it as the
+botocore session's default, which botocore merges under each client's own `Config`, so no call
+site sets one. Every program dectl starts on this
 machine, `mount-s3`, `umount` and the config editor, goes through `external_command.run`. Call
 sites reach it as `external_command.run` rather than importing the function, so a test patches
 `dectl.external_command.run` once. Jenkins is reached through `jenkins_request` in
 `commands/jenkins.py`. Its caller passes the status it expects, and a transport failure or any
 other status raises one `JenkinsError`, so no call site checks a status.
+
+**A door imports its client when it opens, never at the top of a module.** boto3, `botocore.config`,
+`httpx2` and pyselfupdate are imported inside `make_session`, `make_invoke_client`,
+`jenkins_request` and the update paths, and elsewhere only under `TYPE_CHECKING`. Every command
+imports the modules that hold the doors, and most never open one, so a top-level import makes
+`reference`, `config`, `--help` and each TAB completion pay for it. `botocore.exceptions` is the
+exception: it is a few milliseconds, and the root group catches its errors.
 
 ## Gotchas
 

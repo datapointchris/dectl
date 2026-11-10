@@ -6,15 +6,17 @@ API, not the boto3 session. `session.py` builds a session from config and knows 
 is invoked through it."""
 
 import time
+from typing import TYPE_CHECKING
 
-import boto3
-from botocore.config import Config
 from botocore.exceptions import ClientError
 from botocore.exceptions import ConnectTimeoutError
 from botocore.exceptions import EndpointConnectionError
 
 from dectl.config import LambdaConfig
 from dectl.output import warn
+
+if TYPE_CHECKING:
+    import boto3
 
 # Invoke is the one call dectl makes that AWS cannot take back, so its socket has to outlive the
 # function rather than the other way round. The margin sits above the function's own Timeout, where
@@ -72,13 +74,15 @@ def invoke_read_timeout(client, fn: LambdaConfig, run_async: bool = False) -> in
     return configured + INVOKE_TIMEOUT_MARGIN_SECONDS
 
 
-def make_invoke_client(session: boto3.Session, read_timeout: int):
+def make_invoke_client(session: 'boto3.Session', read_timeout: int):
     """A lambda client for Invoke alone: it waits the function out, and it never retries.
 
     `total_max_attempts` counts the initial request, so 1 is exactly one call. `max_attempts` is the
     other key botocore accepts and it counts retries *on top of* the initial request, so 1 there
     still permits a duplicate invocation. The mode is pinned because legacy mode's retry set
     differs, and an explicit Config beats AWS_MAX_ATTEMPTS and AWS_RETRY_MODE in the environment."""
+    from botocore.config import Config
+
     return session.client(
         'lambda',
         config=Config(
