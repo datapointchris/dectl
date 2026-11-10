@@ -151,6 +151,18 @@ def make_jenkins_app(pipeline_name: str, pipeline: PipelineConfig, config: Dectl
 
         if follow:
             stream_console(job, number)
+            result = finished_result(job, number)
+            if result != 'SUCCESS':
+                error(f'build #{number} - {result}')
+                raise typer.Exit(3)
+
+    def finished_result(job: JenkinsJobConfig, number: int) -> str:
+        """The result of a build whose console has ended, read once Jenkins marks it finished."""
+        while True:
+            data = jenkins_request(config, 'GET', f'{build_url_path(job, number)}/api/json', 200).json()
+            if not data.get('building', False):
+                return data.get('result') or 'UNKNOWN'
+            time.sleep(2)
 
     def add_action_verb(action: str, own_parameters: dict[str, str]) -> None:
         posted = ', '.join(f'{name}={value}' for name, value in own_parameters.items())
@@ -162,7 +174,9 @@ def make_jenkins_app(pipeline_name: str, pipeline: PipelineConfig, config: Dectl
             epilog=f'Example:\n\ndectl {pipeline_name} jenkins {action} --follow',
         )
         def queue(
-            follow: Annotated[bool, typer.Option('--follow', '-f', help='Stream console output after triggering')] = False,
+            follow: Annotated[
+                bool, typer.Option('--follow', '-f', help='Stream console output after triggering, and exit 3 unless the build succeeds')
+            ] = False,
         ) -> None:
             queue_build(action, follow)
 

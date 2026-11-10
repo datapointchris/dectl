@@ -128,6 +128,7 @@ def test_follow_streams_the_build_its_post_queued_rather_than_the_last_one(jenki
 
     assert 'the queued build' in followed.output
     assert 'build 7' not in followed.output
+    assert followed.exit_code == 3
     assert status.exit_code == 3
     assert '"number": 8' in status.output
 
