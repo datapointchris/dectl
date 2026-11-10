@@ -312,6 +312,10 @@ exception: it is a few milliseconds, and the root group catches its errors.
 - **`$LATEST` vs. published alias.** `deploy` without `--publish` only moves `$LATEST`, so
   alias-following triggers keep running the old version until `--publish` moves `live_alias`.
   `run` always targets `$LATEST`.
+- **`--publish` hands `PublishVersion` the `CodeSha256` its own upload returned**, so code
+  another deploy wrote to `$LATEST` in the meantime is refused rather than published under the
+  alias. `RevisionId` cannot be that guard, because the one `UpdateFunctionCode` returns
+  changes again when the update settles. `publish_uploaded_code` holds both facts.
 - **`Invoke` is the one call AWS cannot take back, so `invoke.py` owns it and `make_session` never
   sends it.** botocore's default retries re-send a long invoke, and the function's own
   `MaximumRetryAttempts` cannot stop them, because Lambda never sees client HTTP retries. The
@@ -453,13 +457,13 @@ no debugger and no second attempt, and a fake holds only the service rules someb
 The exemptions are real cost and setup too extensive to maintain, never "the fake covers it".
 
 **Every resource under test is created and deleted by the test**, never a real pipeline's job. A
-role is the exception, as a precondition like credentials. `DECTL_IT_ROLE_ARN` names the Glue one
-and `DECTL_IT_STATES_ROLE_ARN` the Step Functions one, and the fixtures in `conftest.py` create
-their own when either is unset:
+role is the exception, as a precondition like credentials. `DECTL_IT_ROLE_ARN` names the Glue one,
+`DECTL_IT_STATES_ROLE_ARN` the Step Functions one and `DECTL_IT_LAMBDA_ROLE_ARN` the Lambda one.
+The fixtures in `conftest.py` create their own when any is unset:
 
 ```bash
-# Least privilege: glue:*, logs:*, s3:*, states:*, and iam:PassRole on those two roles
-DECTL_IT_ROLE_ARN=<arn> DECTL_IT_STATES_ROLE_ARN=<arn> DECTL_IT_REGION=<region> uv run pytest --run-integration
+# Least privilege: glue:*, lambda:*, logs:*, s3:*, states:*, and iam:PassRole on those three roles
+DECTL_IT_ROLE_ARN=<arn> DECTL_IT_STATES_ROLE_ARN=<arn> DECTL_IT_LAMBDA_ROLE_ARN=<arn> DECTL_IT_REGION=<region> uv run pytest --run-integration
 
 # No setup, broader credentials: the fixture creates and deletes a role, needing iam:CreateRole
 DECTL_IT_AWS_PROFILE=<profile> DECTL_IT_REGION=<region> uv run pytest --run-integration
@@ -496,7 +500,10 @@ only place `total_max_attempts: 1` is shown to mean one request, and it needs no
 seconds after `Invoke` returns, creating the log group if it is gone. So a function whose role may
 write logs recreates a group the test deleted. A test's role for a durable function needs only
 `lambda:CheckpointDurableExecution` and `lambda:GetDurableExecutionState`. A durable execution's
-`FunctionArn` names the version it ran.
+`FunctionArn` names the version it ran. `UpdateFunctionCode` returns a `RevisionId` that changes
+once the update settles, so `PublishVersion` refuses it after the waiter with a
+`PreconditionFailedException`. A `CodeSha256` that no longer matches `$LATEST` is an
+`InvalidParameterValueException` whose message names both hashes.
 
 **Latency is invisible to any fake.** `test_glue_run_integration.py` runs a real Python Shell job
 against a wall-clock budget, and it is the only module that costs money. The deploy integration

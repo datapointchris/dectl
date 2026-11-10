@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from botocore.exceptions import ClientError
 from botocore.exceptions import ConnectTimeoutError
 from botocore.exceptions import EndpointConnectionError
 from botocore.exceptions import ReadTimeoutError
@@ -109,6 +110,28 @@ def report_invocation(response: dict, as_json: bool) -> None:
         console.print_json(json.dumps(result, indent=2))
 
 
+def publish_uploaded_code(client, fn: LambdaConfig, code_sha256: str) -> str:
+    """Publish a version holding the code this deploy uploaded, or exit saying another deploy replaced it.
+
+    Unguarded, `PublishVersion` publishes whatever `$LATEST` holds, and the live alias then moves
+    every trigger behind it to code nobody chose. `CodeSha256` is the guard rather than
+    `RevisionId`, because the revision `UpdateFunctionCode` returns changes again when the update
+    settles, so Lambda refuses it after the waiter with no other writer at all. A hash that no
+    longer matches is an `InvalidParameterValueException` whose message names both hashes."""
+    try:
+        return client.publish_version(FunctionName=fn.name, CodeSha256=code_sha256)['Version']
+    except ClientError as exc:
+        refusal = exc.response.get('Error', {})
+        if refusal.get('Code') != 'InvalidParameterValueException' or 'CodeSHA256' not in refusal.get('Message', ''):
+            raise
+    unmoved = f', and alias {fn.live_alias} was not moved' if fn.live_alias else ''
+    error(
+        f'{fn.name}: another deploy replaced the code this one uploaded before it could be published, '
+        f"so no version was published{unmoved}. $LATEST now holds the other deploy's code."
+    )
+    raise typer.Exit(1)
+
+
 def make_lambda_function_app(
     pipeline_name: str, alias: str, fn_config: LambdaConfig, pipeline: PipelineConfig, config: DectlConfig
 ) -> typer.Typer:
@@ -183,7 +206,7 @@ def make_lambda_function_app(
 
         info(f'updating code for {fn.name}')
         with zip_path.open('rb') as f:
-            client.update_function_code(FunctionName=fn.name, ZipFile=f.read())
+            uploaded = client.update_function_code(FunctionName=fn.name, ZipFile=f.read())['CodeSha256']
         zip_path.unlink()
 
         if not publish:
@@ -193,7 +216,7 @@ def make_lambda_function_app(
         info('waiting for code update to settle')
         client.get_waiter('function_updated_v2').wait(FunctionName=fn.name)
 
-        version = client.publish_version(FunctionName=fn.name)['Version']
+        version = publish_uploaded_code(client, fn, uploaded)
         info(f'published version {version}')
 
         if not fn.live_alias:

@@ -244,7 +244,9 @@ dectl example-pipeline lambda my-function deploy --publish               # publi
 `run` always targets `$LATEST`, so it exercises a deploy before anything is published. Anything that
 invokes through an alias, such as an S3 trigger, keeps running the old version. `deploy --publish`
 publishes a version and moves the function's `live_alias` to it. With no `live_alias` configured,
-`--publish` still publishes a version and moves nothing.
+`--publish` still publishes a version and moves nothing. It publishes only the code it uploaded.
+Where another deploy replaces `$LATEST` while it waits for its own update to settle, it publishes
+nothing, leaves the alias where it was, and says so.
 
 A payload comes from a file, or from stdin as `-`, never from an inline argument.
 

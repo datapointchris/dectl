@@ -1,4 +1,6 @@
+import base64
 import datetime as dt
+import hashlib
 import io
 import json
 import zipfile
@@ -368,16 +370,34 @@ def test_zip_holds_the_resolved_directorys_files_at_the_archive_root(tmp_path):
         assert sorted(archive.namelist()) == ['handler.py', 'vendor/lib.py']
 
 
-class RecordingLambdaClient:
-    """Enough of the Lambda API for a deploy, recording what it was sent."""
+def code_sha256(code: bytes) -> str:
+    return base64.b64encode(hashlib.sha256(code).digest()).decode()
 
-    def __init__(self) -> None:
+
+class RecordingLambdaClient:
+    """Enough of the Lambda API for a deploy, recording what it was sent.
+
+    `PublishVersion` holds Lambda's two guards as live Lambda applies them. A `CodeSha256` other
+    than `$LATEST`'s is refused, naming both. The `RevisionId` an `UpdateFunctionCode` returns
+    changes again when the update settles, so after the waiter it is always refused.
+    `other_writer`, when set, is code another deploy uploads while this one waits."""
+
+    def __init__(self, other_writer: bytes | None = None) -> None:
         self.code: bytes | None = None
+        self.revision = 'settled'
+        self.other_writer = other_writer
         self.published: list[str] = []
         self.aliases: list[tuple[str, str]] = []
 
     def update_function_code(self, FunctionName, ZipFile):
         self.code = ZipFile
+        self.revision = 'in-progress'
+        return {'CodeSha256': code_sha256(ZipFile), 'RevisionId': self.revision}
+
+    def settle(self, **_kwargs) -> None:
+        if self.other_writer is not None:
+            self.code, self.other_writer = self.other_writer, None
+        self.revision = 'settled'
 
     def get_waiter(self, name):
         # Real botocore raises `ValueError: Waiter does not exist` for a name it does not know,
@@ -385,11 +405,19 @@ class RecordingLambdaClient:
         # --publish` passes the version-suffixed one, which is exactly where a typo would live.
         if name != 'function_updated_v2':
             raise ValueError(f'Waiter does not exist: {name}')
-        return SimpleNamespace(wait=lambda **kwargs: None)
+        return SimpleNamespace(wait=self.settle)
 
-    def publish_version(self, FunctionName):
+    def publish_version(self, FunctionName, CodeSha256=None, RevisionId=None):
+        assert self.code is not None
+        if RevisionId is not None and RevisionId != self.revision:
+            raise ClientError(
+                {'Error': {'Code': 'PreconditionFailedException', 'Message': 'The Revision Id provided does not match'}}, 'PublishVersion'
+            )
+        if CodeSha256 is not None and CodeSha256 != code_sha256(self.code):
+            message = f'CodeSHA256 ({CodeSha256}) is different from current CodeSHA256 in $LATEST ({code_sha256(self.code)}).'
+            raise ClientError({'Error': {'Code': 'InvalidParameterValueException', 'Message': message}}, 'PublishVersion')
         self.published.append(FunctionName)
-        return {'Version': '7'}
+        return {'Version': '7', 'CodeSha256': code_sha256(self.code)}
 
     def update_alias(self, FunctionName, Name, FunctionVersion):
         self.aliases.append((Name, FunctionVersion))
@@ -427,6 +455,22 @@ def test_lambda_deploy_publishes_the_zip_and_moves_the_alias(monkeypatch, tmp_pa
         assert archive.namelist() == ['handler.py']
     assert client.published == ['salesdata-dev-notifier']
     assert client.aliases == [('live', '7')]
+
+
+def test_publish_refuses_when_another_deploy_replaced_the_code_it_uploaded(monkeypatch, tmp_path):
+    """Publishing whatever `$LATEST` holds moves the live alias, and every trigger behind it, to
+    code nobody chose to publish, while the deploy reports success."""
+    (tmp_path / 'code').mkdir()
+    (tmp_path / 'code' / 'handler.py').write_text('def handler(event, context): pass')
+    client = RecordingLambdaClient(other_writer=b'another deploy')
+    app = deploy_app(monkeypatch, tmp_path, client)
+
+    result = runner.invoke(app, ['notifier', 'deploy', '--publish'])
+
+    assert result.exit_code == 1
+    assert client.published == []
+    assert client.aliases == []
+    assert 'no version was published' in stderr_text(result)
 
 
 def test_lambda_deploy_refuses_a_missing_source_and_writes_nothing(monkeypatch, tmp_path):

@@ -281,6 +281,15 @@ def states_role_arn(session):
         yield arn
 
 
+@pytest.fixture(scope='module')
+def lambda_role_arn(session):
+    """A role Lambda can assume: the one `DECTL_IT_LAMBDA_ROLE_ARN` names, or one created.
+
+    The deploy test never invokes its function, so the role needs no policy."""
+    with service_role(session, 'DECTL_IT_LAMBDA_ROLE_ARN', 'lambda.amazonaws.com') as arn:
+        yield arn
+
+
 def pytest_addoption(parser):
     parser.addoption(
         '--run-integration',
