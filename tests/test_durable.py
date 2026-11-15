@@ -1,7 +1,6 @@
 import datetime as dt
 
 import pytest
-import typer
 from botocore.exceptions import ClientError
 
 from dectl.durable import fetch_history
@@ -13,8 +12,8 @@ from dectl.durable import resolve_execution
 from dectl.durable import sweep_executions
 from dectl.durable import tail_durable_history
 from dectl.durable import version_of
+from dectl.output import Refusal
 from dectl.output import console
-from dectl.output import stderr_console
 from tests.conftest import history_page
 
 STARTED = dt.datetime(2026, 7, 30, 12)
@@ -102,7 +101,7 @@ def capture_durable_event(event: dict) -> str:
 def test_listing_qualifier_exits_when_the_alias_does_not_exist():
     client = FakeLambdaClient(aliases={})
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(Refusal):
         listing_qualifier(client, 'fn', 'live')
 
 
@@ -166,8 +165,10 @@ def test_resolve_execution_uses_an_arn_directly():
 def test_resolve_execution_exits_when_nothing_matches():
     client = FakeLambdaClient([])
 
-    with pytest.raises(typer.Exit):
+    with pytest.raises(Refusal) as raised:
         resolve_execution(client, 'fn', '7', 'no-such-run')
+
+    assert not raised.value.ambiguous
 
 
 def test_format_duration_covers_a_suspended_workflow():
@@ -262,10 +263,10 @@ def test_an_ambiguous_tail_is_a_usage_error_naming_the_candidates():
     # Picking the newest would resolve silently to something the caller did not name.
     client = FakeLambdaClient([execution('batch-alpha-99'), execution('batch-beta-99')], versions=['$LATEST', '7'])
 
-    with pytest.raises(typer.Exit) as raised, stderr_console.capture() as capture:
+    with pytest.raises(Refusal) as raised:
         resolve_execution(client, 'fn', '7', '99')
 
-    assert raised.value.exit_code == 2
-    output = capture.get()
-    assert 'batch-alpha-99' in output
-    assert 'batch-beta-99' in output
+    assert raised.value.ambiguous
+    listed = '\n'.join(raised.value.lines)
+    assert 'batch-alpha-99' in listed
+    assert 'batch-beta-99' in listed

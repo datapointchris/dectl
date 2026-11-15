@@ -20,13 +20,12 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import Any
 
-import typer
 from botocore.exceptions import ClientError
 from rich.markup import escape
 from rich.table import Table
 
+from dectl.output import Refusal
 from dectl.output import console
-from dectl.output import error
 from dectl.output import format_duration
 from dectl.output import info
 from dectl.values import s3_uri
@@ -143,22 +142,23 @@ def locate_metadata(glue_client, database: str, table: str) -> str:
     except ClientError as exc:
         if exc.response.get('Error', {}).get('Code') != 'EntityNotFoundException':
             raise
-        error(f'no table {database}.{table} in the Glue Data Catalog')
-        raise typer.Exit(1) from exc
+        raise Refusal(f'no table {database}.{table} in the Glue Data Catalog') from exc
 
     parameters = glue_table.get('Parameters') or {}
     table_type = parameters.get(TABLE_TYPE_KEY, '')
     if table_type.lower() != ICEBERG_TABLE_TYPE:
         found = f'its {TABLE_TYPE_KEY} is {escape(table_type)}' if table_type else f'it carries no {TABLE_TYPE_KEY} parameter'
-        error(f'{database}.{table} is not an Iceberg table — {found}')
-        error('  dectl reads Iceberg state from the table metadata file, which a plain Glue table does not have')
-        raise typer.Exit(1)
+        raise Refusal(
+            f'{database}.{table} is not an Iceberg table — {found}',
+            '  dectl reads Iceberg state from the table metadata file, which a plain Glue table does not have',
+        )
 
     location = parameters.get(METADATA_LOCATION_KEY)
     if not location:
-        error(f'{database}.{table} is registered as Iceberg but has no {METADATA_LOCATION_KEY} parameter')
-        error('  nothing in the catalog says where its metadata file is, so its state cannot be read')
-        raise typer.Exit(1)
+        raise Refusal(
+            f'{database}.{table} is registered as Iceberg but has no {METADATA_LOCATION_KEY} parameter',
+            '  nothing in the catalog says where its metadata file is, so its state cannot be read',
+        )
     return location
 
 
@@ -168,18 +168,18 @@ def read_metadata_object(s3_client, location: str, database: str, table: str) ->
     A gzipped metadata file is a table property rather than an exception, so the codec is taken
     from the key the catalog gave us."""
     if not location.startswith('s3://'):
-        error(f'{database}.{table} points its {METADATA_LOCATION_KEY} at {escape(location)}, which is not an S3 URI')
-        raise typer.Exit(1)
+        raise Refusal(f'{database}.{table} points its {METADATA_LOCATION_KEY} at {escape(location)}, which is not an S3 URI')
 
     bucket, key = parse_s3_uri(location)
     try:
         body = s3_client.get_object(Bucket=bucket, Key=key)['Body'].read()
     except ClientError as exc:
         code = exc.response.get('Error', {}).get('Code', 'unknown')
-        error(f'cannot read the metadata file for {database}.{table} ({code})')
-        error(f'  {s3_uri(bucket, key)}')
-        error('  the catalog points here, so reading the table needs s3:GetObject on that key')
-        raise typer.Exit(1) from exc
+        raise Refusal(
+            f'cannot read the metadata file for {database}.{table} ({code})',
+            f'  {s3_uri(bucket, key)}',
+            '  the catalog points here, so reading the table needs s3:GetObject on that key',
+        ) from exc
 
     if key.endswith(GZIP_SUFFIXES):
         body = gzip.decompress(body)
@@ -187,9 +187,7 @@ def read_metadata_object(s3_client, location: str, database: str, table: str) ->
     try:
         document = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        error(f'the metadata file for {database}.{table} is not readable JSON')
-        error(f'  {s3_uri(bucket, key)}')
-        raise typer.Exit(1) from exc
+        raise Refusal(f'the metadata file for {database}.{table} is not readable JSON', f'  {s3_uri(bucket, key)}') from exc
     return TableMetadata(document=document, location=location)
 
 
@@ -347,24 +345,25 @@ def ancestry(metadata: TableMetadata, start_id: int | None) -> list[dict]:
 def current_snapshot(metadata: TableMetadata) -> dict:
     found = metadata.by_id(metadata.current_snapshot_id)
     if found is None:
-        error('this table has no current snapshot — nothing has been committed to it')
-        raise typer.Exit(1)
+        raise Refusal('this table has no current snapshot — nothing has been committed to it')
     return found
 
 
 def snapshot_by_ref(metadata: TableMetadata, name: str) -> dict:
     ref = metadata.refs.get(name)
     if ref is None:
-        error(f'no branch or tag named {escape(name)} on this table')
-        if metadata.refs:
-            error(f'  refs: {", ".join(escape(known) for known in sorted(metadata.refs))}')
-        error('  a snapshot id, or a unique tail of one, resolves here too')
-        raise typer.Exit(1)
+        known_refs = [f'  refs: {", ".join(escape(known) for known in sorted(metadata.refs))}'] if metadata.refs else []
+        raise Refusal(
+            f'no branch or tag named {escape(name)} on this table',
+            *known_refs,
+            '  a snapshot id, or a unique tail of one, resolves here too',
+        )
     found = metadata.by_id(ref.get('snapshot-id'))
     if found is None:
-        error(f'{escape(name)} points at snapshot {ref.get("snapshot-id")}, which is not in this metadata file')
-        error('  the snapshot it names has been expired, so nothing about it can be read')
-        raise typer.Exit(1)
+        raise Refusal(
+            f'{escape(name)} points at snapshot {ref.get("snapshot-id")}, which is not in this metadata file',
+            '  the snapshot it names has been expired, so nothing about it can be read',
+        )
     return found
 
 
@@ -379,14 +378,19 @@ def snapshot_by_id_or_suffix(metadata: TableMetadata, digits: str) -> dict:
 
     candidates = [s for s in metadata.snapshots if str(s.get('snapshot-id', '')).endswith(digits)]
     if not candidates:
-        error(f'no snapshot {digits}, or ending in it, in this table')
-        error(f'  the metadata file holds {len(metadata.snapshots)} snapshots; an expired one is not among them')
-        raise typer.Exit(1)
+        raise Refusal(
+            f'no snapshot {digits}, or ending in it, in this table',
+            f'  the metadata file holds {len(metadata.snapshots)} snapshots; an expired one is not among them',
+        )
     if len(candidates) > 1:
-        error(f'{digits} matches {len(candidates)} snapshots; use more of the id:')
-        for found in sorted(candidates, key=snapshot_timestamp_ms, reverse=True):
-            error(f'  {found.get("snapshot-id")}  {snapshot_stamp(found)}')
-        raise typer.Exit(2)
+        raise Refusal(
+            f'{digits} matches {len(candidates)} snapshots; use more of the id:',
+            *(
+                f'  {found.get("snapshot-id")}  {snapshot_stamp(found)}'
+                for found in sorted(candidates, key=snapshot_timestamp_ms, reverse=True)
+            ),
+            ambiguous=True,
+        )
     return candidates[0]
 
 
@@ -731,9 +735,10 @@ def diff_endpoints(metadata: TableMetadata, base: str | None, target: str | None
         head = current_snapshot(metadata)
         parent = metadata.by_id(head.get('parent-snapshot-id'))
         if parent is None:
-            error(f'snapshot {head.get("snapshot-id")} has no parent in this metadata file — it is the first commit')
-            error('  name two snapshots to compare, or a branch or tag')
-            raise typer.Exit(1)
+            raise Refusal(
+                f'snapshot {head.get("snapshot-id")} has no parent in this metadata file — it is the first commit',
+                '  name two snapshots to compare, or a branch or tag',
+            )
         return parent, head
     if target is None:
         return resolve_snapshot(metadata, base), current_snapshot(metadata)

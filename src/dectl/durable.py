@@ -15,14 +15,13 @@ execution ARN that the SDK logger stamps on every record).
 import time
 from typing import Any
 
-import typer
 from botocore.exceptions import ClientError
 from rich.markup import escape
 from rich.table import Table
 
 from dectl.config import LambdaConfig
+from dectl.output import Refusal
 from dectl.output import console
-from dectl.output import error
 
 # Elapsed wall-clock for a durable execution includes every suspended wait, which can run for
 # months — that gap between duration and billed compute is the whole point of the feature. The
@@ -85,8 +84,7 @@ def listing_qualifier(client, function_name: str, qualifier: str) -> str:
     except ClientError as exc:
         if exc.response.get('Error', {}).get('Code') != 'ResourceNotFoundException':
             raise
-        error(f'no alias "{qualifier}" on {function_name} — pass --qualifier with a version, or $LATEST')
-        raise typer.Exit(1) from exc
+        raise Refusal(f'no alias "{qualifier}" on {function_name} — pass --qualifier with a version, or $LATEST') from exc
 
 
 def epoch_millis(timestamp) -> int | None:
@@ -186,8 +184,7 @@ def resolve_execution(client, function_name: str, qualifier: str, execution: str
         elif execution:
             matches = [execution_by_suffix(client, function_name, execution, scanned)]
         else:
-            error(f'no durable execution for {function_name} in versions {", ".join(scanned)}')
-            raise typer.Exit(1)
+            raise Refusal(f'no durable execution for {function_name} in versions {", ".join(scanned)}')
     return client.get_durable_execution(DurableExecutionArn=matches[0]['DurableExecutionArn'])
 
 
@@ -204,15 +201,20 @@ def execution_by_suffix(client, function_name: str, suffix: str, scanned: list[s
             if str(found.get('DurableExecutionName', '')).endswith(suffix):
                 candidates.append(found)
     if not candidates:
-        error(f'no durable execution named {suffix}, or ending in it')
-        error(f'searched the {SUFFIX_SEARCH_LIMIT} most recent on each of versions {", ".join(scanned)}')
-        error('an older execution has to be named in full, or by its ARN')
-        raise typer.Exit(1)
+        raise Refusal(
+            f'no durable execution named {suffix}, or ending in it',
+            f'searched the {SUFFIX_SEARCH_LIMIT} most recent on each of versions {", ".join(scanned)}',
+            'an older execution has to be named in full, or by its ARN',
+        )
     if len(candidates) > 1:
-        error(f'{suffix} matches {len(candidates)} executions; use more of the name:')
-        for found in sorted(candidates, key=started_at, reverse=True):
-            error(f'  {found.get("DurableExecutionName", "")} ({version_of(found)})')
-        raise typer.Exit(2)
+        raise Refusal(
+            f'{suffix} matches {len(candidates)} executions; use more of the name:',
+            *(
+                f'  {found.get("DurableExecutionName", "")} ({version_of(found)})'
+                for found in sorted(candidates, key=started_at, reverse=True)
+            ),
+            ambiguous=True,
+        )
     return candidates[0]
 
 

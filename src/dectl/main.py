@@ -27,6 +27,7 @@ from dectl.config import pipeline_file_stems
 from dectl.config import report_config_error
 from dectl.env import active_environment
 from dectl.env import set_active_environment
+from dectl.output import Refusal
 from dectl.output import console
 from dectl.output import emit_json
 from dectl.output import error
@@ -131,9 +132,17 @@ class DectlGroup(TyperGroup):
         botocore's message names the operation, the error code and the resource, which is all a
         traceback through botocore's frames would add. A `JenkinsError` names the request, and
         the status or transport failure it met. A command that knows what a refusal means
-        catches it first and says that instead."""
+        catches it first and says that instead.
+
+        A `Refusal` from a domain module carries its own lines, already written for the reader,
+        and says whether the handle was ambiguous. This is the one place that prints them and
+        turns them into an exit code."""
         try:
             return super().invoke(ctx)
+        except Refusal as exc:
+            for line in exc.lines:
+                error(line)
+            raise typer.Exit(2 if exc.ambiguous else 1) from exc
         except (BotoCoreError, ClientError, JenkinsError) as exc:
             error(escape(str(exc)))
             raise typer.Exit(1) from exc

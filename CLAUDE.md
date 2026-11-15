@@ -264,6 +264,13 @@ Invoke API, kept out of the boto3 session in `session.py`; `durable.py` is the L
 out of the CloudWatch code in `logs.py`; and `values.py` knows nothing of pipelines.
 `pipeline_view.py` sits outside `main.py` and `config_cmd.py` to avoid an import cycle.
 
+**A domain module refuses by raising `output.Refusal`, never by printing and exiting.** It
+carries the lines to print and whether the handle was ambiguous. `DectlGroup.invoke` is the one
+handler: it prints the lines to stderr and exits 2 for an ambiguous handle, 1 otherwise. So a
+caller can still catch a refusal, collect several, or write them into a `--json` document.
+`iceberg.py` and `durable.py` follow it. A test driving a sub-app mounts it under
+`typer.Typer(cls=DectlGroup)` to reach the handler.
+
 **Each kind of external effect has one door.** Every AWS client comes from `make_session` in
 `session.py`, except Lambda's `Invoke`, which `invoke.py` owns. A client-level setting (retry
 mode, timeout, user agent) goes in `default_client_config` there. `make_session` sets it as the

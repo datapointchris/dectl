@@ -19,6 +19,20 @@ def emit_json(data: Any) -> None:
     print(json.dumps(data, indent=2, default=str))
 
 
+class Refusal(Exception):
+    """A read that cannot answer, carrying the lines that say why.
+
+    A domain module raises this rather than printing and exiting, so a caller can keep going,
+    collect several, or write them into a `--json` document. The root group prints the lines to
+    stderr and picks the exit code. `ambiguous` marks a handle that matched more than one thing,
+    which is a usage error and exits 2 rather than 1."""
+
+    def __init__(self, *lines: str, ambiguous: bool = False) -> None:
+        super().__init__('\n'.join(lines))
+        self.lines = lines
+        self.ambiguous = ambiguous
+
+
 def error(message: str) -> None:
     stderr_console.print(f'[red]{message}[/red]')
 

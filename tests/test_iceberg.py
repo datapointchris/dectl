@@ -20,6 +20,8 @@ from dectl.iceberg import history_rows
 from dectl.iceberg import read_table_metadata
 from dectl.iceberg import resolve_snapshot
 from dectl.iceberg import snapshot_to_dict
+from dectl.main import DectlGroup
+from dectl.output import Refusal
 from tests.conftest import RefusalRunner
 
 runner = RefusalRunner()
@@ -347,18 +349,17 @@ def test_a_gzipped_metadata_file_reads(key):
     assert metadata.current_snapshot_id == SNAP_FOUR
 
 
-def test_a_plain_glue_table_says_it_is_not_iceberg(capsys):
+def test_a_plain_glue_table_says_it_is_not_iceberg():
     # The first thing anybody does is point this at a table they already have. A KeyError on a
     # parameter name is the whole of what they would get.
     glue = FakeGlue({'lakehouse.events': {'Name': 'events', 'Parameters': {'classification': 'parquet'}}})
 
-    with pytest.raises(typer.Exit) as exc:
+    with pytest.raises(Refusal) as exc:
         read_table_metadata(glue, FakeS3(), 'lakehouse', 'events')
 
-    assert exc.value.exit_code == 1
-    err = capsys.readouterr().err
-    assert 'not an Iceberg table' in err
-    assert 'no table_type parameter' in err
+    assert not exc.value.ambiguous
+    assert 'not an Iceberg table' in exc.value.lines[0]
+    assert 'no table_type parameter' in exc.value.lines[0]
 
 
 # --- summary counters -------------------------------------------------------------------------
@@ -398,30 +399,30 @@ def test_a_branch_or_tag_name_resolves():
     assert resolve_snapshot(metadata, 'month-end')['snapshot-id'] == SNAP_ONE
 
 
-def test_an_ambiguous_tail_is_a_usage_error_listing_the_candidates(capsys):
+def test_an_ambiguous_tail_is_a_usage_error_listing_the_candidates():
     # Picking the newest would resolve silently to something the caller did not name.
     document = metadata_document(
         [snapshot(1111111111111119108, BASE_MS), snapshot(2222222222222229108, BASE_MS + HOUR_MS)],
         current=2222222222222229108,
     )
 
-    with pytest.raises(typer.Exit) as exc:
+    with pytest.raises(Refusal) as exc:
         resolve_snapshot(TableMetadata(document=document, location=METADATA_URI), '9108')
 
-    assert exc.value.exit_code == 2
-    err = capsys.readouterr().err
-    assert '1111111111111119108' in err
-    assert '2222222222222229108' in err
+    assert exc.value.ambiguous
+    listed = '\n'.join(exc.value.lines)
+    assert '1111111111111119108' in listed
+    assert '2222222222222229108' in listed
 
 
-def test_a_table_with_nothing_committed_says_so_rather_than_erroring_on_none(capsys):
+def test_a_table_with_nothing_committed_says_so_rather_than_erroring_on_none():
     document = metadata_document([], current=None)
 
-    with pytest.raises(typer.Exit) as exc:
+    with pytest.raises(Refusal) as exc:
         resolve_snapshot(TableMetadata(document=document, location=METADATA_URI), None)
 
-    assert exc.value.exit_code == 1
-    assert 'nothing has been committed' in capsys.readouterr().err
+    assert not exc.value.ambiguous
+    assert 'nothing has been committed' in exc.value.lines[0]
 
 
 def test_a_current_snapshot_id_of_minus_one_reads_as_no_current_snapshot():
@@ -443,14 +444,14 @@ def test_diff_with_no_arguments_compares_the_current_snapshot_to_its_parent():
     assert (base['snapshot-id'], target['snapshot-id']) == (SNAP_THREE, SNAP_FOUR)
 
 
-def test_diff_on_a_first_commit_refuses_rather_than_comparing_it_to_nothing(capsys):
+def test_diff_on_a_first_commit_refuses_rather_than_comparing_it_to_nothing():
     metadata = TableMetadata(document=metadata_document([snapshot(SNAP_ONE, BASE_MS)], current=SNAP_ONE), location=METADATA_URI)
 
-    with pytest.raises(typer.Exit) as exc:
+    with pytest.raises(Refusal) as exc:
         diff_endpoints(metadata, None, None)
 
-    assert exc.value.exit_code == 1
-    assert 'first commit' in capsys.readouterr().err
+    assert not exc.value.ambiguous
+    assert 'first commit' in exc.value.lines[0]
 
 
 # --- file layout ------------------------------------------------------------------------------
@@ -543,6 +544,14 @@ def test_limit_zero_asks_for_no_rows_on_every_verb(verb, monkeypatch):
     assert json.loads(result.stdout) == []
 
 
+def under_root(app: typer.Typer) -> typer.Typer:
+    """The app mounted under the root group, whose handler turns a `Refusal` into an exit."""
+    root = typer.Typer(cls=DectlGroup)
+    root.callback()(lambda: None)
+    root.add_typer(app, name='iceberg')
+    return root
+
+
 def test_a_refusal_keeps_stdout_clean_for_a_json_reader(monkeypatch):
     # Every one of these verbs takes --json, so a caller pipes stdout into jq. A refusal printed
     # there is a parse error instead of a message.
@@ -550,11 +559,26 @@ def test_a_refusal_keeps_stdout_clean_for_a_json_reader(monkeypatch):
     monkeypatch.setattr('dectl.commands.iceberg.make_session', lambda _config: FakeSession(FakeGlue(), FakeS3()))
     app = make_iceberg_app('proj', config.pipelines['proj'], config)
 
-    result = runner.invoke(app, ['events', 'snapshots', '--json'])
+    result = runner.invoke(under_root(app), ['iceberg', 'events', 'snapshots', '--json'])
 
     assert result.exit_code == 1
     assert result.stdout == ''
     assert 'no table lakehouse.events' in result.stderr
+
+
+def test_an_ambiguous_handle_exits_2_rather_than_1(monkeypatch):
+    # A usage error and a refusal are told apart by their code, so a script retrying on 1 does not
+    # retry a handle that will match two snapshots every time.
+    document = metadata_document(
+        [snapshot(1111111111111119108, BASE_MS), snapshot(2222222222222229108, BASE_MS + HOUR_MS)],
+        current=2222222222222229108,
+    )
+    app, _, _ = make_app(document, monkeypatch)
+
+    result = runner.invoke(under_root(app), ['iceberg', 'events', 'diff', '9108', '--json'])
+
+    assert result.exit_code == 2
+    assert result.stdout == ''
 
 
 def test_diff_json_carries_the_commits_and_the_counter_changes(monkeypatch):
