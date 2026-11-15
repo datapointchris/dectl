@@ -460,7 +460,9 @@ def test_diff_on_a_first_commit_refuses_rather_than_comparing_it_to_nothing():
 def test_file_rows_walk_back_from_the_named_snapshot():
     metadata = load(four_commit_table())
 
-    rows = file_rows(metadata, metadata.by_id(SNAP_THREE), 10)
+    snapshot = metadata.by_id(SNAP_THREE)
+    assert snapshot is not None
+    rows = file_rows(metadata, snapshot, 10)
 
     assert [row['snapshot_id'] for row in rows] == [SNAP_THREE, SNAP_TWO, SNAP_ONE]
     assert rows[0]['data_files'] == 11
@@ -473,7 +475,9 @@ def test_file_rows_walk_back_from_the_named_snapshot():
 def test_snapshot_json_carries_integers_and_the_refs_pointing_at_it():
     metadata = load(four_commit_table())
 
-    data = snapshot_to_dict(metadata, metadata.by_id(SNAP_THREE))
+    snapshot = metadata.by_id(SNAP_THREE)
+    assert snapshot is not None
+    data = snapshot_to_dict(metadata, snapshot)
 
     assert data['snapshot_id'] == SNAP_THREE
     assert data['parent_snapshot_id'] == SNAP_TWO

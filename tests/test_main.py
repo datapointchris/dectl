@@ -5,10 +5,12 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 import typer
 from rich.text import Text
+from typer.core import TyperGroup
 
 import dectl.main
 from dectl.commands.glue import make_glue_app
@@ -94,6 +96,7 @@ def test_the_reserved_pipeline_names_are_the_root_commands():
     # the root command then hides that pipeline with no error.
     root = typer.main.get_command(app)
 
+    assert isinstance(root, TyperGroup)
     assert set(root.commands) == GLOBAL_COMMAND_NAMES
 
 
@@ -111,6 +114,8 @@ def test_the_reserved_alias_and_action_names_are_each_apps_own_commands():
     s3 = typer.main.get_command(make_s3_app('proj', pipeline, config))
     jenkins = typer.main.get_command(make_jenkins_app('proj', pipeline, config))
 
+    assert isinstance(s3, TyperGroup)
+    assert isinstance(jenkins, TyperGroup)
     assert set(s3.commands) - set(pipeline.buckets) == S3_SET_VERBS
     assert set(jenkins.commands) - set(pipeline.jenkins.actions) == JENKINS_READ_VERBS
 
@@ -212,7 +217,7 @@ def test_env_json_carries_every_default_the_human_view_shows(monkeypatch, tmp_pa
     assert set(Defaults.model_fields) - {'environment'} <= set(published)
 
 
-def limit_params(command, path: tuple[str, ...] = ()) -> list[tuple[str, object]]:
+def limit_params(command, path: tuple[str, ...] = ()) -> list[tuple[str, Any]]:
     """Every `--limit` in a command tree, with the path it sits on.
 
     Walked rather than listed, because a resource added with its own `--limit` is covered by

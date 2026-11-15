@@ -1,4 +1,5 @@
 import json
+from typing import Any
 
 import pytest
 
@@ -86,7 +87,7 @@ def test_json_carries_the_resolved_path_of_every_declared_path():
     not_alias_keyed = {'pipeline', 'resolve_paths_from', 'monitor', 'jenkins'}
     assert not_alias_keyed <= set(data)
 
-    published = set()
+    published: set[tuple[str, str, str]] = set()
     for resource, aliases in data.items():
         if resource in not_alias_keyed:
             continue
@@ -108,7 +109,7 @@ def test_json_carries_the_resolved_path_of_every_declared_path():
 # it — the worker pair is refused one half at a time. Looked up by the parametrize below rather
 # than iterated, so a field added to either declaration arrives here as a KeyError naming it
 # instead of as a field this guard silently never probed.
-RENDERER_PROBES = {
+RENDERER_PROBES: dict[str, dict[str, Any]] = {
     'max_capacity': {'max_capacity': 0.0625},
     'worker_type': {'worker_type': 'G.8X', 'number_of_workers': 7},
     'number_of_workers': {'worker_type': 'G.8X', 'number_of_workers': 7},

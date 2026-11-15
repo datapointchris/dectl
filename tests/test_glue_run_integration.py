@@ -23,6 +23,7 @@ environment, with DECTL_IT_AWS_PROFILE / DECTL_IT_REGION overrides.
 
 import time
 import uuid
+from typing import Any
 
 import botocore.exceptions
 import pytest
@@ -62,7 +63,7 @@ def script_location(session, marker):
     )
 
     s3 = session.client('s3')
-    create_kwargs = {'Bucket': bucket}
+    create_kwargs: dict[str, Any] = {'Bucket': bucket}
     if session.region_name != 'us-east-1':
         create_kwargs['CreateBucketConfiguration'] = {'LocationConstraint': session.region_name}
     s3.create_bucket(**create_kwargs)

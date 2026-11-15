@@ -451,6 +451,7 @@ def test_lambda_deploy_publishes_the_zip_and_moves_the_alias(monkeypatch, tmp_pa
     result = runner.invoke(app, ['notifier', 'deploy', '--publish'], catch_exceptions=False)
 
     assert result.exit_code == 0
+    assert client.code is not None
     with zipfile.ZipFile(io.BytesIO(client.code)) as archive:
         assert archive.namelist() == ['handler.py']
     assert client.published == ['salesdata-dev-notifier']

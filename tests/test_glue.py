@@ -1,5 +1,6 @@
 import copy
 from pathlib import Path
+from typing import Any
 
 import pytest
 import typer
@@ -36,7 +37,7 @@ class FakeGlueClient:
 
     def __init__(self, existing_job):
         self.existing_job = existing_job
-        self.captured_update = None
+        self.captured_update: dict[str, Any] | None = None
         self.refusal = None
 
     def get_job(self, JobName):
@@ -52,6 +53,11 @@ class FakeGlueClient:
             raise self.refusal
         self.captured_update = JobUpdate
         return {}
+
+    @property
+    def update(self) -> dict[str, Any]:
+        assert self.captured_update is not None, 'the deploy sent no UpdateJob'
+        return self.captured_update
 
 
 class FakeSession:
@@ -92,7 +98,7 @@ def test_configured_connections_replace_rather_than_merge():
     glue = FakeGlueClient(existing_job=existing)
     apply(glue, make_job(connections=['new-conn']))
 
-    assert glue.captured_update['Connections'] == {'Connections': ['new-conn']}
+    assert glue.update['Connections'] == {'Connections': ['new-conn']}
 
 
 def test_empty_connections_list_detaches_every_connection():
@@ -100,7 +106,7 @@ def test_empty_connections_list_detaches_every_connection():
     glue = FakeGlueClient(existing_job=existing)
     apply(glue, make_job(connections=[]))
 
-    assert 'Connections' not in glue.captured_update
+    assert 'Connections' not in glue.update
 
 
 def test_unset_connections_leaves_the_jobs_own_connections_alone():
@@ -108,7 +114,7 @@ def test_unset_connections_leaves_the_jobs_own_connections_alone():
     glue = FakeGlueClient(existing_job=existing)
     apply(glue, make_job())
 
-    assert glue.captured_update['Connections'] == {'Connections': ['vpc-conn']}
+    assert glue.update['Connections'] == {'Connections': ['vpc-conn']}
 
 
 def test_worker_sizing_on_a_python_shell_job_is_rejected():
@@ -182,7 +188,7 @@ def test_a_new_script_location_is_reported_and_applied():
     apply(glue, make_job())
 
     assert ('Command.ScriptLocation', 's3://old-bucket/scripts/old.py', 's3://my-bucket/scripts/main.py') in changes
-    assert glue.captured_update['Command']['ScriptLocation'] == 's3://my-bucket/scripts/main.py'
+    assert glue.update['Command']['ScriptLocation'] == 's3://my-bucket/scripts/main.py'
 
 
 # One row per managed field: the live job it runs against, the config that names it, and what
@@ -271,7 +277,7 @@ def test_update_preserves_unmanaged_job_fields():
     glue = FakeGlueClient(existing_job=existing)
     apply(glue, make_job())
 
-    update = glue.captured_update
+    update = glue.update
     assert update['Timeout'] == 60
     assert update['GlueVersion'] == '3.0'
     assert update['MaxRetries'] == 2
@@ -292,7 +298,7 @@ def test_update_strips_read_only_keys():
     apply(glue, make_job())
 
     for key in ('Name', 'CreatedOn', 'LastModifiedOn', 'ProfileName', 'AllocatedCapacity'):
-        assert key not in glue.captured_update
+        assert key not in glue.update
 
 
 def test_update_merges_default_arguments_onto_existing():
@@ -303,7 +309,7 @@ def test_update_merges_default_arguments_onto_existing():
     glue = FakeGlueClient(existing_job=existing)
     apply(glue, make_job(arguments={'extra-flag': 'on'}))
 
-    args = glue.captured_update['DefaultArguments']
+    args = glue.update['DefaultArguments']
     assert args['--TempDir'] == 's3://tmp/'  # preserved from existing
     assert args['--enable-glue-datacatalog'] == 'true'  # preserved from existing
     assert args['--JOB_NAME'] == 'my-job'  # always set by dectl
@@ -641,5 +647,5 @@ def test_deploy_uploads_every_script_and_writes_the_definition(monkeypatch, tmp_
 
     assert result.exit_code == 0
     assert [(bucket, key) for _, bucket, key in session.s3.uploads] == [('salesdata-scripts', 'scripts/copy.py')]
-    assert session.glue.captured_update['Role'] == 'new-role'
-    assert session.glue.captured_update['Command']['ScriptLocation'] == 's3://salesdata-scripts/scripts/copy.py'
+    assert session.glue.update['Role'] == 'new-role'
+    assert session.glue.update['Command']['ScriptLocation'] == 's3://salesdata-scripts/scripts/copy.py'

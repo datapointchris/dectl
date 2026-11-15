@@ -3,6 +3,7 @@ import json
 import pytest
 import typer
 from botocore.exceptions import ClientError
+from typer.core import TyperGroup
 
 from dectl.asl import Suggestion
 from dectl.asl import TemplateFault
@@ -38,7 +39,10 @@ def test_plan_and_deploy_exist_only_for_a_machine_naming_its_definition_file(mac
     config = make_config({'flow': machine})
     tree = typer.main.get_command(make_sfn_app('proj', config.pipelines['proj'], config))
 
-    assert set(tree.commands['flow'].commands) == verbs
+    assert isinstance(tree, TyperGroup)
+    flow = tree.commands['flow']
+    assert isinstance(flow, TyperGroup)
+    assert set(flow.commands) == verbs
 
 
 # Each template beside what Terraform 1.10.5's templatefile rendered from it, with these vars.
