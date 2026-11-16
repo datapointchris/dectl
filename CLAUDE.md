@@ -339,15 +339,11 @@ exception: it is a few milliseconds, and the root group catches its errors.
   a durable one on the whole execution, and `--async` only on Lambda taking the event.
   `invoke_read_timeout` tells them apart, which is why it resolves after `--async` is read.
 - **A durable Lambda's unit of work is the execution**, so `durable: true` *swaps* the ordinary
-  `run`/`logs` for durable ones and adds `executions` and `history` (`add_durable_verbs`). Its
-  `run` starts an execution and prints the ARN, and `logs` takes an EXECUTION. `history` reads the
-  checkpoint log via `GetDurableExecutionHistory`; `logs` reads CloudWatch filtered on the
-  execution ARN. `GetDurableExecution` returns `Error` unwrapped, while history events wrap it in
-  a `Payload`/`Truncated` envelope.
-- **Invoking and listing need different qualifiers.** `invoke_qualifier` returns the alias, since
-  Lambda rejects an unqualified invoke of a durable function. `listing_qualifier` must return a
-  *version*: `ListDurableExecutionsByFunction` refuses an alias ("cannot filter durable executions
-  by alias"), whatever the API reference says. Merging the two functions reintroduces the bug.
+  `run`/`logs` for durable ones and adds `executions` and `history` (`add_durable_verbs`).
+  `durable.py`'s docstring maps each view to its API. `GetDurableExecution` returns `Error`
+  unwrapped, while history events wrap it in a `Payload`/`Truncated` envelope.
+- **Invoking and listing need different qualifiers, so `invoke_qualifier` and `listing_qualifier`
+  stay two functions.** Each docstring says what Lambda refuses.
 - **Resolving the alias scopes the listing to one deploy.** `sweep_executions` lists every version
   up to `VERSION_SWEEP_DEPTH` and returns the versions it scanned, so callers report the span.
   `executions --all-versions` uses it, and `resolve_execution` falls back to it.
@@ -396,10 +392,8 @@ exception: it is a few milliseconds, and the root group catches its errors.
   Step Functions refuse a revision someone else wrote since dectl read or updated it. `run` starts
   the unqualified machine, which is the latest revision, so it never needs `--publish`.
 - **Log tailing follows by time, not by stream.** Every tailer polls whole log groups through
-  `LogGroupCursor`. Lambda writes each execution environment to a new stream, and Glue creates its
-  error stream only on first stderr write. `tail_glue_run` isolates a run with
-  `logStreamNamePrefix=<run id>`. Waiting for streams via `describe_log_streams` costs minutes of
-  silence and misses a later-created error stream.
+  `LogGroupCursor`, and `tail_glue_run` isolates a run by stream prefix rather than waiting for its
+  streams. Both docstrings say why following streams misses events.
 
 **Config and output**
 
@@ -425,17 +419,15 @@ exception: it is a few milliseconds, and the root group catches its errors.
 
 **Iceberg**
 
-- **A gzipped metadata file is named `<name>.gz.metadata.json`.** Java's `TableMetadataParser`
-  writes that form, and it is the only one pyiceberg decompresses. `.metadata.json.gz` is the
-  legacy spelling Java still reads. `GZIP_SUFFIXES` carries both, because the catalog decides which
-  one it points at.
+- **A gzipped metadata file has two spellings, and `GZIP_SUFFIXES` accepts both.** The comment
+  above it says which writer produces which.
 - **Every Iceberg summary counter is a string**, so `total-records` arrives as `'2000'`. Every read
   goes through `summary_int`, and the fixtures write strings so a non-coercing reader fails.
-- **Glue holds a pointer, not the state.** `table_type` and `metadata_location` are all it knows. A
-  table missing either is not an Iceberg table, and dectl says so rather than raising a `KeyError`.
-- **The metadata file is the floor.** Everything below it is Avro, so `files` reports per-snapshot
-  summary counters. Reading Avro would mean pyiceberg plus pyarrow or s3fs, more than doubling the
-  install and slowing every invocation.
+- **A Glue table missing `table_type` or `metadata_location` is not an Iceberg table**, and dectl
+  says so rather than raising a `KeyError`. `iceberg.py`'s docstring says why Glue holds no more.
+- **The metadata file is the floor**, as `iceberg.py`'s docstring says. Reading the Avro below it
+  would mean pyiceberg plus pyarrow or s3fs, more than doubling the install and slowing every
+  invocation.
 - **The lineage and the log answer different questions.** A rollback appends a `snapshot-log`
   entry and changes no parent pointer. `history`'s `ancestor` column is the only place it shows.
 - **A `diff` that could not reach its base reports no commits at all**: `linear` is false and the
