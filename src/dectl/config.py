@@ -900,9 +900,8 @@ def pipeline_value_faults(
     problems: list[UnusableValue] = []
 
     # First, because a root that is not rooted resolves against the working directory and every
-    # path under it lands somewhere this cannot predict. Reported rather than raised at load: a
-    # schema failure refuses every command of its pipeline, so the likeliest first spelling of a
-    # new key would blank the commands that explain it.
+    # path under it lands somewhere this cannot predict. Reported rather than raised at load, for
+    # the reason `key_fault` gives.
     if pipeline.resolve_paths_from is not None:
         fault = root_fault(pipeline.resolve_paths_from)
         if fault:

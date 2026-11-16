@@ -124,8 +124,8 @@ def render_env_model[ModelT: BaseModel](model: ModelT) -> ModelT:
     rather than left to escape because the alternative is a pydantic traceback and a docs URL
     naming the model rather than the key the reader typed.
 
-    The construct that would make it reachable is a field validator, which `key_fault` and
-    `root_fault` each explain is deliberately absent — a spelling check written as one blanks
+    The construct that would make it reachable is a field validator, which `key_fault`'s
+    docstring explains is deliberately absent — a spelling check written as one blanks
     the pipeline tree at load. So this arm is a backstop for a failure the design excludes, not
     a handler for one it expects, and a test builds a model carrying a validator to drive it."""
     data = model.model_dump()

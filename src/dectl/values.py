@@ -473,9 +473,7 @@ def root_fault(configured: str) -> ConfigFault | None:
     exists to remove — and silently, because it looks correct from the one directory it was
     written in. An empty one is the same thing spelled shorter.
 
-    Reported rather than raised, for the reason every other spelling check is. A schema failure
-    refuses every command of its pipeline, including the ones that would name the problem — so
-    the likeliest first spelling of a brand-new key would blank the commands that explain it.
+    Reported rather than raised at load, for the reason `key_fault` gives.
     `{env}` is replaced with a plain name rather than substituted,
     because the active environment is not known at load; a leading token reads as relative,
     which is what it is."""
