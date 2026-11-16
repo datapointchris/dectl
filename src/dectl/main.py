@@ -414,7 +414,13 @@ def main(
         typer.Option(
             '--env',
             envvar='DECTL_ENV',
-            help='Environment substituted for {env} in resource names. Priority: --env > DECTL_ENV > config > dev.',
+            # The default is read from the config when the tree is built, so a static
+            # `[default: ...]` would name the wrong environment under DECTL_ENV.
+            show_default=False,
+            help=(
+                'Environment substituted for {env} in resource names. Priority: --env > DECTL_ENV > config > dev. '
+                '"dectl env" prints the active one and where it came from.'
+            ),
         ),
     ] = DEFAULT_ENVIRONMENT,
     no_input: Annotated[
