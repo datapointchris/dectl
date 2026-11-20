@@ -146,7 +146,8 @@ The scheme assumes one AWS account across environments. Only the names change.
 
 A name that hardcodes its environment ignores `--env`. A deploy with `--env prod` against a name
 spelled `my-dev-function` acts on dev and succeeds. So when `--env` or `DECTL_ENV` was set and the
-resource carries no `{env}`, dectl warns once on stderr that the environment changed nothing.
+names a command resolves carry no `{env}`, dectl warns once on stderr that the environment changed
+nothing.
 
 ## `glue` — a deploy pushes the script and confirms any change to the definition
 

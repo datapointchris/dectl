@@ -85,16 +85,20 @@ def warn_if_environment_had_no_effect(value: Any) -> None:
     Substitution is a literal {env} replacement, so a resource whose config hardcodes its
     environment ignores --env / DECTL_ENV entirely and quietly acts on whatever env its names
     spell out. That failure is invisible — the command succeeds against the wrong environment —
-    so say it out loud. Warned once per invocation, since every verb resolves its config here."""
+    so say it out loud.
+
+    Every path that resolves AWS names calls it, so `value` may be one resource, one bucket,
+    every bucket, the monitored log groups or a whole pipeline. It warns once per invocation and
+    the first call decides, so the sentence names the command's names rather than any one resource."""
     if active_environment.source not in EXPLICIT_ENV_SOURCES:
         return
     if contains_env_placeholder(value) or active_environment.warned_about_missing_placeholder:
         return
     active_environment.warned_about_missing_placeholder = True
     warn(
-        f"{active_environment.source}={active_environment.name} changed nothing: this resource's config has no "
-        f'{ENV_PLACEHOLDER} placeholder, so its AWS names are used exactly as written and the environment you '
-        'asked for is ignored. Run "dectl PIPELINE list" to see the names being targeted.'
+        f'{active_environment.source}={active_environment.name} changed nothing: none of the AWS names this '
+        f'command resolves carries a {ENV_PLACEHOLDER} placeholder, so they are used exactly as written and the '
+        'environment you asked for is ignored. Run "dectl PIPELINE list" to see the names being targeted.'
     )
 
 
